@@ -73,7 +73,7 @@ You can omit `new` or `existing`; the inspector detects whether the folder is em
 Inside Claude Code:
 
 ```text
-/plugin marketplace add egecan-af/claude-development-harness
+/plugin marketplace add egecan-af/claude-code-development-harness
 /plugin install development-harness@harness-tools
 /reload-plugins
 ```
