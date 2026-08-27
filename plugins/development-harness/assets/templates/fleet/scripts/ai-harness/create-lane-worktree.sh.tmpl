@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  create-lane-worktree.sh --repo /path/to/repo --lane lane-a [--base SHA]
+
+Creates a detached Git worktree next to the repository.
+It does not run Codex, commit, merge, or delete anything.
+EOF
+}
+
+REPO=""
+LANE=""
+BASE="HEAD"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO="$2"; shift 2 ;;
+    --lane) LANE="$2"; shift 2 ;;
+    --base) BASE="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+[[ -n "$REPO" && -n "$LANE" ]] || { usage; exit 2; }
+REPO="$(cd "$REPO" && pwd)"
+git -C "$REPO" rev-parse --show-toplevel >/dev/null
+
+PARENT="$(dirname "$REPO")"
+NAME="$(basename "$REPO")"
+TARGET="$PARENT/${NAME}-${LANE}"
+
+if [[ -e "$TARGET" ]]; then
+  echo "Target already exists: $TARGET" >&2
+  exit 1
+fi
+
+git -C "$REPO" worktree add --detach "$TARGET" "$BASE"
+echo "Created: $TARGET"

@@ -1,0 +1,82 @@
+---
+name: harness-codex-fleet
+description: Orchestrate multiple independent Codex implementation or review lanes with explicit ownership, worktree isolation, bounded concurrency, lane acceptance checks, and a single integration gate. Use only for complex work whose lanes are genuinely independent.
+---
+
+# Codex Fleet
+
+Do not use a fleet when one delegate can complete the work reliably.
+
+## Preconditions
+
+- accepted architecture and lane decomposition,
+- a green or explicitly understood baseline gate,
+- clean or intentionally preserved Git state,
+- lane briefs with OWNS and MUST-NOT-TOUCH,
+- Git worktrees for parallel writes,
+- one integration owner.
+
+## Lane contract
+
+Every `.ai/runs/<mission>/lane-<id>.md` must contain:
+
+- goal,
+- pinned base revision,
+- OWNS,
+- MUST-NOT-TOUCH and sibling owners,
+- self-contained context,
+- acceptance criteria,
+- targeted verification,
+- completion/failure report format.
+
+A Codex lane cannot see the main conversation. Its brief is the full contract.
+
+## Execution
+
+Default to 2–4 lanes. Start only genuinely independent lanes concurrently and stagger launches slightly.
+
+Read/review lane:
+
+```bash
+codex exec \
+  -C "<lane-directory>" \
+  --sandbox read-only \
+  -c model_reasoning_effort={{codex_reasoning}} \
+  - < "<lane-brief>"
+```
+
+Write lane in its own worktree:
+
+```bash
+codex exec \
+  -C "<lane-worktree>" \
+  --sandbox workspace-write \
+  -c model_reasoning_effort={{codex_reasoning}} \
+  - < "<lane-brief>"
+```
+
+Use the user's configured model. Do not add bypass flags, broad access, or network by default. On macOS, use `caffeinate -i` for a long foreground process when machine sleep is a real risk.
+
+## Isolation
+
+Create write worktrees with:
+
+```bash
+scripts/ai-harness/create-lane-worktree.sh \
+  --repo "${CLAUDE_PROJECT_DIR}" \
+  --lane "<lane-id>" \
+  --base "<base-sha>"
+```
+
+Never let multiple write lanes share a checkout. Declare one owner for shared or append-only files.
+
+## Evidence and integration
+
+A lane's completion message is a claim. The orchestrator must:
+
+1. inspect each lane diff or commit,
+2. run the lane's targeted check,
+3. integrate one lane at a time,
+4. run the full gate after risky integrations and after all lanes,
+5. repair only cross-lane integration issues in the main lane,
+6. archive or remove transient run state after integration.

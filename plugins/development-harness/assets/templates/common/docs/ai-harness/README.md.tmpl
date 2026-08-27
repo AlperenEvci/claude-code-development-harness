@@ -1,0 +1,50 @@
+# AI Development Harness
+
+Project: **{{project_name}}**  
+Tier: **{{harness_tier}}**  
+Mode: **{{harness_mode}}**
+
+## Purpose
+
+This harness makes context, delegation, artifacts, permissions, and verification explicit across Claude Code and Codex.
+
+## Roles
+
+| Role | Owns | Output |
+|---|---|---|
+| Main Claude | judgment, architecture, synthesis, spec, final gate | decisions, specs, verified result |
+{{researcher_role_row}}
+| Codex | scoped implementation | diff and check results |
+{{reviewer_role_row}}
+
+## Task routing
+
+- Trivial: direct change and direct check.
+- Standard: optional research → synthesis → spec → Codex → independent verification.
+- Complex: parallel read-only research → decisions → bounded specs → isolated write lanes → integration gate.
+
+## Files
+
+- `AGENTS.md`: shared engineering contract.
+- `CLAUDE.md`: Claude-specific orchestration.
+- `.claude/agents/`: isolated Claude workers.
+- `.claude/skills/`: on-demand workflows.
+- `.ai/`: project memory and handoff artifacts.
+
+## Project-specific extensions
+
+{{custom_components_markdown}}
+
+## Installation policy
+
+The generated installer is non-destructive by default. Always run dry-run first. New-files-only mode skips conflicts. Backup-and-overwrite mode requires an explicit flag.
+
+## Maintenance
+
+Update the smallest relevant surface when:
+
+- the same failure happens twice,
+- commands or architecture change,
+- a rule becomes stale,
+- context files grow too large,
+- orchestration cost exceeds value.

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "development-harness",
+  "version": "0.1.0",
+  "description": "Inspect the current repository and safely install a project-specific Claude Code + Codex development harness.",
+  "author": {
+    "name": "Egecan AF",
+    "url": "https://github.com/egecan-af"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "development-harness",
+    "agents",
+    "context-management",
+    "orchestration"
+  ],
+  "displayName": "Development Harness",
+  "defaultEnabled": true,
+  "homepage": "https://github.com/egecan-af/claude-code-development-harness",
+  "repository": "https://github.com/egecan-af/claude-code-development-harness"
+}

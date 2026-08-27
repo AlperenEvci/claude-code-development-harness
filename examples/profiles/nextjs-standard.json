@@ -1,0 +1,51 @@
+{
+  "project_name": "Example Next.js Product",
+  "project_summary": "A production-oriented Next.js application with meaningful business rules and recurring Claude Code + Codex development work.",
+  "project_stage": "mvp",
+  "harness_mode": "adopt",
+  "harness_tier": "standard",
+  "languages": ["TypeScript"],
+  "frameworks": ["Next.js", "React"],
+  "package_manager": "npm",
+  "repository_shape": "single-app",
+  "important_paths": [
+    "src/app - application routes and server actions",
+    "src/components - reusable UI",
+    "src/lib - domain and integration logic",
+    "test - automated tests"
+  ],
+  "install_command": "npm ci",
+  "dev_command": "npm run dev",
+  "test_command": "npm test",
+  "typecheck_command": "npm run typecheck",
+  "lint_command": "npm run lint",
+  "build_command": "npm run build",
+  "full_gate_command": "npm run lint && npm run typecheck && npm test && npm run build",
+  "main_orchestrator": "claude-code",
+  "implementation_delegate": "codex-cli",
+  "research_model": "opus",
+  "review_model": "inherit",
+  "codex_reasoning": "high",
+  "autonomy": "repository-write-with-approval",
+  "network_access": "deny-by-default",
+  "hooks_policy": "disabled",
+  "git_workflow": "feature-branches",
+  "agent_commit_policy": "no-commit",
+  "parallel_writes": false,
+  "risk_level": "normal",
+  "sensitive_areas": [],
+  "project_rules": [
+    "Business logic must remain outside UI components.",
+    "Reuse existing repository patterns before introducing abstractions."
+  ],
+  "do_not_rules": [
+    "Do not add dependencies without justification.",
+    "Do not push, deploy, publish, or alter production systems."
+  ],
+  "scoped_rules": [],
+  "additional_skills": [],
+  "additional_agents": [],
+  "commit_ai_reports": true,
+  "commit_ai_runs": false,
+  "generated_language": "English"
+}

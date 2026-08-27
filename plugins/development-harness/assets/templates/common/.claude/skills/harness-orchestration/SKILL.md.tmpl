@@ -1,0 +1,71 @@
+---
+name: harness-orchestration
+description: Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, Codex implementation, and independent verification. Skip the full pipeline for trivial obvious edits.
+---
+
+# Orchestrated Development
+
+The main Claude session owns ambiguity resolution, architecture, synthesis, specification, integration, and the final gate.
+
+## Classify before acting
+
+### Trivial
+
+Examples: typo, obvious copy change, tiny style adjustment, or a bounded one-line fix with direct verification.
+
+1. Inspect the relevant file.
+2. Make or delegate the small change.
+3. Run the smallest relevant check.
+4. Report the diff and result.
+
+Do not create reports, decisions, specs, or fleet state unless the task reveals a larger problem.
+
+### Standard
+
+Use when behavior spans files, existing patterns matter, or business logic changes.
+
+1. Inspect only relevant `.ai/` artifacts.
+2. {{researcher_instruction}}
+3. Synthesize evidence in the main session.
+4. Record a report or decision only when it will remain useful.
+5. Write `.ai/specs/current-task.md` as a self-contained execution contract.
+6. Invoke `harness-codex-delegate` when the contract is complete.
+7. Inspect the actual diff and independently verify each acceptance criterion. {{reviewer_instruction}}
+
+### Complex
+
+Use for architecture, broad migrations, cross-domain state, high-risk paths, or genuinely independent implementation surfaces.
+
+1. Split reconnaissance by question, not arbitrary file count.
+2. Gather read-only reports in isolated contexts.
+3. Resolve conflicts and trade-offs in the main session.
+4. Write one accepted decision set and bounded specs.
+5. {{fleet_instruction}}
+6. Use worktrees for concurrent writes.
+7. Integrate through one orchestrator and run one full integration gate.
+
+## Artifact semantics
+
+- **Report:** evidence about what exists.
+- **Decision:** accepted durable choice.
+- **Spec:** self-contained execution contract.
+- **Run ledger:** temporary coordination state.
+- **Backlog:** resumable unfinished state.
+
+Do not paste raw logs or full file dumps into durable artifacts.
+
+## Specification gate
+
+A delegate that cannot see the original conversation must be able to execute from the spec alone. Include:
+
+- goal and current context,
+- explicit behavior,
+- OWNS and MUST-NOT-TOUCH scope,
+- constraints and relevant decisions,
+- observable acceptance criteria,
+- exact verification commands,
+- completion report format.
+
+## Verification
+
+A delegate's completion message is a claim, not proof. Inspect the actual diff and run exact commands from `AGENTS.md` and the spec. When the same delegate wrote both behavior and tests, add an independent acceptance probe for important behavior.

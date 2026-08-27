@@ -1,0 +1,55 @@
+# Project Engineering Contract
+
+## Project
+
+**{{project_name}}**
+
+{{project_summary}}
+
+Stage: `{{project_stage}}`  
+Repository shape: `{{repository_shape}}`
+
+## Stack
+
+{{stack_markdown}}
+
+## Important paths
+
+{{important_paths_markdown}}
+
+## Commands
+
+{{commands_markdown}}
+
+## Engineering rules
+
+{{project_rules_markdown}}
+
+## Do not
+
+{{do_not_rules_markdown}}
+
+## Definition of done
+
+For meaningful code changes:
+
+1. Inspect the actual diff.
+2. Run the smallest relevant check while iterating.
+3. Run the configured full gate before declaring completion.
+4. Report any check that could not run and why.
+5. Preserve pre-existing human changes.
+
+## Git and delivery
+
+- Workflow: {{git_workflow}}
+- Agent commit policy: {{agent_commit_policy}}
+- Agents do not push, deploy, publish, or alter production systems unless explicitly authorized.
+- Uncommitted changes that predate the task are not owned by the agent.
+
+## Safety
+
+- Autonomy: {{autonomy}}
+- Network: {{network_access}}
+- Risk level: {{risk_level}}
+- Never read or write secrets into prompts, reports, logs, or committed files.
+{{sensitive_areas_section}}
