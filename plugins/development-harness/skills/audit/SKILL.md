@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Audit a repository's Claude Code and Codex harness, including AGENTS.md, CLAUDE.md, skills, subagents, permissions, context strategy, artifacts, routing, and verification gates. Read-only and explicitly invoked.
+description: Audit a repository's Claude Code development harness, including optional Codex plugin/CLI transport, AGENTS.md, CLAUDE.md, skills, subagents, permissions, context strategy, artifacts, routing, and verification gates. Read-only and explicitly invoked.
 argument-hint: "[optional focus: context bloat, routing, safety, drift, or fleet readiness]"
 disable-model-invocation: true
 compatibility: "Claude Code 2.1.196+, Python 3.10+, and Git"
@@ -12,9 +12,6 @@ allowed-tools:
   - Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_installed.py *)
   - Bash(git status --short)
   - Bash(git diff -- *)
-disallowed-tools:
-  - Write
-  - Edit
 ---
 
 # Development Harness Audit
@@ -46,7 +43,7 @@ Read relevant safe harness surfaces only:
 - `.agents/skills/`, `.ai/`, harness docs and scripts,
 - package scripts, CI gates, Git policy, and architecture sources of truth.
 
-Prefer the `development-harness:project-profiler` subagent for broad mapping; use the built-in Explore agent only as a fallback. Keep raw search output out of the main context.
+Use an Explore subagent for broad mapping when needed; keep raw search output out of the main context.
 
 Read:
 
@@ -58,13 +55,13 @@ Read:
 
 1. **Accuracy** — commands, paths, architecture, and tool claims match repository evidence.
 2. **Context economy** — always-loaded files are concise; procedures live in skills; scoped rules are scoped.
-3. **Role clarity** — orchestrator, researcher, implementer, reviewer, and fleet responsibilities are not duplicated.
+3. **Role clarity** — orchestrator, researcher, configured implementation transport, reviewer, and fleet responsibilities are not duplicated.
 4. **Artifact semantics** — reports, decisions, specs, backlog, and run state have distinct jobs.
 5. **Complexity routing** — trivial work bypasses the expensive pipeline.
 6. **Verification** — delegate claims are checked against observable acceptance criteria.
 7. **Safety** — no silent overwrite, bypass permission, secret exposure, automatic push/deploy, or unjustified network access.
 8. **Precedence** — generic names are not unintentionally shadowed.
-9. **Fleet readiness** — parallel writes require independent ownership, worktrees, bounded concurrency, and a reliable integration gate.
+9. **Fleet readiness** — parallel writes require direct Codex CLI, independent ownership, worktrees, bounded concurrency, and a reliable integration gate in version 0.2.
 10. **Maintenance** — stale rules, duplication, dead artifacts, and oversized memory files are identified.
 
 ## Return

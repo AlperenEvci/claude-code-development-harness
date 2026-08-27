@@ -1,13 +1,13 @@
 # Acknowledgments
 
-This project was shaped by practical experiments in context-isolated coding-agent orchestration:
+This project adapts a context-management pattern in which the main model retains judgment, architecture, synthesis, and specification while separate workers gather codebase evidence or execute bounded contracts.
 
-- a scarce main model retaining architecture, judgment, synthesis, and specification,
-- read-only agents gathering evidence in separate contexts,
-- Codex executing complete contracts rather than re-deciding product intent,
-- explicit reports, decisions, specs, backlog, and run ledgers carrying state between sessions,
-- Git worktrees and ownership contracts isolating parallel write lanes.
+The initial design was informed by:
 
-The initial design discussion was informed by the `fable-orchestration` and `codex-fleet` skill materials reviewed during development. The Codex fleet material credits Avenox for its original operational patterns.
+- the supplied “Context'i Yanlış Kullanıyorsunuz — Ben Böyle Yapıyorum” Claude Code/Codex transcript,
+- the supplied `fable-orchestration` delegation policy,
+- the supplied `codex-fleet` skill, credited in that source to Avenox,
+- official Claude Code documentation for skills, subagents, rules, permissions, plugins, and marketplaces,
+- official Codex documentation for non-interactive execution and sandboxing.
 
-The plugin structure follows the public Claude Code plugin, marketplace, skill, subagent, and memory conventions. Codex delegation uses the local Codex CLI and an explicit self-contained specification.
+The implementation in this repository was rewritten as a conservative, project-specific bootstrap plugin with deterministic rendering, conflict-aware installation, bounded permissions, and independent validation.

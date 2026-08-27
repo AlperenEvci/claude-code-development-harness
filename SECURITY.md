@@ -15,7 +15,6 @@ Repository contents are treated as potentially untrusted evidence during inspect
 
 The repository inspector may report secret-bearing filenames, but it does not emit their contents. Generated files are staged under `${CLAUDE_PLUGIN_DATA}` before any target-repository write. The installer defaults to dry-run and requires explicit operator choice before replacement; replacement creates backups.
 
-
 Project-specific extension generation is privilege-bounded:
 
 - generated skills do not contain `allowed-tools`,

@@ -14,14 +14,15 @@ For non-trivial tasks:
 4. Synthesize evidence in the main session.
 5. Record durable findings or decisions under `.ai/`.
 6. Write a self-contained implementation spec before delegating precise implementation.
-7. Use Codex for scoped execution when configured.
+7. {{working_model_execution_step}}
 8. Independently inspect and verify the result.
 
 Do not run the full pipeline for obvious one-line changes.
-
+{{project_startup_section}}
 ## Project knowledge
 
 - `.ai/backlog.md`: unfinished work
+{{project_context_taxonomy_line}}
 - `.ai/reports/`: codebase evidence and research
 - `.ai/decisions/`: accepted durable decisions
 - `.ai/specs/`: self-contained execution contracts
@@ -34,12 +35,12 @@ Load only relevant artifacts. Do not bulk-read the whole `.ai/` tree.
 
 - Main Claude: ambiguity resolution, architecture, trade-offs, synthesis, spec, final verification.
 - Research path: {{researcher_role_text}}
-- Codex delegate: implementation against an explicit contract.
+{{implementation_role_line}}
 - Review path: {{reviewer_role_text}}
 
 Research model: `{{research_model}}`  
 Review model: `{{review_model}}`  
-Codex reasoning default: `{{codex_reasoning}}`
+{{codex_reasoning_line}}
 
 ## Safety
 

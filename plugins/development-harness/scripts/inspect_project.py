@@ -43,6 +43,8 @@ IGNORED_DIRS = {
     ".cache",
 }
 
+BENIGN_GREENFIELD_FILES = {".DS_Store", "Thumbs.db", ".gitkeep"}
+
 SECRET_FILENAMES = {
     ".env",
     ".env.local",
@@ -342,6 +344,78 @@ def detect_repo_shape(root: Path, package: dict[str, Any] | None) -> str:
     return "unknown"
 
 
+def classify_project_state(
+    top_level: list[dict[str, str]],
+    manifests: list[str],
+    language_counts: Counter[str],
+    existing_harness: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify whether setup is entering a blank, minimal, or existing project.
+
+    A README, a short product brief, or editor metadata should not force an
+    empty-folder user into the existing-repository interview. The result is a
+    recommendation only; an explicit user statement remains authoritative.
+    """
+
+    meaningful = [
+        item
+        for item in top_level
+        if item.get("name") not in BENIGN_GREENFIELD_FILES
+    ]
+    names = {str(item.get("name", "")).lower() for item in meaningful}
+    has_manifest = bool(manifests)
+    source_file_count = sum(language_counts.values())
+    has_source = source_file_count > 0
+    has_harness = bool(existing_harness)
+
+    planning_only_names = {
+        "readme",
+        "readme.md",
+        "project.md",
+        "brief.md",
+        "idea.md",
+        "notes.md",
+        "docs",
+    }
+    planning_only = bool(meaningful) and names.issubset(planning_only_names)
+
+    if not meaningful:
+        classification = "empty"
+        reason = "No meaningful project files were detected."
+    elif not has_manifest and not has_source and not has_harness and planning_only:
+        classification = "minimal-planning"
+        reason = "Only lightweight planning or README material was detected."
+    elif has_harness and not has_manifest and not has_source:
+        classification = "harness-only"
+        reason = "Harness files exist, but no meaningful application code or manifest was detected."
+    else:
+        classification = "existing"
+        reason = "Application code, manifests, or established project structure was detected."
+
+    greenfield_candidate = classification in {"empty", "minimal-planning"}
+    suggested_mode = (
+        "create"
+        if greenfield_candidate
+        else "upgrade"
+        if has_harness
+        else "adopt"
+    )
+
+    return {
+        "classification": classification,
+        "greenfield_candidate": greenfield_candidate,
+        "suggested_harness_mode": suggested_mode,
+        "reason": reason,
+        "meaningful_top_level_count": len(meaningful),
+        "meaningful_top_level_names": sorted(
+            str(item.get("name", "")) for item in meaningful
+        )[:40],
+        "manifest_count": len(manifests),
+        "source_file_count": source_file_count,
+        "existing_harness_detected": has_harness,
+    }
+
+
 def detect_tools(root: Path) -> dict[str, Any]:
     tools: dict[str, Any] = {}
     for name in ("claude", "codex", "git", "python3"):
@@ -450,7 +524,7 @@ def main() -> None:
         }
 
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "requested_root": str(requested_root),
         "git_root": str(git_root) if git_root else None,
         "scope_relation": (
@@ -460,6 +534,9 @@ def main() -> None:
         "staging_dir": str(staging_dir),
         "scan_path": str(scan_path),
         "repository_shape": detect_repo_shape(requested_root, package),
+        "project_state": classify_project_state(
+            top_level, manifests, language_counts, existing_harness
+        ),
         "package_manager": pm,
         "package": package_summary,
         "languages": [

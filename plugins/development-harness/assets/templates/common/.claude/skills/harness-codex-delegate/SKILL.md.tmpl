@@ -1,41 +1,28 @@
 ---
 name: harness-codex-delegate
-description: Execute a complete implementation contract with the locally installed Codex CLI. Use only after `.ai/specs/current-task.md` is self-contained, scoped, and has explicit acceptance criteria and verification commands. Do not use for unresolved product or architecture decisions.
+description: {{codex_delegate_description}}
 ---
 
-# Codex Implementation Delegate
+# Implementation Delegate
 
-The main Claude session owns product judgment, architecture, and specification. Codex owns scoped implementation.
+The main Claude session owns product judgment, architecture, and specification. The configured delegate owns scoped implementation.
 
-## Gate
+## Contract gate
 
 Before execution:
 
 1. Read `.ai/specs/current-task.md`.
 2. Confirm goal, current context, scope, constraints, acceptance criteria, verification, and report format are explicit.
-3. Run `command -v codex` and `codex --version`.
-4. Inspect `git status --short`; preserve pre-existing work.
-5. Stop when the contract is materially ambiguous or the task requires network/broad-system access that the user has not approved.
+3. Inspect `git status --short` and preserve pre-existing work.
+4. Stop when the contract is materially ambiguous or the task requires network or broad-system access that the operator has not approved.
 
-## Execute
+## Configured transport
 
-From the project root:
-
-```bash
-codex exec \
-  -C "${CLAUDE_PROJECT_DIR}" \
-  --sandbox workspace-write \
-  -c model_reasoning_effort={{codex_reasoning}} \
-  - < "${CLAUDE_PROJECT_DIR}/.ai/specs/current-task.md"
-```
-
-Use the user's configured Codex model unless the user explicitly selects another one.
-
-Do not add bypass flags. Do not grant network or broad system access merely to avoid fixing the contract.
+{{codex_transport_instructions}}
 
 ## Return control
 
-After Codex exits:
+After the delegate finishes:
 
 1. Capture its concise result.
 2. Inspect the actual diff rather than trusting the summary.
@@ -43,4 +30,4 @@ After Codex exits:
 4. Return control to `harness-orchestration`.
 5. Let the main agent or `harness-code-reviewer` independently verify acceptance criteria.
 
-If Codex exits non-zero, report the failure and evidence. Do not retry blindly.
+If delegation fails, report the failure and evidence. Do not retry blindly.

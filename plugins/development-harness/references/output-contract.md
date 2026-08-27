@@ -6,6 +6,8 @@ A high-quality result is complete only when all sections below exist.
 
 State:
 
+- whether this is Greenfield, Adopt, or Upgrade,
+- for Greenfield: what is accepted intent versus unresolved or merely planned,
 - what currently exists,
 - what is missing,
 - what should be preserved,
@@ -24,7 +26,7 @@ Name each role, its context boundary, tool permissions, and output:
 |---|---|---|---|
 | Main orchestrator | judgment, synthesis, spec, final gate | noisy bulk exploration | decisions/spec/final result |
 | Researcher | evidence and mapping | implementation | report |
-| Codex delegate | scoped implementation | product decisions | diff + command results |
+| Implementation delegate | scoped execution through the configured transport | product decisions | diff + command results |
 | Reviewer | independent verification | feature editing | findings |
 
 Adapt this table to the project.
@@ -60,14 +62,14 @@ Default to dry-run. Never silently overwrite.
 
 ## 6. Verification
 
-Include product-specific checks plus harness discovery checks.
+For Greenfield context-only, verify the harness and context package without pretending application checks exist. For Greenfield ready-to-build, verify that the first contract is self-contained but do not execute it during setup. For established projects, include product-specific checks plus harness discovery checks.
 
 The smoke test should be small enough to inspect but complex enough to prove:
 
 - a skill routes the task,
 - research can run in isolated context,
 - a self-contained spec is generated,
-- Codex can execute it,
+- the configured implementation transport can execute it,
 - the main agent independently verifies it.
 
 ## 7. Maintenance

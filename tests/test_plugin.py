@@ -13,12 +13,7 @@ PLUGIN = REPO / "plugins" / "development-harness"
 SCRIPTS = PLUGIN / "scripts"
 
 
-def run(
-    *args: str,
-    cwd: Path | None = None,
-    check: bool = True,
-    timeout: int = 45,
-) -> subprocess.CompletedProcess[str]:
+def run(*args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(args),
         cwd=cwd,
@@ -26,7 +21,6 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=check,
-        timeout=timeout,
     )
 
 
@@ -70,6 +64,44 @@ def profile(tier: str) -> dict[str, object]:
     }
 
 
+def greenfield_profile(
+    tier: str = "standard", setup_depth: str = "ready-to-build"
+) -> dict[str, object]:
+    data = profile(tier)
+    data.update(
+        {
+            "project_name": "Greenfield Fixture",
+            "project_summary": "A new product with no existing application code.",
+            "project_stage": "idea",
+            "harness_mode": "create",
+            "repository_shape": "single-project",
+            "important_paths": [
+                "src - planned product source",
+                "test - planned automated tests",
+            ],
+            "greenfield_context": {
+                "setup_depth": setup_depth,
+                "problem_statement": "The target users lack a reliable way to complete the core workflow.",
+                "target_users": ["Primary operators"],
+                "primary_outcome": "The user completes the core workflow end to end.",
+                "mvp_goals": ["Deliver one working vertical slice"],
+                "non_goals": ["No advanced analytics"],
+                "core_workflows": ["Create and complete the primary work item"],
+                "architecture_assumptions": ["Start as one deployable application"],
+                "technical_constraints": ["No production secrets"],
+                "external_integrations": [],
+                "deployment_target": "Managed hosting",
+                "initial_milestones": ["Scaffold and verify the first slice"],
+                "open_questions": [],
+                "blocking_questions": [],
+                "create_root_readme": True,
+                "git_initialization": "after-harness",
+            },
+        }
+    )
+    return data
+
+
 class PluginStructureTests(unittest.TestCase):
     def test_manifests_are_valid_json_and_paths_exist(self) -> None:
         marketplace = json.loads((REPO / ".claude-plugin" / "marketplace.json").read_text())
@@ -82,14 +114,7 @@ class PluginStructureTests(unittest.TestCase):
         manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
         self.assertEqual(manifest["name"], "development-harness")
         self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
-
-        profiler = PLUGIN / "agents" / "project-profiler.md"
-        self.assertTrue(profiler.is_file())
-        profiler_text = profiler.read_text()
-        self.assertIn("name: project-profiler", profiler_text)
-        self.assertIn("model: sonnet", profiler_text)
-        self.assertNotIn("permissionMode:", profiler_text)
-        self.assertNotIn("  - Bash", profiler_text)
+        self.assertEqual(manifest["version"], "0.2.0")
 
     def test_plugin_skills_are_explicit_and_reference_existing_scripts(self) -> None:
         for skill_name in ("setup", "audit"):
@@ -104,11 +129,13 @@ class PluginStructureTests(unittest.TestCase):
             self.assertIn(script, setup)
             self.assertTrue((SCRIPTS / script).is_file())
         self.assertIn("${CLAUDE_PLUGIN_DATA}/workspaces/*/generated/install-harness.sh", setup)
-        self.assertIn("development-harness:project-profiler", setup)
-
-        audit = (PLUGIN / "skills" / "audit" / "SKILL.md").read_text()
-        self.assertIn("disallowed-tools:", audit)
-        self.assertIn("development-harness:project-profiler", audit)
+        self.assertIn("claude plugin list --json", setup)
+        self.assertIn("codex-plugin", setup)
+        self.assertIn("claude-only", setup)
+        self.assertIn("Greenfield", setup)
+        self.assertIn("project_state", setup)
+        self.assertIn("context-only", setup)
+        self.assertIn("ready-to-build", setup)
 
     def test_no_accidental_double_harness_prefix(self) -> None:
         needle = "harness-" + "harness"
@@ -169,6 +196,8 @@ class InspectorTests(unittest.TestCase):
             self.assertIn(".env.local", scan["secret_file_names_only"])
             self.assertTrue(Path(scan["scan_path"]).is_file())
             self.assertTrue(str(Path(scan["scan_path"])).startswith(str(data)))
+            self.assertEqual(scan["project_state"]["classification"], "existing")
+            self.assertEqual(scan["project_state"]["suggested_harness_mode"], "adopt")
 
     def test_inspector_does_not_follow_repository_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -204,6 +233,47 @@ class InspectorTests(unittest.TestCase):
             package_item = next(item for item in scan["top_level"] if item["name"] == "package.json")
             self.assertEqual(package_item["kind"], "symlink")
 
+    def test_inspector_classifies_empty_folder_as_greenfield(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            project = temp_path / "blank-project"
+            data = temp_path / "data"
+            project.mkdir()
+            result = run(
+                "python3",
+                str(SCRIPTS / "inspect_project.py"),
+                "--root",
+                str(project),
+                "--data-root",
+                str(data),
+            )
+            scan = json.loads(result.stdout)
+            state = scan["project_state"]
+            self.assertEqual(scan["schema_version"], 2)
+            self.assertEqual(state["classification"], "empty")
+            self.assertTrue(state["greenfield_candidate"])
+            self.assertEqual(state["suggested_harness_mode"], "create")
+
+    def test_inspector_treats_readme_only_folder_as_greenfield(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            project = temp_path / "planning-project"
+            data = temp_path / "data"
+            project.mkdir()
+            (project / "README.md").write_text("# Product idea\n")
+            result = run(
+                "python3",
+                str(SCRIPTS / "inspect_project.py"),
+                "--root",
+                str(project),
+                "--data-root",
+                str(data),
+            )
+            state = json.loads(result.stdout)["project_state"]
+            self.assertEqual(state["classification"], "minimal-planning")
+            self.assertTrue(state["greenfield_candidate"])
+            self.assertEqual(state["suggested_harness_mode"], "create")
+
 
 class RendererTests(unittest.TestCase):
     def render(self, temp_path: Path, tier: str) -> Path:
@@ -220,6 +290,21 @@ class RendererTests(unittest.TestCase):
         )
         run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
         return output
+
+    def test_documented_example_profiles_render_and_validate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            for config in sorted((REPO / "examples").glob("*.json")):
+                output = temp_path / config.stem
+                run(
+                    "python3",
+                    str(SCRIPTS / "render_harness.py"),
+                    "--config",
+                    str(config),
+                    "--output",
+                    str(output),
+                )
+                run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
 
     def test_all_tiers_render_and_validate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -245,6 +330,168 @@ class RendererTests(unittest.TestCase):
                     self.assertTrue(helper.is_file())
                     self.assertTrue(helper.stat().st_mode & stat.S_IXUSR)
                     self.assertTrue((payload / ".claude/skills/harness-codex-fleet/SKILL.md").is_file())
+
+    def test_greenfield_ready_to_build_renders_context_and_bootstrap_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            configured = greenfield_profile("standard", "ready-to-build")
+            config = temp_path / "greenfield.json"
+            output = temp_path / "greenfield-output"
+            config.write_text(json.dumps(configured, indent=2) + "\n")
+            run(
+                "python3",
+                str(SCRIPTS / "render_harness.py"),
+                "--config",
+                str(config),
+                "--output",
+                str(output),
+            )
+            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            payload = output / "payload"
+            for rel in (
+                "README.md",
+                ".ai/project/brief.md",
+                ".ai/project/architecture.md",
+                ".ai/project/roadmap.md",
+                ".ai/project/open-questions.md",
+                ".ai/specs/current-task.md",
+            ):
+                self.assertTrue((payload / rel).is_file(), rel)
+            self.assertIn("Greenfield startup", (payload / "CLAUDE.md").read_text())
+            self.assertIn("planned architecture", (payload / ".ai/README.md").read_text())
+            self.assertIn(
+                "No meaningful application codebase is assumed",
+                (payload / ".ai/specs/current-task.md").read_text(),
+            )
+
+    def test_greenfield_context_only_omits_bootstrap_spec_and_optional_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            configured = greenfield_profile("lite", "context-only")
+            configured["greenfield_context"]["create_root_readme"] = False
+            config = temp_path / "greenfield-context-only.json"
+            output = temp_path / "greenfield-context-only-output"
+            config.write_text(json.dumps(configured, indent=2) + "\n")
+            run(
+                "python3",
+                str(SCRIPTS / "render_harness.py"),
+                "--config",
+                str(config),
+                "--output",
+                str(output),
+            )
+            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            payload = output / "payload"
+            self.assertFalse((payload / "README.md").exists())
+            self.assertFalse((payload / ".ai/specs/current-task.md").exists())
+            self.assertTrue((payload / ".ai/project/brief.md").is_file())
+            self.assertIn(
+                "No implementation contract was generated",
+                (payload / ".ai/backlog.md").read_text(),
+            )
+
+    def test_greenfield_rejects_fleet_and_missing_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            cases = []
+            fleet = greenfield_profile("fleet", "ready-to-build")
+            cases.append((fleet, "cannot start at Fleet"))
+            missing = profile("lite")
+            missing["harness_mode"] = "create"
+            cases.append((missing, "requires a greenfield_context"))
+            blocked = greenfield_profile("lite", "ready-to-build")
+            blocked["greenfield_context"]["blocking_questions"] = ["Choose database"]
+            cases.append((blocked, "requires blocking_questions to be empty"))
+
+            for index, (configured, expected) in enumerate(cases):
+                config = temp_path / f"greenfield-invalid-{index}.json"
+                config.write_text(json.dumps(configured, indent=2) + "\n")
+                result = run(
+                    "python3",
+                    str(SCRIPTS / "render_harness.py"),
+                    "--config",
+                    str(config),
+                    "--output",
+                    str(temp_path / f"greenfield-invalid-output-{index}"),
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+    def test_official_codex_plugin_transport_renders_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            configured = profile("standard")
+            configured["implementation_delegate"] = "codex-plugin"
+            config = temp_path / "plugin.json"
+            output = temp_path / "plugin-output"
+            config.write_text(json.dumps(configured, indent=2) + "\n")
+            run(
+                "python3",
+                str(SCRIPTS / "render_harness.py"),
+                "--config",
+                str(config),
+                "--output",
+                str(output),
+            )
+            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            skill = (
+                output
+                / "payload/.claude/skills/harness-codex-delegate/SKILL.md"
+            ).read_text()
+            self.assertIn("Configured transport: `codex-plugin`", skill)
+            self.assertIn("codex:codex-rescue", skill)
+            self.assertIn("openai/codex-plugin-cc", skill)
+            self.assertNotIn("codex exec", skill)
+
+    def test_claude_only_transport_omits_codex_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            configured = profile("standard")
+            configured["implementation_delegate"] = "claude-only"
+            config = temp_path / "claude-only.json"
+            output = temp_path / "claude-only-output"
+            config.write_text(json.dumps(configured, indent=2) + "\n")
+            run(
+                "python3",
+                str(SCRIPTS / "render_harness.py"),
+                "--config",
+                str(config),
+                "--output",
+                str(output),
+            )
+            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            payload = output / "payload"
+            self.assertFalse(
+                (payload / ".claude/skills/harness-codex-delegate/SKILL.md").exists()
+            )
+            orchestration = (
+                payload / ".claude/skills/harness-orchestration/SKILL.md"
+            ).read_text()
+            self.assertIn("bounded Claude implementation", orchestration)
+            docs = (payload / "docs/ai-harness/README.md").read_text()
+            self.assertIn("Configured transport: `claude-only`", docs)
+
+    def test_fleet_rejects_non_cli_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            for delegate in ("codex-plugin", "claude-only"):
+                configured = profile("fleet")
+                configured["implementation_delegate"] = delegate
+                config = temp_path / f"fleet-{delegate}.json"
+                config.write_text(json.dumps(configured, indent=2) + "\n")
+                result = run(
+                    "python3",
+                    str(SCRIPTS / "render_harness.py"),
+                    "--config",
+                    str(config),
+                    "--output",
+                    str(temp_path / f"fleet-{delegate}-output"),
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Fleet tier", result.stderr)
+                self.assertIn("codex-cli", result.stderr)
 
     def test_install_new_only_preserves_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -459,6 +706,25 @@ class RendererTests(unittest.TestCase):
             self.assertNotEqual(apply.returncode, 0)
             self.assertFalse((outside / "skills").exists())
             self.assertFalse((target / "AGENTS.md").exists())
+
+    def test_validator_rejects_unsafe_codex_command_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            output = self.render(temp_path, "lite")
+            delegate = output / "payload/.claude/skills/harness-codex-delegate/SKILL.md"
+            text = delegate.read_text()
+            text = text.replace("--sandbox workspace-write", "--sandbox danger-full-access", 1)
+            delegate.write_text(text)
+
+            result = run(
+                "python3",
+                str(SCRIPTS / "validate_harness.py"),
+                str(output),
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unsafe Codex default token in executable block", result.stderr)
+            self.assertIn("danger-full-access", result.stderr)
 
     def test_invalid_profile_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

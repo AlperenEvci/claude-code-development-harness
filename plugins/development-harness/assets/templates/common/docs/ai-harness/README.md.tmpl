@@ -6,22 +6,23 @@ Mode: **{{harness_mode}}**
 
 ## Purpose
 
-This harness makes context, delegation, artifacts, permissions, and verification explicit across Claude Code and Codex.
+This harness makes context, delegation, artifacts, permissions, and verification explicit across {{harness_purpose_scope}}.
 
+{{project_startup_documentation}}
 ## Roles
 
 | Role | Owns | Output |
 |---|---|---|
 | Main Claude | judgment, architecture, synthesis, spec, final gate | decisions, specs, verified result |
 {{researcher_role_row}}
-| Codex | scoped implementation | diff and check results |
+{{implementation_role_row}}
 {{reviewer_role_row}}
 
 ## Task routing
 
 - Trivial: direct change and direct check.
-- Standard: optional research → synthesis → spec → Codex → independent verification.
-- Complex: parallel read-only research → decisions → bounded specs → isolated write lanes → integration gate.
+- Standard: optional research → synthesis → spec → {{standard_route_execution}} → independent verification.
+- Complex: parallel read-only research → decisions → bounded specs → isolated write lanes when installed → integration gate.
 
 ## Files
 
@@ -30,6 +31,8 @@ This harness makes context, delegation, artifacts, permissions, and verification
 - `.claude/agents/`: isolated Claude workers.
 - `.claude/skills/`: on-demand workflows.
 - `.ai/`: project memory and handoff artifacts.
+
+{{codex_transport_documentation}}
 
 ## Project-specific extensions
 

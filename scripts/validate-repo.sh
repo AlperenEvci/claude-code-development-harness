@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 -m compileall -q "$ROOT/plugins/development-harness/scripts" "$ROOT/tests"
-python3 "$ROOT/scripts/run-tests.py"
+python3 -m unittest discover -s "$ROOT/tests" -v
 
 python3 - <<'PY' "$ROOT"
 import json

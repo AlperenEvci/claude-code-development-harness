@@ -1,20 +1,21 @@
 # Development Harness Plugin
 
-This directory is the Claude Code plugin root.
+Create a project-aware Claude Code development harness from either:
+
+- a blank or planning-only project folder, or
+- an existing repository that needs its first harness or an upgrade.
 
 ## Commands
 
 ```text
-/development-harness:setup [optional project context]
-/development-harness:audit [optional audit focus]
+/development-harness:setup [new | existing | upgrade] [optional context]
+/development-harness:audit
 ```
 
-## Design
+Greenfield setup interviews product intent, MVP scope, technical direction, agent roles, safety, and Git policy. It generates durable project context under `.ai/project/` and can optionally prepare—but never execute—the first scaffold contract.
 
-The setup skill is the interactive control plane. Python scripts perform deterministic inspection, rendering, validation, and post-install checks. Generated output is staged under `${CLAUDE_PLUGIN_DATA}` before any project file is touched.
+Existing-project setup inspects safe repository evidence, discovers real commands and conventions, and installs through staging, validation, dry-run, and deliberate conflict handling.
 
-The plugin intentionally ships no active hooks, MCP servers, or default settings.
+The setup command never installs dependencies, initializes Git, scaffolds application code, calls a delegate, commits, pushes, or deploys.
 
-## Project-specific output
-
-In addition to the selected Lite/Standard/Fleet core, setup can render path-scoped rules, manual project workflow skills, and read-only domain researchers. Custom components are generated only for a concrete recurring need and cannot widen tool permissions.
+See the marketplace repository README for installation and full documentation.

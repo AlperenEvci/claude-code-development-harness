@@ -29,13 +29,17 @@ Use each mechanism for its actual job:
 
 Do not use a hook where an instruction is enough. Do not use a subagent merely to avoid writing a good spec.
 
-## 3. Prefer artifacts over conversational memory
+## 3. Distinguish intent from evidence
+
+In a Greenfield project, product briefs and planned architecture record accepted intent. They are not proof that code, commands, or boundaries already exist. After implementation begins, reports record repository evidence and decisions reconcile the plan with reality.
+
+## 4. Prefer artifacts over conversational memory
 
 A report records evidence. A decision records accepted truth. A spec defines execution. A backlog records unfinished state.
 
 The receiving agent should not need the original chat transcript.
 
-## 4. Route by ambiguity, difficulty, precision, and parallelism
+## 5. Route by ambiguity, difficulty, precision, and parallelism
 
 - High ambiguity + broad exploration: research agent.
 - High judgment + cross-cutting trade-offs: main orchestrator.
@@ -43,11 +47,11 @@ The receiving agent should not need the original chat transcript.
 - Independent, disjoint work: parallel lanes.
 - Shared mutable files: serialize or isolate with worktrees.
 
-## 5. Use the smallest sufficient tier
+## 6. Use the smallest sufficient tier
 
 Over-orchestration increases time, tokens, and failure modes. A harness must contain a bypass for trivial tasks.
 
-## 6. Make completion observable
+## 7. Make completion observable
 
 Good acceptance criteria describe behavior, not effort:
 
@@ -59,13 +63,13 @@ Good:
 - existing customers without notifications still load,
 - unit tests and typecheck pass.
 
-## 7. Separate implementation and verification
+## 8. Separate implementation and verification
 
 The implementation delegate may write tests, but important acceptance behavior should be verified independently.
 
 For high-risk work, use a read-only reviewer and a real backend or integration environment where relevant.
 
-## 8. Keep permissions narrow
+## 9. Keep permissions narrow
 
 - read agents: read-only tools,
 - write agents: repository-scoped writes,
@@ -74,11 +78,11 @@ For high-risk work, use a read-only reviewer and a real backend or integration e
 - no automatic push/deploy,
 - worktrees for concurrent write lanes.
 
-Hooks execute real commands. Version 0.1 ships them disabled or as examples only.
+Hooks execute real commands. Version 0.2 ships them disabled or as examples only.
 
 Project-specific generated skills must not pre-approve tools. Project-specific generated domain agents remain read-only; widening their tools or permission mode requires a separately reviewed manual change.
 
-## 9. Make installation reversible
+## 10. Make installation reversible
 
 Installers should:
 
@@ -90,6 +94,6 @@ Installers should:
 - write a manifest,
 - avoid changing Git state automatically.
 
-## 10. Maintain from observed friction
+## 11. Maintain from observed friction
 
 Add guidance only when it prevents a real recurring failure. Remove stale rules. When the same failure occurs twice, run a retrospective and update the smallest relevant instruction surface.

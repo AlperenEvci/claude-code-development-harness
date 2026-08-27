@@ -19,7 +19,7 @@ from typing import Any, NoReturn
 ALLOWED_TIERS = {"lite", "standard", "fleet"}
 ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
 ALLOWED_MODES = {"create", "adopt", "upgrade"}
-ALLOWED_DELEGATES = {"codex-cli"}
+ALLOWED_DELEGATES = {"codex-plugin", "codex-cli", "claude-only"}
 ALLOWED_ORCHESTRATORS = {"claude-code"}
 ALLOWED_AUTONOMY = {
     "read-only",
@@ -37,6 +37,9 @@ ALLOWED_COMMIT_POLICIES = {"no-commit", "commit-locally"}
 ALLOWED_RISK_LEVELS = {"low", "normal", "high", "regulated"}
 ALLOWED_GENERATED_LANGUAGES = {"English"}
 ALLOWED_CLAUDE_MODEL_ALIASES = {"inherit", "haiku", "sonnet", "opus", "fable"}
+ALLOWED_GREENFIELD_DEPTHS = {"context-only", "ready-to-build"}
+ALLOWED_GIT_INITIALIZATION = {"already-initialized", "after-harness", "defer"}
+GENERATOR_VERSION = "0.2.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -61,6 +64,94 @@ def slugify(value: str) -> str:
     value = value.strip().lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
     return value.strip("-") or "project"
+
+
+def normalize_string_list(
+    value: Any, field: str, *, require_nonempty: bool = False
+) -> list[str]:
+    if not isinstance(value, list):
+        fail(f"{field} must be an array")
+    clean = [str(item).strip() for item in value if str(item).strip()]
+    if require_nonempty and not clean:
+        fail(f"{field} must contain at least one non-empty item")
+    return clean
+
+
+def normalize_greenfield_context(data: dict[str, Any]) -> None:
+    context = data.get("greenfield_context")
+    mode = str(data.get("harness_mode", "adopt")).lower()
+
+    if context is None:
+        if mode == "create":
+            fail("harness_mode=create requires a greenfield_context object")
+        return
+    if not isinstance(context, dict):
+        fail("greenfield_context must be an object or null")
+
+    for field in ("problem_statement", "primary_outcome"):
+        value = str(context.get(field, "")).strip()
+        if not value:
+            fail(f"greenfield_context.{field} must not be empty")
+        context[field] = value
+
+    for field in (
+        "target_users",
+        "mvp_goals",
+        "core_workflows",
+    ):
+        context[field] = normalize_string_list(
+            context.get(field, []),
+            f"greenfield_context.{field}",
+            require_nonempty=True,
+        )
+
+    for field in (
+        "non_goals",
+        "architecture_assumptions",
+        "technical_constraints",
+        "external_integrations",
+        "initial_milestones",
+        "open_questions",
+        "blocking_questions",
+    ):
+        context[field] = normalize_string_list(
+            context.get(field, []), f"greenfield_context.{field}"
+        )
+
+    depth = str(context.get("setup_depth", "context-only")).lower()
+    if depth not in ALLOWED_GREENFIELD_DEPTHS:
+        fail(
+            "greenfield_context.setup_depth must be one of "
+            f"{sorted(ALLOWED_GREENFIELD_DEPTHS)}"
+        )
+    context["setup_depth"] = depth
+
+    git_initialization = str(
+        context.get("git_initialization", "defer")
+    ).lower()
+    if git_initialization not in ALLOWED_GIT_INITIALIZATION:
+        fail(
+            "greenfield_context.git_initialization must be one of "
+            f"{sorted(ALLOWED_GIT_INITIALIZATION)}"
+        )
+    context["git_initialization"] = git_initialization
+
+    create_root_readme = context.get("create_root_readme", True)
+    if not isinstance(create_root_readme, bool):
+        fail("greenfield_context.create_root_readme must be a boolean")
+    context["create_root_readme"] = create_root_readme
+
+    context["deployment_target"] = str(
+        context.get("deployment_target", "")
+    ).strip()
+
+    if depth == "ready-to-build" and context["blocking_questions"]:
+        fail(
+            "greenfield_context.setup_depth=ready-to-build requires "
+            "blocking_questions to be empty"
+        )
+
+    data["greenfield_context"] = context
 
 
 def load_profile(path: Path) -> dict[str, Any]:
@@ -88,6 +179,12 @@ def load_profile(path: Path) -> dict[str, Any]:
         fail(f"harness_mode must be one of {sorted(ALLOWED_MODES)}")
     data["harness_mode"] = mode
 
+    if mode == "create" and tier == "fleet":
+        fail(
+            "Greenfield create mode cannot start at Fleet tier. Establish a working "
+            "baseline and reliable gates, then upgrade deliberately."
+        )
+
     orchestrator = str(data.get("main_orchestrator", "")).lower()
     if orchestrator not in ALLOWED_ORCHESTRATORS:
         fail(f"main_orchestrator must be one of {sorted(ALLOWED_ORCHESTRATORS)}")
@@ -97,6 +194,12 @@ def load_profile(path: Path) -> dict[str, Any]:
     if delegate not in ALLOWED_DELEGATES:
         fail(f"implementation_delegate must be one of {sorted(ALLOWED_DELEGATES)}")
     data["implementation_delegate"] = delegate
+
+    if tier == "fleet" and delegate != "codex-cli":
+        fail(
+            "Fleet tier in version 0.2 requires implementation_delegate=codex-cli "
+            "for explicit worktree and lane-process control"
+        )
 
     autonomy = str(data.get("autonomy", "")).lower()
     if autonomy not in ALLOWED_AUTONOMY:
@@ -178,6 +281,7 @@ def load_profile(path: Path) -> dict[str, Any]:
         "commit_ai_reports": True,
         "commit_ai_runs": False,
         "generated_language": "English",
+        "greenfield_context": None,
     }
     for key, value in defaults.items():
         data.setdefault(key, value)
@@ -195,6 +299,8 @@ def load_profile(path: Path) -> dict[str, Any]:
         if not isinstance(data[list_key], list):
             fail(f"{list_key} must be an array")
 
+    normalize_greenfield_context(data)
+
     if tier == "fleet" and not data.get("parallel_writes", False):
         data["fleet_warning"] = (
             "Fleet tier selected while parallel_writes is false. "
@@ -209,6 +315,105 @@ def load_profile(path: Path) -> dict[str, Any]:
 def bullets(items: list[Any], empty: str) -> str:
     clean = [str(item).strip() for item in items if str(item).strip()]
     return "\n".join(f"- {item}" for item in clean) if clean else f"- {empty}"
+
+
+def numbered(items: list[Any], empty: str) -> str:
+    clean = [str(item).strip() for item in items if str(item).strip()]
+    return (
+        "\n".join(f"{index}. {item}" for index, item in enumerate(clean, 1))
+        if clean
+        else f"1. {empty}"
+    )
+
+
+def greenfield_context(profile: dict[str, Any]) -> dict[str, Any]:
+    value = profile.get("greenfield_context")
+    return value if isinstance(value, dict) else {}
+
+
+def greenfield_verification_block(profile: dict[str, Any]) -> str:
+    commands: list[str] = []
+    full_gate = str(profile.get("full_gate_command", "")).strip()
+    if full_gate:
+        commands.append(full_gate)
+    else:
+        for key in (
+            "lint_command",
+            "typecheck_command",
+            "test_command",
+            "build_command",
+        ):
+            command = str(profile.get(key, "")).strip()
+            if command and command not in commands:
+                commands.append(command)
+    if not commands:
+        return "# No executable verification gate has been approved yet. Stop and ask the operator before implementation."
+    return "\n".join(commands)
+
+
+def greenfield_git_plan(value: str) -> str:
+    return {
+        "already-initialized": "Git already exists; preserve its current history and status.",
+        "after-harness": "Initialize Git after the harness files are reviewed. Setup does not run `git init` automatically.",
+        "defer": "Git initialization is intentionally deferred; Fleet and worktree workflows remain unavailable.",
+    }.get(value, "Git initialization is not decided.")
+
+
+def project_startup_section(profile: dict[str, Any]) -> str:
+    if profile.get("harness_mode") != "create":
+        return ""
+    context = greenfield_context(profile)
+    depth = context.get("setup_depth", "context-only")
+    next_step = (
+        "Review `.ai/specs/current-task.md`, resolve any remaining assumptions, then run `harness-orchestration` to execute the first bounded bootstrap."
+        if depth == "ready-to-build"
+        else "Resolve `.ai/project/open-questions.md` and write the first self-contained implementation spec before scaffolding code."
+    )
+    lines = [
+        "",
+        "## Greenfield startup",
+        "",
+        "This repository started without an established codebase. Until working code and verified commands exist:",
+        "",
+        "- Treat `.ai/project/brief.md`, `.ai/project/architecture.md`, and accepted decisions as the source of truth.",
+        "- Do not pretend planned paths, commands, or conventions already exist.",
+        "- Keep assumptions explicit and move accepted choices into `.ai/decisions/`.",
+        "- Do not install dependencies or scaffold application code merely because setup completed.",
+        "- After the first scaffold is verified, update the project profile and run the harness in upgrade mode so planned commands become repository evidence.",
+        "",
+        f"Next step: {next_step}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def project_origin_guidance(profile: dict[str, Any]) -> str:
+    if profile.get("harness_mode") != "create":
+        return ""
+    return (
+        "## Greenfield status\n\n"
+        "This contract describes the intended project, not an already-proven implementation. "
+        "Planned commands and paths become authoritative only after they exist and pass verification. "
+        "When code reality differs from the plan, update the decision and profile rather than preserving a fiction.\n"
+    )
+
+
+def project_startup_documentation(profile: dict[str, Any]) -> str:
+    if profile.get("harness_mode") != "create":
+        return ""
+    context = greenfield_context(profile)
+    depth = context.get("setup_depth", "context-only")
+    return (
+        "## Greenfield project context\n\n"
+        "This harness was created before a meaningful application codebase existed. "
+        f"Product intent and planned architecture live under `.ai/project/`. Setup depth: `{depth}`.\n\n"
+        "- `brief.md`: problem, users, outcome, MVP goals, non-goals, and core workflows.\n"
+        "- `architecture.md`: approved stack direction, constraints, integrations, deployment target, and planned boundaries.\n"
+        "- `roadmap.md`: initial milestones.\n"
+        "- `open-questions.md`: unresolved and blocking decisions.\n\n"
+        "The setup command does not install dependencies or scaffold the product. "
+        "Use the accepted context to write and verify the first implementation contract.\n"
+    )
 
 
 def commands_markdown(profile: dict[str, Any]) -> str:
@@ -266,21 +471,155 @@ def custom_components_markdown(profile: dict[str, Any]) -> str:
     return "\n".join(rows) if rows else "- No project-specific extensions were generated beyond the core harness."
 
 
+def codex_transport_instructions(profile: dict[str, Any]) -> str:
+    delegate = str(profile.get("implementation_delegate", "codex-plugin"))
+    effort = str(profile.get("codex_reasoning", "high"))
+
+    if delegate == "codex-plugin":
+        return f'''Configured transport: `codex-plugin`.
+
+Use OpenAI's official Codex plugin for Claude Code.
+
+1. Confirm the `codex:codex-rescue` subagent is available in `/agents` and that `/codex:setup` reports Codex ready.
+2. Invoke `codex:codex-rescue` through the Agent tool with a compact file-pointer brief rather than duplicating the full contract:
+
+   `Read .ai/specs/current-task.md in the current repository and implement it exactly. Preserve pre-existing changes, use write mode only inside the repository, run the spec's targeted checks, and return a concise completion or failure report.`
+
+3. Prefer a fresh Codex task unless the operator deliberately asks to resume an earlier thread.
+4. Keep the accepted contract on disk. Do not reopen product or architecture decisions already settled by the main Claude session.
+5. Leave model and effort to the user's Codex configuration unless the operator explicitly requests an override. The project profile records desired effort `{effort}` as guidance, not as an implicit permission expansion.
+6. Do not enable the optional automatic Codex review gate. It can create long Claude/Codex loops and must remain an explicit operator choice.
+7. Return control to the main Claude session for diff inspection and independent verification.
+
+If `codex:codex-rescue` is unavailable, stop and explain the supported setup path:
+
+```text
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+Do not silently switch to direct CLI execution. Change the project profile to `codex-cli` only with operator approval.'''
+
+    if delegate == "codex-cli":
+        return f'''Configured transport: `codex-cli`.
+
+Use the locally installed Codex CLI as the explicit implementation transport.
+
+Before execution, confirm `command -v codex`, `codex --version`, and `git status --short`. Then run from the project root:
+
+```bash
+codex exec \\
+  -C "${{CLAUDE_PROJECT_DIR}}" \\
+  --sandbox workspace-write \\
+  -c model_reasoning_effort={effort} \\
+  - < "${{CLAUDE_PROJECT_DIR}}/.ai/specs/current-task.md"
+```
+
+Use the user's configured Codex model unless the operator explicitly selects another one. Do not add permission bypasses, broad-system access, or bypass the Git-repository safety check inside a normal Git repository. Do not grant network or broad system access unless the contract requires it and the operator explicitly approves. Return control to the main Claude session for diff inspection and independent verification.'''
+
+    return '''Configured transport: `claude-only`.
+
+Do not invoke Codex. Execute a bounded, accepted spec in the main Claude session or through a narrow project-specific Claude implementation subagent when one exists. Preserve the same specification gate, scope boundaries, and independent verification requirements.'''
+
+
+def execution_context(profile: dict[str, Any]) -> dict[str, str]:
+    delegate = str(profile.get("implementation_delegate", "codex-plugin"))
+    effort = str(profile.get("codex_reasoning", "high"))
+
+    if delegate == "claude-only":
+        return {
+            "orchestration_description": "Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, bounded Claude implementation, and independent verification. Skip the full pipeline for trivial obvious edits.",
+            "harness_purpose_scope": "Claude Code roles",
+            "working_model_execution_step": "Execute the bounded spec in Claude, directly or through a narrow Claude implementation subagent.",
+            "implementation_role_line": "- Implementation path: main Claude or a bounded Claude implementation subagent working against an explicit contract.",
+            "implementation_role_row": "| Claude implementation | bounded execution against an accepted contract | diff and check results |",
+            "standard_execution_step": "Execute the bounded spec in Claude or delegate it to a narrow Claude implementation subagent.",
+            "standard_route_execution": "bounded Claude implementation",
+            "codex_reasoning_line": "",
+            "codex_delegate_description": "Execute a complete implementation contract through the configured project transport. This file is omitted from Claude-only harnesses.",
+            "codex_transport_instructions": codex_transport_instructions(profile),
+            "codex_transport_documentation": """## Implementation transport
+
+Configured transport: `claude-only`.
+
+No Codex-specific project skill is installed. Claude still uses the same evidence, decision, spec, scope, and independent-verification discipline.""",
+        }
+
+    if delegate == "codex-plugin":
+        return {
+            "orchestration_description": "Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, Codex implementation through the official Claude Code plugin, and independent verification. Skip the full pipeline for trivial obvious edits.",
+            "harness_purpose_scope": "Claude Code and Codex",
+            "working_model_execution_step": "Delegate scoped execution to Codex through the configured official Claude Code plugin wrapper.",
+            "implementation_role_line": "- Codex plugin delegate: implementation against an explicit contract through `codex:codex-rescue`.",
+            "implementation_role_row": "| Codex via official plugin | scoped implementation against an accepted contract | diff and check results |",
+            "standard_execution_step": "Invoke `harness-codex-delegate` after the contract is complete.",
+            "standard_route_execution": "Codex via the official Claude Code plugin",
+            "codex_reasoning_line": f"Codex desired reasoning profile: `{effort}`; the official plugin uses Codex configuration/defaults unless the operator explicitly configures an override.",
+            "codex_delegate_description": "Execute a complete implementation contract through OpenAI's official Codex plugin for Claude Code. Use only after `.ai/specs/current-task.md` is self-contained, scoped, and has explicit acceptance criteria and verification commands.",
+            "codex_transport_instructions": codex_transport_instructions(profile),
+            "codex_transport_documentation": """## Codex transport
+
+Configured transport: `codex-plugin`.
+
+The project wrapper delegates the on-disk spec to OpenAI's official `codex:codex-rescue` subagent. Install and initialize the companion plugin with:
+
+```text
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+The optional automatic review gate remains disabled unless an operator deliberately enables and monitors it.""",
+        }
+
+    return {
+        "orchestration_description": "Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, direct Codex CLI implementation, and independent verification. Skip the full pipeline for trivial obvious edits.",
+        "harness_purpose_scope": "Claude Code and Codex",
+        "working_model_execution_step": "Delegate scoped execution through the configured direct Codex CLI wrapper.",
+        "implementation_role_line": "- Codex CLI delegate: implementation against an explicit contract in a separate Codex process.",
+        "implementation_role_row": "| Codex CLI | scoped implementation against an accepted contract | diff and check results |",
+        "standard_execution_step": "Invoke `harness-codex-delegate` after the contract is complete.",
+        "standard_route_execution": "direct Codex CLI delegation",
+        "codex_reasoning_line": f"Codex reasoning default: `{effort}`.",
+        "codex_delegate_description": "Execute a complete implementation contract with the locally installed Codex CLI. Use only after `.ai/specs/current-task.md` is self-contained, scoped, and has explicit acceptance criteria and verification commands.",
+        "codex_transport_instructions": codex_transport_instructions(profile),
+        "codex_transport_documentation": """## Codex transport
+
+Configured transport: `codex-cli`.
+
+The project wrapper sends `.ai/specs/current-task.md` to a separate local `codex exec` process through stdin. This transport is also required by Fleet in version 0.2 because it exposes explicit worktree, directory, and lane-process control.""",
+    }
+
 def computed_context(profile: dict[str, Any]) -> dict[str, str]:
     tier = str(profile.get("harness_tier", "standard"))
     has_project_agents = tier in {"standard", "fleet"}
     has_fleet = tier == "fleet"
+    greenfield = greenfield_context(profile)
+    is_create = profile.get("harness_mode") == "create"
+
     return {
         **{k: str(v).lower() if isinstance(v, bool) else str(v) for k, v in profile.items()},
+        **execution_context(profile),
         "stack_markdown": stack_markdown(profile),
         "important_paths_markdown": bullets(
             profile.get("important_paths", []),
-            "No important paths recorded; map the repository before a broad change.",
+            (
+                "No code paths exist yet; record planned boundaries here and verify them after scaffolding."
+                if is_create
+                else "No important paths recorded; map the repository before a broad change."
+            ),
         ),
         "commands_markdown": commands_markdown(profile),
         "project_rules_markdown": bullets(
             profile.get("project_rules", []),
-            "Follow existing repository patterns and keep changes scoped.",
+            (
+                "Treat the approved greenfield briefs as provisional source of truth until code patterns exist."
+                if is_create
+                else "Follow existing repository patterns and keep changes scoped."
+            ),
         ),
         "do_not_rules_markdown": bullets(
             profile.get("do_not_rules", []),
@@ -333,6 +672,62 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
             if profile.get("commit_ai_runs", False)
             else "ignore or remove after integration"
         ),
+        "project_context_taxonomy_line": (
+            "- `project/`: greenfield product brief, planned architecture, roadmap, and open questions."
+            if is_create
+            else ""
+        ),
+        "project_startup_section": project_startup_section(profile),
+        "project_origin_guidance": project_origin_guidance(profile),
+        "project_startup_documentation": project_startup_documentation(profile),
+        "greenfield_problem_statement": str(greenfield.get("problem_statement", "")),
+        "greenfield_target_users_markdown": bullets(
+            greenfield.get("target_users", []), "Target users not yet confirmed."
+        ),
+        "greenfield_primary_outcome": str(greenfield.get("primary_outcome", "")),
+        "greenfield_mvp_goals_markdown": bullets(
+            greenfield.get("mvp_goals", []), "MVP goals not yet confirmed."
+        ),
+        "greenfield_non_goals_markdown": bullets(
+            greenfield.get("non_goals", []), "No explicit non-goals recorded."
+        ),
+        "greenfield_core_workflows_markdown": numbered(
+            greenfield.get("core_workflows", []), "Core workflow not yet confirmed."
+        ),
+        "greenfield_architecture_assumptions_markdown": bullets(
+            greenfield.get("architecture_assumptions", []),
+            "No architecture assumptions have been accepted.",
+        ),
+        "greenfield_technical_constraints_markdown": bullets(
+            greenfield.get("technical_constraints", []),
+            "No project-specific technical constraints recorded.",
+        ),
+        "greenfield_external_integrations_markdown": bullets(
+            greenfield.get("external_integrations", []),
+            "No external integrations confirmed.",
+        ),
+        "greenfield_deployment_target": str(greenfield.get("deployment_target", ""))
+        or "Not yet selected",
+        "greenfield_initial_milestones_markdown": numbered(
+            greenfield.get("initial_milestones", []),
+            "Define and approve the first milestone.",
+        ),
+        "greenfield_open_questions_markdown": bullets(
+            greenfield.get("open_questions", []), "No non-blocking open questions recorded."
+        ),
+        "greenfield_blocking_questions_markdown": bullets(
+            greenfield.get("blocking_questions", []), "No blocking questions remain."
+        ),
+        "greenfield_setup_depth": str(greenfield.get("setup_depth", "context-only")),
+        "greenfield_git_plan": greenfield_git_plan(
+            str(greenfield.get("git_initialization", "defer"))
+        ),
+        "greenfield_bootstrap_verification": greenfield_verification_block(profile),
+        "greenfield_bootstrap_next_step": (
+            "The first implementation contract is staged at `.ai/specs/current-task.md`. Review it before execution."
+            if greenfield.get("setup_depth") == "ready-to-build"
+            else "No implementation contract was generated. Resolve blocking questions and write the first spec deliberately."
+        ),
     }
 
 
@@ -355,9 +750,11 @@ def render_text(text: str, context: dict[str, str], source: Path) -> str:
     return rendered
 
 
-def template_layers(skill_root: Path, tier: str) -> list[Path]:
+def template_layers(skill_root: Path, tier: str, mode: str) -> list[Path]:
     base = skill_root / "assets" / "templates"
     layers = [base / "common"]
+    if mode == "create":
+        layers.append(base / "greenfield")
     if tier in {"standard", "fleet"}:
         layers.append(base / "standard")
     if tier == "fleet":
@@ -376,10 +773,11 @@ def copy_templates(
     skill_root: Path,
     payload: Path,
     tier: str,
+    mode: str,
     context: dict[str, str],
 ) -> list[Path]:
     written: list[Path] = []
-    for layer in template_layers(skill_root, tier):
+    for layer in template_layers(skill_root, tier, mode):
         if not layer.exists():
             fail(f"template layer missing: {layer}")
         for source in sorted(layer.rglob("*")):
@@ -901,7 +1299,7 @@ def build_manifest(payload: Path, profile: dict[str, Any]) -> dict[str, Any]:
         "harness_mode": profile.get("harness_mode"),
         "harness_tier": profile["harness_tier"],
         "generator": "development-harness",
-        "generator_version": "0.1.0",
+        "generator_version": GENERATOR_VERSION,
         "files": files,
         "warnings": [profile["fleet_warning"]] if profile.get("fleet_warning") else [],
     }
@@ -946,7 +1344,7 @@ def main() -> None:
     output.mkdir(parents=True)
     marker_payload = {
         "generator": "development-harness",
-        "generator_version": "0.1.0",
+        "generator_version": GENERATOR_VERSION,
         "purpose": "safe-to-replace generated staging package",
     }
     (output / GENERATION_MARKER).write_text(
@@ -957,7 +1355,26 @@ def main() -> None:
     payload.mkdir(parents=True)
 
     context = computed_context(profile)
-    copy_templates(skill_root, payload, profile["harness_tier"], context)
+    copy_templates(
+        skill_root, payload, profile["harness_tier"], profile["harness_mode"], context
+    )
+
+    if profile.get("harness_mode") == "create":
+        greenfield = greenfield_context(profile)
+        if not greenfield.get("create_root_readme", True):
+            root_readme = payload / "README.md"
+            if root_readme.exists():
+                root_readme.unlink()
+        if greenfield.get("setup_depth") != "ready-to-build":
+            initial_spec = payload / ".ai" / "specs" / "current-task.md"
+            if initial_spec.exists():
+                initial_spec.unlink()
+
+    if profile.get("implementation_delegate") == "claude-only":
+        codex_skill_dir = payload / ".claude" / "skills" / "harness-codex-delegate"
+        if codex_skill_dir.exists():
+            shutil.rmtree(codex_skill_dir)
+
     write_dynamic_components(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))

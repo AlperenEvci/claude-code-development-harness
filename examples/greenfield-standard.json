@@ -1,0 +1,93 @@
+{
+  "project_name": "Greenfield SaaS",
+  "project_slug": "greenfield-saas",
+  "project_summary": "A focused SaaS product that helps small teams complete one recurring operational workflow with less manual coordination.",
+  "project_stage": "idea",
+  "harness_mode": "create",
+  "harness_tier": "standard",
+  "greenfield_context": {
+    "setup_depth": "ready-to-build",
+    "problem_statement": "Small teams coordinate a recurring operational workflow across disconnected tools and lose status, ownership, and decisions.",
+    "target_users": [
+      "Small operations teams",
+      "Founder-led product teams"
+    ],
+    "primary_outcome": "A user can complete and track the core workflow end to end from one interface.",
+    "mvp_goals": [
+      "Deliver one complete workflow from intake to completion",
+      "Persist status and ownership",
+      "Provide a minimal audit trail"
+    ],
+    "non_goals": [
+      "No advanced analytics in the first milestone",
+      "No multi-region infrastructure"
+    ],
+    "core_workflows": [
+      "Create a work item",
+      "Assign and update its status",
+      "Review the activity history"
+    ],
+    "architecture_assumptions": [
+      "Start as one deployable web application",
+      "Keep business logic outside UI components"
+    ],
+    "technical_constraints": [
+      "No production credentials in local development",
+      "Use typed application code"
+    ],
+    "external_integrations": [],
+    "deployment_target": "Managed web hosting",
+    "initial_milestones": [
+      "Scaffold the application and verification gates",
+      "Implement the first end-to-end workflow",
+      "Add independent acceptance coverage"
+    ],
+    "open_questions": [],
+    "blocking_questions": [],
+    "create_root_readme": true,
+    "git_initialization": "after-harness"
+  },
+  "languages": ["TypeScript"],
+  "frameworks": ["Next.js", "React"],
+  "package_manager": "npm",
+  "repository_shape": "single-project",
+  "important_paths": [
+    "src/app - planned routes and server entry points",
+    "src/lib - planned domain logic",
+    "test - planned automated acceptance checks"
+  ],
+  "install_command": "npm install",
+  "dev_command": "npm run dev",
+  "test_command": "npm test",
+  "typecheck_command": "npm run typecheck",
+  "lint_command": "npm run lint",
+  "build_command": "npm run build",
+  "full_gate_command": "npm run lint && npm run typecheck && npm test && npm run build",
+  "main_orchestrator": "claude-code",
+  "implementation_delegate": "codex-cli",
+  "research_model": "opus",
+  "review_model": "inherit",
+  "codex_reasoning": "high",
+  "autonomy": "repository-write-with-approval",
+  "network_access": "deny-by-default",
+  "hooks_policy": "disabled",
+  "git_workflow": "feature-branches",
+  "agent_commit_policy": "no-commit",
+  "parallel_writes": false,
+  "risk_level": "normal",
+  "sensitive_areas": [],
+  "project_rules": [
+    "Business logic stays outside UI components.",
+    "Treat planned architecture as provisional until verified by the scaffold."
+  ],
+  "do_not_rules": [
+    "Do not implement later roadmap milestones during the first scaffold.",
+    "Do not add dependencies without justification."
+  ],
+  "scoped_rules": [],
+  "additional_skills": [],
+  "additional_agents": [],
+  "commit_ai_reports": true,
+  "commit_ai_runs": false,
+  "generated_language": "English"
+}

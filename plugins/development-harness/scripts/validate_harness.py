@@ -19,6 +19,7 @@ from typing import Any
 
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+FENCED_BLOCK = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
 GENERATION_MARKER = ".development-harness-generated.json"
 FORBIDDEN_CODEX_DEFAULTS = (
     "--dangerously-bypass-approvals-and-sandbox",
@@ -90,6 +91,23 @@ def frontmatter(text: str) -> dict[str, Any] | None:
             except json.JSONDecodeError:
                 result[key] = raw_value
     return result
+
+
+def executable_code_blocks(text: str) -> list[str]:
+    """Return shell-like fenced blocks that can encode executable defaults.
+
+    Safety tokens may legitimately appear in explanatory prose such as
+    "do not use --skip-git-repo-check". The validator therefore inspects
+    executable shell fences rather than treating a documented prohibition as
+    an unsafe default.
+    """
+
+    blocks: list[str] = []
+    for match in FENCED_BLOCK.finditer(text):
+        language = match.group(1).strip().lower()
+        if language in {"", "bash", "sh", "shell", "zsh"}:
+            blocks.append(match.group(2))
+    return blocks
 
 
 def read_json(path: Path, errors: list[str], label: str) -> dict[str, Any]:
@@ -164,11 +182,12 @@ def main() -> None:
     if payload.is_symlink() or not payload.is_dir():
         errors.append("payload must be a real directory, not a symlink")
 
+    delegate = str(profile.get("implementation_delegate", "codex-cli")).lower()
+
     required_payload = [
         "AGENTS.md",
         "CLAUDE.md",
         ".claude/skills/harness-orchestration/SKILL.md",
-        ".claude/skills/harness-codex-delegate/SKILL.md",
         ".ai/README.md",
         ".ai/backlog.md",
         ".ai/templates/report.md",
@@ -178,12 +197,39 @@ def main() -> None:
         "docs/ai-harness/README.md",
     ]
     tier = str(profile.get("harness_tier", "")).lower()
+    mode = str(profile.get("harness_mode", "adopt")).lower()
+    greenfield = profile.get("greenfield_context")
+
+    if mode == "create":
+        if tier == "fleet":
+            errors.append("greenfield create mode may not start at Fleet tier")
+        if not isinstance(greenfield, dict):
+            errors.append("greenfield create mode requires greenfield_context")
+            greenfield = {}
+        required_payload += [
+            ".ai/project/brief.md",
+            ".ai/project/architecture.md",
+            ".ai/project/roadmap.md",
+            ".ai/project/open-questions.md",
+        ]
+        if isinstance(greenfield, dict) and greenfield.get("create_root_readme", True):
+            required_payload.append("README.md")
+        if isinstance(greenfield, dict) and greenfield.get("setup_depth") == "ready-to-build":
+            required_payload.append(".ai/specs/current-task.md")
+            blocking = greenfield.get("blocking_questions", [])
+            if blocking:
+                errors.append("ready-to-build greenfield package contains blocking questions")
+
+    if delegate != "claude-only":
+        required_payload.append(".claude/skills/harness-codex-delegate/SKILL.md")
     if tier in {"standard", "fleet"}:
         required_payload += [
             ".claude/agents/harness-codebase-researcher.md",
             ".claude/agents/harness-code-reviewer.md",
         ]
     if tier == "fleet":
+        if delegate != "codex-cli":
+            errors.append("fleet harness requires implementation_delegate=codex-cli")
         required_payload += [
             ".claude/skills/harness-codex-fleet/SKILL.md",
             ".ai/templates/lane-brief.md",
@@ -201,6 +247,19 @@ def main() -> None:
         installed_data = read_json(installed_profile, errors, "installed project profile")
         if installed_data != profile:
             errors.append("installed project profile does not match package project-profile.json")
+
+    if mode == "create":
+        brief = payload / ".ai/project/brief.md"
+        architecture = payload / ".ai/project/architecture.md"
+        for path, required_fragment in (
+            (brief, "## Problem statement"),
+            (architecture, "## Evidence rule"),
+        ):
+            if path.is_file() and required_fragment not in path.read_text(encoding="utf-8"):
+                errors.append(
+                    f"greenfield context file missing required section {required_fragment!r}: "
+                    f"{path.relative_to(payload)}"
+                )
 
     symlinks = [path for path in package.rglob("*") if path.is_symlink()]
     for path in symlinks:
@@ -265,9 +324,10 @@ def main() -> None:
                 errors.append(f"duplicate Claude component name {name!r}: {component_names[name]} and {rel}")
             elif name:
                 component_names[name] = rel
+            executable_text = "\n".join(executable_code_blocks(text))
             for token in FORBIDDEN_CODEX_DEFAULTS:
-                if token in text:
-                    errors.append(f"unsafe Codex default token in {rel}: {token}")
+                if token in executable_text:
+                    errors.append(f"unsafe Codex default token in executable block {rel}: {token}")
 
         if rel.startswith(".claude/agents/") and rel.endswith(".md"):
             fm = frontmatter(text)
@@ -326,6 +386,35 @@ def main() -> None:
         )
         if any(fragment not in text for fragment in required_fragments):
             errors.append(f"generated domain agent is not read-only: {rel}")
+
+    codex_rel = ".claude/skills/harness-codex-delegate/SKILL.md"
+    codex_path = payload / codex_rel
+    codex_text = codex_path.read_text(encoding="utf-8") if codex_path.is_file() else ""
+    if delegate == "claude-only":
+        if codex_path.exists():
+            errors.append("claude-only harness must omit the Codex delegate skill")
+    elif delegate == "codex-plugin":
+        for required_fragment in (
+            "Configured transport: `codex-plugin`",
+            "codex:codex-rescue",
+            "openai/codex-plugin-cc",
+        ):
+            if required_fragment not in codex_text:
+                errors.append(
+                    f"official Codex plugin delegate missing {required_fragment!r}: {codex_rel}"
+                )
+    elif delegate == "codex-cli":
+        for required_fragment in (
+            "Configured transport: `codex-cli`",
+            "codex exec",
+            '- < "${CLAUDE_PROJECT_DIR}/.ai/specs/current-task.md"',
+        ):
+            if required_fragment not in codex_text:
+                errors.append(
+                    f"Codex CLI delegate missing {required_fragment!r}: {codex_rel}"
+                )
+        if "$(cat" in codex_text:
+            errors.append("Codex CLI delegate must pass the spec through stdin, not shell substitution")
 
     install = package / "install-harness.sh"
     if not (install.stat().st_mode & 0o111):

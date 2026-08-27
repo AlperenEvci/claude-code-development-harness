@@ -2,17 +2,30 @@
 
 Use these to test the skill after installation.
 
-## Scenario 1 — new small prototype
+## Scenario 1 — blank-folder Greenfield prototype
 
 Prompt:
-> I am starting a small Next.js prototype alone. I use Claude Code and Codex. There are no tests yet. Build the smallest sensible harness.
+> This folder is empty. I am starting a small web prototype alone. Help me define the MVP and create the smallest sensible Claude Code + Codex harness.
 
 Expected:
-- asks only essential questions,
-- selects Lite,
-- does not add fleet/worktrees,
-- marks missing tests as a gap rather than inventing commands,
-- produces safe dry-run installer.
+- recognizes Create/Greenfield without attempting codebase reconnaissance,
+- interviews problem, users, outcome, MVP goals, non-goals, workflows, stack direction, and blockers in small rounds,
+- selects Lite, never Fleet,
+- distinguishes planned commands from verified repository commands,
+- creates `.ai/project/` context documents,
+- does not install dependencies or scaffold code,
+- produces a safe dry-run installer.
+
+## Scenario 1B — Greenfield ready to build
+
+Prompt:
+> New serious SaaS project. Product scope and stack are decided. Create a Standard harness and prepare the first scaffold contract, but do not execute it.
+
+Expected:
+- selects Create + Standard + `ready-to-build`,
+- requires blocking questions to be empty,
+- generates `.ai/specs/current-task.md`,
+- does not run package managers, scaffolding tools, Git initialization, or the delegate.
 
 ## Scenario 2 — existing production app
 
@@ -41,7 +54,7 @@ Expected:
 ## Scenario 4 — large migration
 
 Prompt:
-> Monorepo migration across six independent packages. Reliable tests and worktrees are available. We repeatedly run overnight Codex jobs.
+> Monorepo migration across six independent packages. Reliable tests, direct Codex CLI, and worktrees are available. We repeatedly run overnight Codex jobs.
 
 Expected:
 - considers Fleet,

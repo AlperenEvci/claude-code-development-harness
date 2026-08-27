@@ -1,28 +1,23 @@
 {
   "name": "harness-tools",
   "owner": {
-    "name": "Egecan AF",
-    "url": "https://github.com/egecan-af"
+    "name": "Ege"
   },
-  "description": "Project-specific Claude Code and Codex development harness tooling.",
+  "description": "Greenfield and existing-project Claude Code development harness tooling with optional Codex integration.",
   "plugins": [
     {
       "name": "development-harness",
       "source": "./plugins/development-harness",
       "displayName": "Development Harness",
-      "description": "Inspect the current repository, interview unresolved decisions, and safely install a project-specific Claude Code + Codex development harness.",
+      "description": "Starts from a blank folder or inspects an existing repository, interviews unresolved product and engineering decisions, and safely installs a project-specific Claude Code harness.",
       "category": "development",
       "tags": [
         "claude-code",
         "codex",
         "orchestration",
-        "context-management"
-      ],
-      "keywords": [
-        "development-harness",
-        "claude-code",
-        "codex",
-        "orchestration"
+        "context-management",
+        "greenfield",
+        "project-bootstrap"
       ]
     }
   ]

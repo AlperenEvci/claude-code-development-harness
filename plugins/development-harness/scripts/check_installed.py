@@ -13,12 +13,12 @@ from typing import Any
 
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+FENCED_BLOCK = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
 
 BASE_REQUIRED = [
     "AGENTS.md",
     "CLAUDE.md",
     ".claude/skills/harness-orchestration/SKILL.md",
-    ".claude/skills/harness-codex-delegate/SKILL.md",
     ".ai/README.md",
     ".ai/backlog.md",
     ".ai/templates/report.md",
@@ -59,6 +59,17 @@ def frontmatter_keys(text: str) -> set[str]:
     return keys
 
 
+
+
+def executable_code_blocks(text: str) -> list[str]:
+    """Return shell-like fenced blocks, excluding explanatory prose."""
+
+    blocks: list[str] = []
+    for match in FENCED_BLOCK.finditer(text):
+        language = match.group(1).strip().lower()
+        if language in {"", "bash", "sh", "shell", "zsh"}:
+            blocks.append(match.group(2))
+    return blocks
 
 
 def slugify(value: object) -> str:
@@ -116,12 +127,32 @@ def main() -> None:
         errors.append("missing .ai/harness/project-profile.json")
 
     tier = str(profile.get("harness_tier", "standard")).lower()
+    mode = str(profile.get("harness_mode", "adopt")).lower()
+    delegate = str(profile.get("implementation_delegate", "codex-cli")).lower()
+    greenfield = profile.get("greenfield_context")
     dynamic = dynamic_component_paths(profile)
     required = list(BASE_REQUIRED)
+    if mode == "create":
+        required.extend([
+            ".ai/project/brief.md",
+            ".ai/project/architecture.md",
+            ".ai/project/roadmap.md",
+            ".ai/project/open-questions.md",
+        ])
+        if isinstance(greenfield, dict) and greenfield.get("create_root_readme", True):
+            required.append("README.md")
+        if isinstance(greenfield, dict) and greenfield.get("setup_depth") == "ready-to-build":
+            required.append(".ai/specs/current-task.md")
+        if tier == "fleet":
+            errors.append("greenfield create mode may not start at Fleet tier")
+    if delegate != "claude-only":
+        required.append(".claude/skills/harness-codex-delegate/SKILL.md")
     if tier in {"standard", "fleet"}:
         required.extend(STANDARD_REQUIRED)
     if tier == "fleet":
         required.extend(FLEET_REQUIRED)
+        if delegate != "codex-cli":
+            errors.append("fleet harness requires implementation_delegate=codex-cli")
     required.extend(dynamic)
 
     missing = [rel for rel in required if not (root / rel).is_file()]
@@ -184,29 +215,50 @@ def main() -> None:
                     errors.append(f"generated domain agent is not read-only: {rel}")
                     break
 
-    codex_skill = read_text(root / ".claude/skills/harness-codex-delegate/SKILL.md")
-    if codex_skill:
+    codex_path = root / ".claude/skills/harness-codex-delegate/SKILL.md"
+    codex_skill = read_text(codex_path)
+    if delegate == "claude-only":
+        if codex_path.exists():
+            errors.append("claude-only profile should not install a Codex delegate skill")
+        info.append("Claude-only implementation transport configured")
+    elif codex_skill:
         forbidden = [
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-skip-permissions",
             "--skip-git-repo-check",
             "danger-full-access",
         ]
+        executable_text = "\n".join(executable_code_blocks(codex_skill))
         for token in forbidden:
-            if token in codex_skill:
-                errors.append(f"unsafe/default-bypass token in Codex delegate skill: {token}")
-        if shutil.which("codex") is None:
-            warnings.append("Codex CLI is not on PATH; delegation skill cannot execute yet")
-        else:
-            info.append("Codex CLI found on PATH")
+            if token in executable_text:
+                errors.append(f"unsafe/default-bypass token in executable Codex command: {token}")
+        if delegate == "codex-plugin":
+            if "codex:codex-rescue" not in codex_skill:
+                errors.append("official Codex plugin transport is missing codex:codex-rescue")
+            else:
+                info.append("Official Codex Claude Code plugin transport configured; verify it in /agents")
+        elif delegate == "codex-cli":
+            if shutil.which("codex") is None:
+                warnings.append("Codex CLI is not on PATH; direct CLI delegation cannot execute yet")
+            else:
+                info.append("Codex CLI found on PATH")
 
     if (root / ".claude/settings.json").exists():
         text = read_text(root / ".claude/settings.json")
         if "bypassPermissions" in text or "dangerously" in text:
             warnings.append("project Claude settings mention bypass/dangerous permissions; review manually")
 
+    if mode == "create":
+        info.append("Greenfield project context is installed under .ai/project")
+        if isinstance(greenfield, dict):
+            info.append(
+                "Greenfield setup depth: "
+                + str(greenfield.get("setup_depth", "context-only"))
+            )
+
     result = {
         "root": str(root),
+        "mode": mode,
         "tier": tier,
         "errors": errors,
         "warnings": warnings,
@@ -217,7 +269,7 @@ def main() -> None:
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print(f"Harness check: {result['status']} (tier: {tier})")
+        print(f"Harness check: {result['status']} (mode: {mode}, tier: {tier})")
         for item in errors:
             print(f"ERROR: {item}")
         for item in warnings:

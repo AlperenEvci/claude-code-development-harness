@@ -1,0 +1,62 @@
+# Implementation Spec: Initial Project Bootstrap
+
+## Goal
+
+Create the first working project scaffold for **{{project_name}}** according to the accepted greenfield context. Produce a minimal, reviewable vertical foundation—not speculative product breadth.
+
+## Current context
+
+- No meaningful application codebase is assumed to exist.
+- Product intent: `.ai/project/brief.md`.
+- Planned architecture: `.ai/project/architecture.md`.
+- Initial roadmap: `.ai/project/roadmap.md`.
+- Blocking questions must be empty before execution.
+
+## Required behavior
+
+1. Create the approved project/tooling scaffold using the confirmed stack.
+2. Establish only the planned source boundaries needed for the first milestone.
+3. Add the approved development and verification scripts.
+4. Include the smallest meaningful automated check supported by the selected stack.
+5. Keep the project runnable without relying on secrets or production services.
+6. Do not implement later roadmap milestones.
+
+## Scope
+
+### Owns
+
+- New application source, configuration, test, and package files required for the first scaffold.
+
+### Must not touch
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `.claude/**`
+- `.ai/harness/**`
+- accepted project briefs or decisions unless the main Claude session explicitly revises them
+
+## Constraints
+
+{{greenfield_technical_constraints_markdown}}
+
+Architecture assumptions to preserve:
+
+{{greenfield_architecture_assumptions_markdown}}
+
+## Acceptance criteria
+
+1. The approved stack is represented by real project files rather than documentation only.
+2. The project exposes the planned local-development and verification commands that were explicitly approved.
+3. The smallest relevant verification gate completes successfully.
+4. No secret values, production credentials, deployments, pushes, or autonomous commits are introduced.
+5. The actual scaffold remains limited to the first milestone and does not invent unresolved product behavior.
+
+## Verification
+
+```bash
+{{greenfield_bootstrap_verification}}
+```
+
+## Report format
+
+Return changed files, scaffolded boundaries, commands created, checks run with exact results, assumptions that became false, and remaining blockers.

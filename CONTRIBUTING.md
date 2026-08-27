@@ -6,7 +6,7 @@
 4. Run:
 
 ```bash
-python3 scripts/run-tests.py
+python3 -m unittest discover -s tests -v
 python3 -m compileall plugins/development-harness/scripts
 ```
 

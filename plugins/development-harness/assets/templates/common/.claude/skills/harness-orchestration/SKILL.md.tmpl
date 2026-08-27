@@ -1,6 +1,6 @@
 ---
 name: harness-orchestration
-description: Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, Codex implementation, and independent verification. Skip the full pipeline for trivial obvious edits.
+description: {{orchestration_description}}
 ---
 
 # Orchestrated Development
@@ -29,7 +29,7 @@ Use when behavior spans files, existing patterns matter, or business logic chang
 3. Synthesize evidence in the main session.
 4. Record a report or decision only when it will remain useful.
 5. Write `.ai/specs/current-task.md` as a self-contained execution contract.
-6. Invoke `harness-codex-delegate` when the contract is complete.
+6. {{standard_execution_step}}
 7. Inspect the actual diff and independently verify each acceptance criterion. {{reviewer_instruction}}
 
 ### Complex
@@ -41,7 +41,7 @@ Use for architecture, broad migrations, cross-domain state, high-risk paths, or 
 3. Resolve conflicts and trade-offs in the main session.
 4. Write one accepted decision set and bounded specs.
 5. {{fleet_instruction}}
-6. Use worktrees for concurrent writes.
+6. Never start concurrent write lanes without worktree isolation and explicit ownership; upgrade the harness first when that machinery is not installed.
 7. Integrate through one orchestrator and run one full integration gate.
 
 ## Artifact semantics

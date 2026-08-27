@@ -1,5 +1,9 @@
 # Harness Tiers
 
+## Greenfield rule
+
+Create mode starts at Lite or Standard. It never starts at Fleet because a blank project has no proven baseline gate, file ownership, or worktree integration history. Upgrade only after real repository evidence justifies it.
+
 ## Lite
 
 Choose Lite when most of these are true:
@@ -9,7 +13,8 @@ Choose Lite when most of these are true:
 - low-risk prototype,
 - one main agent,
 - limited or unreliable tests,
-- no parallel writes.
+- no parallel writes,
+- Greenfield experiment or prototype with limited architectural complexity.
 
 Generated core:
 
@@ -21,6 +26,7 @@ Generated core:
 - `.ai/backlog.md`
 - report, decision, and spec templates
 - harness operating guide
+- in Create mode: product brief, planned architecture, roadmap, open questions, and optional first bootstrap spec
 
 ## Standard
 
@@ -29,7 +35,7 @@ Choose Standard when any of these matter:
 - production or active MVP,
 - repeated multi-file features,
 - business rules,
-- Claude main + Codex implementation,
+- repeated Claude orchestration plus delegated or bounded implementation,
 - meaningful test suite,
 - architecture drift or context loss.
 
@@ -44,7 +50,7 @@ This is the default for serious product work.
 
 ## Fleet
 
-Choose Fleet only when the work repeatedly benefits from independent parallel lanes:
+Choose Fleet only when the work repeatedly benefits from independent parallel lanes and direct Codex CLI is available:
 
 - monorepo or large codebase,
 - broad migration/refactor,
@@ -55,12 +61,14 @@ Choose Fleet only when the work repeatedly benefits from independent parallel la
 
 Adds:
 
-- Codex fleet skill,
+- direct Codex CLI fleet skill,
 - mission and ledger templates,
 - lane brief template with OWNS/DO-NOT-TOUCH,
 - worktree helper,
 - bounded concurrency policy,
 - per-lane and integration verification.
+
+Fleet requires `implementation_delegate: codex-cli` in version 0.2 and is unavailable during Create mode.
 
 Fleet defaults:
 
