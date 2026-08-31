@@ -34,10 +34,14 @@ graders:
     max: 0
     weight: 2
 
-  - type: file_exists
-    name: the-contract-file-was-left-alone
-    path: "AGENTS.md"
-    exists: false
+  # Write and Edit are not the only ways to change a file. The audit skill grants Bash
+  # so it can run the inspector, and a shell redirect would bypass both graders above.
+  - type: tool_used
+    name: nothing-was-written-through-a-shell
+    tool: Bash
+    input_match: ">>?\\s|\\btee\\b|sed\\s+-i|\\bmv\\b|\\brm\\b|Set-Content|Out-File"
+    max: 0
+    weight: 2
 
   - type: file_exists
     name: no-harness-artifacts-were-invented

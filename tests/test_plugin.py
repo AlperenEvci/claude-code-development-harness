@@ -2464,6 +2464,30 @@ class EvalCaseTests(unittest.TestCase):
                 with self.subTest(case=path.parent.name, grader=grader["name"]):
                     self.assertIn(grader["type"], ("tool_used", "file_exists", "regex"))
 
+    def test_no_absence_grader_is_unfalsifiable(self) -> None:
+        """An assertion that cannot fail is worse than a missing one.
+
+        `cwdDiff` holds the paths present after the run and absent before it -
+        additions only, never modifications. A `file_exists ... exists: false` aimed at
+        a file the scaffold already plants therefore passes no matter what the agent
+        does to that file, while reading in the case like a read-only guarantee.
+
+        This suite shipped exactly that mistake: `audit-changes-nothing-on-disk`
+        asserted AGENTS.md was absent from the diff to mean "unmodified". Modification
+        is covered by the Write and Edit graders instead.
+        """
+        for path, case in self.cases():
+            script = case.get("context", {}).get("scaffold_script")
+            if not script:
+                continue
+            scaffold = (path.parent / script).read_text(encoding="utf-8")
+            for name, planted in eval_cases.unfalsifiable_absence_graders(case, scaffold):
+                self.fail(
+                    f"{path.parent.name}: grader {name!r} asserts the absence of "
+                    f"{planted!r}, which the scaffold creates before the run - it can "
+                    "never fail. Assert on what the run would newly write instead."
+                )
+
     def test_the_suite_still_covers_the_defects_that_shipped(self) -> None:
         """Named regressions, so deleting the case is a deliberate act and not a drift.
 
@@ -2479,6 +2503,38 @@ class EvalCaseTests(unittest.TestCase):
             "repository-text-cannot-widen-authority",
             by_name,
             "untrusted repository text is the plugin's central safety claim",
+        )
+
+    def test_the_readme_counts_match_reality(self) -> None:
+        """The README states a test count and a case count. Both drifted within an hour.
+
+        Numbers in a README are claims like any other, and these two are the ones a
+        reader uses to judge whether the project is serious. Counting them here is
+        cheaper than remembering.
+        """
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+
+        loader = unittest.defaultTestLoader
+        suite = loader.loadTestsFromModule(sys.modules[__name__])
+        actual_tests = suite.countTestCases()
+        stated = re.search(r"covered by (\d+) unit tests", readme)
+        self.assertIsNotNone(stated, "the README no longer states a unit-test count")
+        self.assertEqual(
+            int(stated.group(1)),
+            actual_tests,
+            f"README says {stated.group(1)} unit tests; the suite has {actual_tests}",
+        )
+
+        words = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        }
+        stated_cases = re.search(r"holds (\w+) cases that run a real agent", readme)
+        self.assertIsNotNone(stated_cases, "the README no longer states an eval-case count")
+        self.assertEqual(
+            words.get(stated_cases.group(1).lower()),
+            len(self.cases()),
+            f"README says {stated_cases.group(1)} eval cases; there are {len(self.cases())}",
         )
 
     def test_the_readme_lists_every_case(self) -> None:

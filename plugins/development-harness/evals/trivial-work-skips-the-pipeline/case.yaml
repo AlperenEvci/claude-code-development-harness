@@ -42,9 +42,18 @@ graders:
     arm: both
     weight: 3
 
+  # Both names are live in the tool registry and which one a spawn records is not
+  # something this suite should bet on. Asserting each separately costs nothing and
+  # removes the guess.
   - type: tool_used
     name: no-subagent-was-spawned-for-one-word
     tool: Task
+    max: 0
+    weight: 2
+
+  - type: tool_used
+    name: no-agent-was-spawned-for-one-word
+    tool: Agent
     max: 0
     weight: 2
 

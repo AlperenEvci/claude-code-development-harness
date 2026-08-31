@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.2.1 — 2026-08-31
+
+### Fixed — a grader that could not fail, and the guard that now catches the next one
+
+Reading the runner's implementation rather than trusting the shape of its schema turned
+up a defect in the suite shipped an hour earlier. `cwdDiff`, the input to every
+`file_exists` grader, is built by walking the working directory before and after the run
+and keeping the paths present only in the second walk. It is **additions only, never
+modifications**.
+
+So `audit-changes-nothing-on-disk` asserting `AGENTS.md` was absent from the diff, to
+mean "the audit left it alone", could not fail. The fixture plants `AGENTS.md`, so the
+path is in the before-walk, so it is never in the diff — the grader would have passed
+while the agent rewrote the file, and it read in the case file like a read-only
+guarantee. An assertion that cannot fail is worse than a missing one, because it counts
+as coverage.
+
+Rather than only fixing the instance, `test_no_absence_grader_is_unfalsifiable` now
+compiles each `exists: false` glob with a port of the runner's own glob compiler and
+fails if it matches a file the case's scaffold plants. It was confirmed to catch the
+real defect, to catch a freshly planted synthetic one, and to leave all twelve
+legitimate absence graders alone.
+
+That guard had a bug of its own on the first pass, found the same way: `lstrip("./")`
+ate the leading dot of a dotfile, recording `.env` as `env`, so the guard went blind on
+exactly the paths that carry secrets and permissions. Fixed to strip a leading `./` only.
+
+### Fixed — two graders that were resting on a guess
+
+- `audit-changes-nothing-on-disk` asserted read-only through `Write` and `Edit`, while
+  the audit skill also grants `Bash`. A shell redirect went straight through the middle
+  of the claim. A third grader now covers redirects, `tee`, `sed -i`, `mv`, `rm`, and
+  the PowerShell equivalents.
+- `trivial-work-skips-the-pipeline` asserted no subagent was spawned by watching `Task`.
+  Both `Task` and `Agent` are live names in the tool registry, and which one a spawn
+  records is not something this suite should bet on. Both are asserted now.
+
+### Added — `setup` finally has behavioral coverage
+
+`setup` is the skill that writes files, and it was the last of the five commands with
+none. Its interview cannot be graded non-interactively — nobody is there to answer it —
+but the prohibitions in its safety contract need no answers to hold.
+
+`setup-builds-nothing-before-the-dry-run` puts a blank folder and a rough product brief
+in front of it, which is the setting where being helpful means being wrong. Ten
+deterministic graders: no package manager install, no project scaffolder, no `git init`
+or commit, no `.git`, no `package.json`, no `node_modules`, and nothing written into the
+project before the dry run — no `CLAUDE.md`, no `AGENTS.md`, no installer staged inside
+the target directory.
+
+The interview itself remains uncovered. `context.history_file` is the likely route in
+and has not been tried.
+
+### Added — the README's own numbers are now pinned
+
+The README states a unit-test count and an eval-case count, and both went stale within
+an hour of being written. They are the two figures a reader uses to judge whether the
+project is serious, which makes them claims like any other.
+`test_the_readme_counts_match_reality` counts the suite and the cases and compares.
+
 ## 1.2.0 — 2026-08-31
 
 ### Added — a behavioral eval suite, because the tests measured the wrong thing

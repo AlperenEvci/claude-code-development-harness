@@ -398,6 +398,80 @@ def validate(case, where: str) -> dict:
     return case
 
 
+def glob_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Port of the runner's glob compiler, so a `file_exists` path can be reasoned about.
+
+    Kept character-for-character equivalent to the runner's version: `**/` spans
+    directories, a trailing `**` matches anything, a lone `*` stops at a separator, `?`
+    is one character, and regex metacharacters are escaped.
+    """
+    out, index, specials = "^", 0, set(".+^${}()|[]\\")
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if pattern[index + 1 : index + 2] == "*":
+                if pattern[index + 2 : index + 3] == "/":
+                    out += "(?:.*/)?"
+                    index += 3
+                else:
+                    out += ".*"
+                    index += 2
+            else:
+                out += "[^/]*"
+                index += 1
+            continue
+        if char == "?":
+            out += "."
+        elif char in specials:
+            out += "\\" + char
+        else:
+            out += char
+        index += 1
+    return re.compile(out + "$")
+
+
+def scaffold_creates(script: str) -> set:
+    """The file paths a scaffold script writes, as the runner's walk would see them.
+
+    Only files matter here. Directories are excluded deliberately: an empty directory
+    made by `mkdir -p` is in the before-snapshot too, so a grader pointed at a path
+    *inside* it can still legitimately fail.
+    """
+    created = set()
+    for line in script.splitlines():
+        stripped = line.strip()
+        match = re.match(r"(?:cat|printf|echo|tee)\s[^>]*>>?\s*([^\s<]+)", stripped)
+        if not match:
+            match = re.match(r">\s*([^\s<]+)", stripped)
+        if match:
+            # Strip a leading "./" only. `lstrip("./")` would eat the leading dot of a
+            # dotfile, recording `.env` as `env` and `.claude/x` as `claude/x` - so the
+            # guard would go quietly blind on exactly the paths that carry secrets and
+            # permissions, which are the ones worth guarding.
+            created.add(re.sub(r"^\./", "", match.group(1).strip("\"'")))
+    return created
+
+
+def unfalsifiable_absence_graders(case, scaffold_text: str):
+    """Yield graders that assert absence of something the run could never have created.
+
+    `cwdDiff` is the set of paths present after the run and absent before it - additions
+    only, never modifications. So `file_exists: {path: AGENTS.md, exists: false}` against
+    a fixture that already ships AGENTS.md is not a read-only assertion at all: the path
+    cannot appear in the diff by construction, so the grader passes even when the agent
+    rewrites the file. An assertion that cannot fail is worse than a missing one, because
+    it reads as coverage.
+    """
+    planted = scaffold_creates(scaffold_text)
+    for grader in case.get("graders", []):
+        if grader.get("type") != "file_exists" or grader.get("exists", True) is not False:
+            continue
+        matcher = glob_to_regex(grader["path"])
+        hit = next((path for path in planted if matcher.match(path)), None)
+        if hit:
+            yield grader["name"], hit
+
+
 def discover(eval_dir: Path):
     """Yield (path, parsed case) for every case under `eval_dir`, results/ excluded."""
     for path in sorted(eval_dir.glob("**/case.yaml")):
