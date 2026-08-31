@@ -55,9 +55,20 @@
 - Rendered defaults, custom values, and all six invalid-policy rejections verified directly on Windows by bypassing the validator step.
 - Validator regression checks verified by calling `check_context_policy` in isolation: missing section, band drift, and absent policy are each caught.
 - All three `examples/*.json` still render, including the two with no `context_policy` — backward compatibility holds.
-- Full suite on Windows: 27 tests, 15 failing. Baseline before Phase 1 was 13 failing, and the delta is exactly the two new tests that call `validate_harness.py` through the shared `render()` helper. Same known `bash -n` blocker, not a regression.
-- **Not yet verified on CI.** `bash scripts/validate-repo.sh` cannot run on this machine. Phase 1 is not proven until ubuntu-latest is green.
+- Full suite on Windows: 27 tests, 15 failing — all environmental, see Known risks.
+- **CI green on ubuntu-latest: 27 tests, `OK`.** Run 33372597743 on commit `1afce62`. All three new context-policy tests pass. Phase 1 is verified against the authoritative gate.
+
+### Repository
+
+Work continues on a private copy, `AlperenEvci/claude-code-development-harness`.
+
+- `origin` -> `AlperenEvci/...` (private, writable)
+- `upstream` -> `egecan-af/...` (public, read-only; pull from it, never push to it)
+
+GitHub cannot fork a public repository privately, so this is a mirror rather than a fork. There is no automatic link back to upstream: sync deliberately with `git fetch upstream`.
 
 ### Exact next step
 
-Push Phase 1 and confirm CI is green before starting Phase 2. Phase 2 is graph and loop engineering: graph and loop specs in the profile, generated Workflow scripts under `.claude/workflows/`, and `scripts/harness_graph.py` for DAG validation with cycle rejection and topological ordering.
+Start Phase 2 on a feature branch: graph and loop engineering. Graph and loop specs in the profile, generated Workflow scripts under `.claude/workflows/`, and `scripts/harness_graph.py` for DAG validation with cycle rejection and topological ordering. Loops need an explicit termination condition and an iteration cap.
+
+The two baseline commits went to `main` to establish the private repository. From Phase 2 onward, follow the repository's own `feature-branches` policy.
