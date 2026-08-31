@@ -164,6 +164,22 @@ Two details that make a sweep silently useless if missed:
 - Liveness is the presence of `pid`, not a string comparison on `state`. A stopped
   session keeps `state: "done"` under `--all` until `claude rm` removes it.
 
+## Reading the record back
+
+```bash
+python scripts/ai-harness/harness_report.py --out .ai/runs/report.html
+```
+
+Joins the mailboxes, the ledger, the checkpoints, and the declared graphs into one
+page, grouped by `correlation_id` rather than by session, because that is the unit
+of work. `--json` emits the same model; no flag prints a summary.
+
+It reads files and runs nothing, so it reports what sessions wrote, not what is
+running — `claude agents --json --cwd .` remains the only answer to that.
+
+Post with `--correlation` or the report has nothing to group by, and the run shows
+up as a pile of unlinked envelopes with no duration and no cost.
+
 ## Never
 
 `--dangerously-skip-permissions` and `--allow-dangerously-skip-permissions` must

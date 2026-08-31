@@ -1,48 +1,85 @@
 ---
 name: harness-orchestration
-description: Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, bounded Claude implementation, and independent verification. Skip the full pipeline for trivial obvious edits.
+description: Route a software-development task to the cheapest step that can carry it, while protecting the main Claude context. Use when you cannot name the files a change touches, or when something other than this session will execute it: isolated reconnaissance, durable decisions, a self-contained spec, bounded Claude implementation, and independent verification. A change whose files you can already name is made directly, without any of it.
 ---
 
 # Orchestrated Development
 
 The main Claude session owns ambiguity resolution, architecture, synthesis, specification, integration, and the final gate.
 
-## Classify before acting
+## Route before acting
 
-### Trivial
+Escalation buys isolation, not quality. Every step outward costs a round trip, a cold context, and an artifact somebody has to read later. Spend it on risk you can name, never on a feeling that the task deserves ceremony.
 
-Examples: typo, obvious copy change, tiny style adjustment, or a bounded one-line fix with direct verification.
+Two questions decide the route, and both are answerable in seconds:
 
-1. Inspect the relevant file.
-2. Make or delegate the small change.
-3. Run the smallest relevant check.
-4. Report the diff and result.
+1. **Can you name the files this change touches?** If not, you need reconnaissance.
+2. **Will something other than this session execute it?** If not, you do not need a spec.
 
-Do not create reports, decisions, specs, or fleet state unless the task reveals a larger problem.
+Route on the answers. When they disagree with your instinct, follow the answers.
+
+### Direct
+
+You can name the files, and you will make the change here. Most real work lands here: a bug fix, a bounded feature, a refactor inside known files, a dependency bump, a missing test.
+
+1. Read the files you named.
+2. Make the change.
+3. Run the smallest check that would fail if you got it wrong.
+4. Report the diff and the result.
+
+No report, no decision, no spec, no delegate, no reviewer. Write a durable artifact only when the task uncovered something a later session would otherwise rediscover.
+
+Escalate mid-task when the change reaches past the files you named, or the codebase contradicts what you assumed going in. That is the signal. Growing unease is not.
 
 ### Standard
 
-Use when behavior spans files, existing patterns matter, or business logic changes.
+Reconnaissance or delegation is genuinely required: you could not name the files, the change spans surfaces whose existing patterns you have not read, or a delegate will execute it.
 
-1. Inspect only relevant `.ai/` artifacts.
-2. Use `harness-codebase-researcher` when raw exploration would pollute the main context.
-3. Synthesize evidence in the main session.
-4. Record a report or decision only when it will remain useful.
-5. Write `.ai/specs/current-task.md` as a self-contained execution contract.
-6. Execute the bounded spec in Claude or delegate it to a narrow Claude implementation subagent.
-7. Inspect the actual diff and independently verify each acceptance criterion. Use `harness-code-reviewer` for an independent, read-only verification pass when the change is important or risky.
+1. Read only the `.ai/` artifacts that bear on the decision.
+2. Dispatch `harness-codebase-researcher` with the Agent tool when raw exploration would pollute the main context. Send it a question, not a directory. If one search of your own would answer it, run that search instead.
+3. Synthesize the evidence here.
+4. Write `.ai/specs/current-task.md` **only when a delegate will execute it.** A spec for work you will do yourself is a transcript of what you already know.
+5. Execute the bounded spec in Claude or delegate it to a narrow Claude implementation subagent.
+6. Inspect the actual diff and verify each acceptance criterion against observable behavior.
+
+Record a report or decision when the finding outlives the task. A conclusion you reached and acted on in the same session is already in the diff.
 
 ### Complex
 
-Use for architecture, broad migrations, cross-domain state, high-risk paths, or genuinely independent implementation surfaces.
+Architecture, broad migration, cross-domain state, a high-risk path, or genuinely independent implementation surfaces.
 
-1. Split reconnaissance by question, not arbitrary file count.
-2. Gather read-only reports in isolated contexts.
-3. Resolve conflicts and trade-offs in the main session.
+1. Split reconnaissance by question, not by arbitrary file count.
+2. Dispatch the read-only investigations together in one message so they run concurrently, and collect the reports as they land.
+3. Resolve conflicts and trade-offs here.
 4. Write one accepted decision set and bounded specs.
 5. Fleet is not installed. Keep execution sequential unless the harness is deliberately upgraded.
 6. Never start concurrent write lanes without worktree isolation and explicit ownership; upgrade the harness first when that machinery is not installed.
 7. Integrate through one orchestrator and run one full integration gate.
+
+## Dispatch
+
+Two mechanisms exist and they are not interchangeable. Picking the expensive one for a cheap job is the single most common way this harness gets slow.
+
+**The Agent tool is the default.** It runs a subagent in an isolated context, in the same process, and returns the conclusion straight into this conversation. No copy-paste, no return channel to poll, nothing left running afterwards. Reconnaissance, review, and verification all belong here - that is nearly every dispatch this harness makes.
+
+Independent agents go out **in one message, not one after another.** Three questions dispatched together cost one wait; dispatched in sequence they cost three. Split by question, never by file count, and give each one a question rather than a directory.
+
+**A separate CLI session is for what the Agent tool structurally cannot do:** a lane that needs its own worktree, that must outlive this session, or that genuinely writes concurrently with another lane. It costs a cold start, a filesystem return channel, and a sweep afterwards to catch orphans. Pay that only for those properties, never for isolation alone - the Agent tool already provides isolation.
+
+When `scripts/ai-harness/harness_session.py` is absent, this tier installs no session runtime and the Agent tool is the only dispatch available. When it is present, `/session` drives it; read-only tiers can be run directly with `--exec`, while a writing tier prints its command for the operator to run.
+
+## Independent review
+
+Dispatch `harness-code-reviewer` with the Agent tool for an independent, read-only pass.
+
+An independent pass **replaces** your own verification; it does not follow it. Two sequential reviews of one diff find what one finds, at twice the cost.
+
+Ask for one when any of these holds, and skip it otherwise:
+
+- the change touches a path listed under Sensitive areas in `AGENTS.md`,
+- the same author wrote both a behavior and the test that proves it,
+- the diff grew large enough that you stopped reading it closely,
+- a delegate reported completion and you hold no direct evidence of it.
 
 ## Artifact semantics
 
@@ -52,11 +89,11 @@ Use for architecture, broad migrations, cross-domain state, high-risk paths, or 
 - **Run ledger:** temporary coordination state.
 - **Backlog:** resumable unfinished state.
 
-Do not paste raw logs or full file dumps into durable artifacts.
+An artifact nobody will open again is cost without benefit. Do not paste raw logs or full file dumps into durable artifacts.
 
 ## Specification gate
 
-A delegate that cannot see the original conversation must be able to execute from the spec alone. Include:
+Reached only when something other than this session will execute the work. A delegate that cannot see the original conversation must be able to execute from the spec alone. Include:
 
 - goal and current context,
 - explicit behavior,

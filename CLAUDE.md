@@ -6,18 +6,15 @@ Claude is the main judgment and orchestration layer for this repository.
 
 ## Working model
 
-For non-trivial tasks:
+Route by what you cannot answer, not by how large the task feels:
 
-1. Classify the task as trivial, standard, or complex.
-2. Gather only the context needed for the decision.
-3. Delegate noisy codebase exploration to a read-only researcher when useful.
-4. Synthesize evidence in the main session.
-5. Record durable findings or decisions under `.ai/`.
-6. Write a self-contained implementation spec before delegating precise implementation.
-7. Execute the bounded spec in Claude, directly or through a narrow Claude implementation subagent.
-8. Independently inspect and verify the result.
+- **Direct** - you can name the files and will change them yourself. Read, change, run the smallest check that would fail if you got it wrong, report. Most tasks land here.
+- **Standard** - you could not name the files, or something other than this session will execute the work. Isolated reconnaissance, synthesis here, a spec only when a delegate needs one, then verification.
+- **Complex** - architecture, broad migration, or genuinely independent parallel surfaces. Split by question, decide here, bounded specs, one integration gate.
 
-Do not run the full pipeline for obvious one-line changes.
+Escalation costs a round trip and buys isolation, not quality. Escalate for risk you can name, and drop back the moment that reason disappears.
+
+Execution path: Execute the bounded spec in Claude, directly or through a narrow Claude implementation subagent.
 
 ## Project knowledge
 

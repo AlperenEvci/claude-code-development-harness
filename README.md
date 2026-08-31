@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.7.0](https://img.shields.io/badge/Version-1.7.0-7C3AED?style=flat-square)
+![Version 1.9.0](https://img.shields.io/badge/Version-1.9.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -299,9 +299,24 @@ python scripts/ai-harness/harness_session.py sweep --root . --stop
 
 The sweep never counts the session running it — a teardown that stopped itself first would abandon every sibling it had not yet reached.
 
-The four runtime scripts are copied verbatim rather than templated, so the installed code is the code the plugin's own suite tested, and the validator rejects a copy that has drifted from its original.
+The seven runtime scripts are copied verbatim rather than templated, so the installed code is the code the plugin's own suite tested, and the validator rejects a copy that has drifted from its original.
 
 The long-form version of all of this, including what was measured against the real CLI and what it corrected, is in [the runtime guide](docs/runtime.md).
+
+### 6. One page for what actually happened
+
+Everything above writes a record — envelopes, the ledger, checkpoints, the band. Six scripts recording faithfully into four different trees, and no way to read the result except one file at a time. `harness_report.py` is the seventh, and the only one that does not write:
+
+```bash
+python scripts/ai-harness/harness_report.py --out .ai/runs/report.html
+python scripts/ai-harness/harness_report.py --json    # the same model, for other tools
+```
+
+It groups by `correlation_id` rather than by session, because that is the unit of work: one question is often two agents across two sessions, and a view organised by process cuts it in half. Envelopes with no `trace` are collected separately and never given a duration or a token count — an unmeasured trace and a zero one are different facts.
+
+It reads files and runs nothing. It never shells out to `claude agents --json`, so it reports what sessions wrote rather than what is running; the upside is that it still works months later on a machine with no CLI, and produces the same bytes twice.
+
+Everything it renders is agent-written text, so the page it emits contains no `<script>` element at all, no inline handler, no external stylesheet or font, and carries `default-src 'none'`. Evidence paths render as text, never links. Strings are redacted on the way out in `--json` as well as in the page, and no file that an evidence entry points at is ever opened.
 
 ## Greenfield mode: idea → durable project context
 
@@ -500,7 +515,7 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 179 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 196 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
 **Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds seven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 

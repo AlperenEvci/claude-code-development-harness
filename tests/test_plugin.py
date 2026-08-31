@@ -73,6 +73,7 @@ AGENTGEN = load_script("harness_agentgen.py", "harness_agentgen_under_test")
 CHECKPOINT = load_script("harness_checkpoint.py", "harness_checkpoint_under_test")
 RENDERER = load_script("render_harness.py", "render_harness_under_test")
 PROGRESS = load_script("harness_progress.py", "harness_progress_under_test")
+REPORT = load_script("harness_report.py", "harness_report_under_test")
 INSPECTOR = load_script("inspect_project.py", "inspect_project_under_test")
 BASH = VALIDATOR.find_bash()
 
@@ -1814,6 +1815,52 @@ class SessionLaunchTests(unittest.TestCase):
 
         argv = SESSION.launch_argv("verifier", "Run the gate")
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Bash")
+
+    def test_exec_refuses_a_writing_tier_but_still_prints_its_command(self) -> None:
+        """The gate is `writes`, and a refusal must leave the operator equipped.
+
+        `--exec` exists because copy-pasting a read-only session buys no safety.
+        That argument stops exactly at the tier that changes the repository, so
+        an implementer is refused - and the command is printed anyway, because a
+        refusal that withholds the command turns a policy into an obstacle.
+        """
+        proc = run(
+            PYTHON,
+            str(SCRIPTS / "harness_session.py"),
+            "launch",
+            "--capability",
+            "implementer",
+            "--exec",
+            "--worktree",
+            "lane-a",
+            "--scope",
+            "src",
+            "--task",
+            "Execute the spec",
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--exec refuses implementer", proc.stderr)
+        self.assertIn("--permission-mode acceptEdits", proc.stdout)
+
+    def test_exec_is_gated_on_the_shared_tier_table_not_a_second_list(self) -> None:
+        """Two lists of who may write is one list that can drift out of review."""
+        source = (SCRIPTS / "harness_session.py").read_text(encoding="utf-8")
+        self.assertIn('CAPABILITY_TIERS[capability]["writes"]', source)
+
+    def test_launch_still_prints_by_default(self) -> None:
+        """Without --exec nothing runs, so the default stays inspectable."""
+        proc = run(
+            PYTHON,
+            str(SCRIPTS / "harness_session.py"),
+            "launch",
+            "--capability",
+            "reader",
+            "--task",
+            "Map the retry path",
+        )
+        self.assertIn("--tools Read,Grep,Glob", proc.stdout)
+        self.assertIn("Map the retry path", proc.stdout)
 
     def test_a_read_only_tier_cannot_be_backgrounded(self) -> None:
         """`--bg` refuses `--print`, and a reader has no Write to post an envelope."""
@@ -3560,3 +3607,312 @@ class InstalledCheckerAgreesWithGeneratorTests(unittest.TestCase):
                 "generated domain agent declares no capability tier",
                 result.stdout + result.stderr,
             )
+
+
+class ReportTests(unittest.TestCase):
+    """The report is a reader, and everything it reads is untrusted text.
+
+    Two properties carry the weight here. The page is built entirely from
+    agent-written strings, so escaping is not a nicety; and an envelope with no
+    `trace` must never acquire a figure on the way to the screen, because a
+    rendered zero is a measurement nobody made.
+    """
+
+    def fixture(self, root: Path) -> dict[str, str]:
+        """A repository with two work units, an unlinked envelope, and a ledger."""
+        (root / ".ai/harness").mkdir(parents=True)
+        write_lf(
+            root / ".ai/harness/project-profile.json",
+            json.dumps(
+                {
+                    "project_name": "Fixture",
+                    "harness_tier": "standard",
+                    "context_policy": {
+                        "working_band": {
+                            "floor_tokens": 150000,
+                            "ceiling_tokens": 200000,
+                        },
+                        "on_ceiling": "checkpoint-and-handoff",
+                    },
+                    "graphs": [
+                        {
+                            "name": "review-changes",
+                            "nodes": [
+                                {"id": "review", "prompt": "x"},
+                                {"id": "verify", "prompt": "x",
+                                 "depends_on": ["review"]},
+                            ],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + chr(10),
+        )
+
+        first = "11111111-1111-4111-8111-111111111111"
+        second = "22222222-2222-4222-8222-222222222222"
+        unit = "33333333-3333-4333-8333-333333333333"
+
+        BUS.write_envelope(root, BUS.build_envelope(
+            session_id=first, sender="harness-codebase-researcher",
+            capability="reader", kind="finding",
+            summary="Retries run through the billing worker",
+            body={"call_sites": 3}, evidence=["src/billing/worker.py:112"],
+            correlation_id=unit, duration_ms=42000,
+            tokens_in=8000, tokens_out=1200,
+        ))
+        BUS.write_envelope(root, BUS.build_envelope(
+            session_id=second, sender="harness-code-reviewer",
+            capability="verifier", kind="result",
+            summary="Confirmed against the spec",
+            body={"verdict": "confirmed"}, correlation_id=unit, duration_ms=15000,
+        ))
+        # No correlation id and no trace at all: the unlinked case, carrying both
+        # an injection payload and a credential.
+        BUS.write_envelope(root, BUS.build_envelope(
+            session_id=second, sender="harness-code-reviewer",
+            capability="reader", kind="finding",
+            summary='<img src=x onerror=alert(1)> and "quotes"',
+            body={"token": "ghp_0123456789abcdefghij", "safe": "ok"},
+        ))
+
+        ledger = PROGRESS.empty_ledger()
+        ledger["items"] = [
+            {"id": "renders", "title": "The report renders", "verify": "python -m unittest",
+             "passes": True, "evidence": "exit 0", "added_at": "2026-08-31T00:00:00Z"},
+            {"id": "unproven", "title": "Still unproven", "verify": None,
+             "passes": False, "evidence": None, "added_at": "2026-08-31T00:00:00Z"},
+        ]
+        write_lf(root / ".ai/progress.json", json.dumps(ledger, indent=2) + chr(10))
+
+        run_dir = root / ".ai/runs/20260831T120000Z-ship-it"
+        run_dir.mkdir(parents=True)
+        write_lf(run_dir / "checkpoint.json", json.dumps(
+            CHECKPOINT.build_checkpoint(
+                intent="Ship the report layer",
+                next_steps=["Wire the renderer"],
+                artifacts=["scripts/ai-harness/harness_report.py"],
+                derived=[], note=None, used=182000,
+                policy={"floor_tokens": 150000, "ceiling_tokens": 200000,
+                        "on_ceiling": "checkpoint-and-handoff"},
+                stamp=CHECKPOINT.now(),
+            ),
+            indent=2,
+        ) + chr(10))
+
+        return {"correlated": unit}
+
+    def model(self, root: Path) -> dict:
+        return REPORT.build_model(root)
+
+    # -- structure ---------------------------------------------------------
+
+    def test_envelopes_group_by_correlation_id_not_by_session(self) -> None:
+        """One unit of work spans two sessions; a per-session view would split it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ids = self.fixture(root)
+            model = self.model(root)
+
+            linked = [unit for unit in model["work_units"] if unit["linked"]]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0]["correlation_id"], ids["correlated"])
+            self.assertEqual(linked[0]["envelope_count"], 2)
+            self.assertEqual(len(linked[0]["sessions"]), 2)
+
+    def test_an_unmeasured_trace_never_becomes_a_figure(self) -> None:
+        """A blank trace and a zero one are different facts. Only one was measured."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.fixture(root)
+            model = self.model(root)
+
+            unlinked = [unit for unit in model["work_units"] if not unit["linked"]]
+            self.assertEqual(len(unlinked), 1)
+            self.assertIsNone(unlinked[0]["duration_ms"])
+            self.assertIsNone(unlinked[0]["tokens"])
+            self.assertIsNone(unlinked[0]["envelopes"][0]["trace"])
+
+            html_text = REPORT.render_html(model)
+            self.assertIn("Nothing measured them", html_text)
+            self.assertNotIn("0 in / 0 out", html_text)
+
+    # -- the page is built from untrusted text ------------------------------
+
+    def test_the_page_carries_no_script_and_loads_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.fixture(root)
+            html_text = REPORT.render_html(self.model(root))
+
+            self.assertNotIn("<script", html_text.lower())
+            self.assertNotIn("javascript:", html_text.lower())
+            self.assertNotIn("http://", html_text)
+            self.assertNotIn("https://", html_text)
+            self.assertIn("default-src 'none'", html_text)
+
+    def test_agent_written_text_reaches_the_page_escaped(self) -> None:
+        """A summary is written by an agent. Rendering it raw is an attack surface."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.fixture(root)
+            html_text = REPORT.render_html(self.model(root))
+
+            self.assertNotIn("<img src=x", html_text)
+            self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html_text)
+
+    def test_a_credential_in_a_body_is_redacted_in_both_outputs(self) -> None:
+        """`--json` is redacted on the same terms the page is, or it is the leak."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.fixture(root)
+            model = self.model(root)
+
+            as_json = json.dumps(model)
+            self.assertNotIn("ghp_0123456789abcdefghij", as_json)
+            self.assertIn("[redacted]", as_json)
+            self.assertNotIn("ghp_0123456789abcdefghij", REPORT.render_html(model))
+
+    def test_redaction_leaves_ordinary_words_alone(self) -> None:
+        """Over-redaction that eats prose would make the report useless instead."""
+        self.assertEqual(REPORT.redact({"monkey": "bars and stripes"}),
+                         {"monkey": "bars and stripes"})
+        self.assertEqual(REPORT.redact({"keyboard": "mechanical layout"}),
+                         {"keyboard": "mechanical layout"})
+        self.assertEqual(REPORT.redact({"api_key": "0123456789abcdef"}),
+                         {"api_key": "[redacted]"})
+        self.assertIn("[redacted private key]",
+                      REPORT.redact_text("-----BEGIN RSA PRIVATE KEY-----\nabc\n"))
+
+    # -- degradation and refusals -------------------------------------------
+
+    def test_a_repository_with_no_records_reports_empty_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = run(PYTHON, str(SCRIPTS / "harness_report.py"),
+                         "--root", str(root), check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("work units: 0", result.stdout)
+            self.assertIn("ledger: none", result.stdout)
+
+            model = self.model(root)
+            self.assertEqual(model["work_units"], [])
+            self.assertEqual(model["checkpoints"], [])
+            self.assertEqual(model["graphs"], [])
+            self.assertFalse(model["profile"]["present"])
+
+    def test_a_malformed_envelope_is_flagged_rather_than_trusted_or_dropped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.fixture(root)
+            mailbox = next((root / ".ai/bus").iterdir())
+            write_lf(mailbox / "9999-broken.json", '{"kind": "result"}')
+
+            entries = [entry for unit in self.model(root)["work_units"]
+                       for entry in unit["envelopes"]]
+            flagged = [entry for entry in entries if entry["errors"]]
+            self.assertTrue(flagged, "a malformed envelope was accepted silently")
+            self.assertIn("invalid", REPORT.render_html(self.model(root)))
+
+    def test_the_out_path_never_overwrites_silently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.fixture(root)
+            out = root / "report.html"
+            write_lf(out, "pre-existing")
+
+            refused = run(PYTHON, str(SCRIPTS / "harness_report.py"), "--root", str(root),
+                          "--out", str(out), check=False)
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(out.read_text(encoding="utf-8"), "pre-existing")
+
+            forced = run(PYTHON, str(SCRIPTS / "harness_report.py"), "--root", str(root),
+                         "--out", str(out), "--force", check=False)
+            self.assertEqual(forced.returncode, 0, forced.stderr)
+            self.assertIn("<!doctype html>", out.read_text(encoding="utf-8"))
+
+    def test_the_symlink_refusal_binds_without_needing_symlink_privilege(self) -> None:
+        """The real symlink test below skips on Windows; the guard is tested here."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "out" / "report.html"
+
+            def pretend(self: Path) -> bool:
+                return self == target.parent
+
+            with mock.patch.object(Path, "is_symlink", pretend):
+                with self.assertRaises(REPORT.ReportError) as caught:
+                    REPORT.refuse_symlinks(target.parent, root)
+            self.assertIn("symlink", str(caught.exception))
+
+    @unittest.skipUnless(SYMLINKS, "symlink creation requires privilege here")
+    def test_the_report_refuses_to_write_through_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            outside = Path(temp) / "elsewhere"
+            outside.mkdir()
+            os.symlink(outside, root / "out", target_is_directory=True)
+
+            with self.assertRaises(REPORT.ReportError) as caught:
+                REPORT.write_output(root / "out/report.html", "x", root, force=True)
+            self.assertIn("symlink", str(caught.exception))
+
+    # -- it is only useful if the contract names it -------------------------
+
+    def test_the_generated_contract_documents_the_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "profile.json"
+            output = Path(temp) / "generated"
+            write_lf(config, json.dumps(profile("standard"), indent=2) + chr(10))
+            run(PYTHON, str(SCRIPTS / "render_harness.py"),
+                "--config", str(config), "--output", str(output))
+
+            text = (output / "payload/CLAUDE.md").read_text(encoding="utf-8")
+            self.assertIn("harness_report.py --out", text)
+
+            claude_md = output / "payload/CLAUDE.md"
+            write_lf(claude_md, text.replace("harness_report.py --out",
+                                             "harness_report.py --json"))
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(profile("standard"), output / "payload", errors)
+            self.assertTrue(
+                any("does not document the harness report" in item for item in errors),
+                errors,
+            )
+
+    def test_the_documented_report_path_is_not_committed_by_default(self) -> None:
+        """A rendered report is stale the moment the records move on.
+
+        `.ai/runs/` ships a `.gitignore` that covers everything in it; the `.ai/`
+        root does not. A contract that told an operator to write the page to
+        `.ai/report.html` would put a generated, always-outdated artifact into
+        version control in every repository this harness is installed into.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "profile.json"
+            output = Path(temp) / "generated"
+            write_lf(config, json.dumps(profile("standard"), indent=2) + chr(10))
+            run(PYTHON, str(SCRIPTS / "render_harness.py"),
+                "--config", str(config), "--output", str(output))
+            payload = output / "payload"
+
+            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            documented = re.findall(r"harness_report\.py --out (\S+)", text)
+            self.assertTrue(documented, "CLAUDE.md documents no --out path")
+            for path in documented:
+                with self.subTest(path=path):
+                    self.assertTrue(
+                        path.startswith(".ai/runs/"),
+                        f"{path} is not under the directory the harness gitignores",
+                    )
+
+            ignore = payload / ".ai/runs/.gitignore"
+            self.assertTrue(ignore.is_file(), "no .gitignore under .ai/runs")
+            self.assertIn("*", ignore.read_text(encoding="utf-8"))
+
+    def test_the_report_defaults_match_the_checkpoint_defaults(self) -> None:
+        """Two bands that disagree would put two numbers on one policy."""
+        self.assertEqual(REPORT.DEFAULT_FLOOR_TOKENS, CHECKPOINT.DEFAULT_FLOOR_TOKENS)
+        self.assertEqual(REPORT.DEFAULT_CEILING_TOKENS, CHECKPOINT.DEFAULT_CEILING_TOKENS)

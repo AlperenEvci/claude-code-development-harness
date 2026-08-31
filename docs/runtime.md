@@ -15,15 +15,23 @@ been written down.
 
 ## What gets installed
 
-A **Standard** or **Fleet** harness installs four stdlib-only scripts:
+A **Standard** or **Fleet** harness installs seven stdlib-only scripts:
 
 ```text
 scripts/ai-harness/
 ├── harness_capabilities.py   # the tier table: tools, permission mode, launch flags
 ├── harness_session.py        # launch specifications, listing, teardown sweep
 ├── harness_bus.py            # append-only typed envelopes under .ai/bus/
-└── harness_agentgen.py       # need -> spec -> validate -> emit an agent
+├── harness_agentgen.py       # need -> spec -> validate -> emit an agent
+├── harness_checkpoint.py     # the context band, and the handoff under .ai/runs/
+├── harness_progress.py       # the ledger of what is actually proven
+└── harness_report.py         # the reader: joins all of the above into one page
 ```
+
+Six of them write. `harness_report.py` is the only one that does not, and it was
+added last for the reason that usually produces a tool like it: everything above
+had been recording faithfully for six releases into four different trees, and the
+only way to read the result was to open the files one at a time.
 
 **Lite installs none of them.** Lite has no generated agents, so it gets nothing to
 manage them with.
@@ -536,6 +544,54 @@ A greenfield profile's `mvp_goals` are seeded as items at render time, all unpro
 a repository that was set up five seconds ago has proven nothing. The validator rejects a
 package whose ledger ships an item already marked passing.
 
+## Reading what happened
+
+Everything above writes a record. `harness_report.py` reads them back together:
+
+```bash
+python scripts/ai-harness/harness_report.py --out .ai/runs/report.html
+```
+
+That writes one self-contained page. `--json` puts the same model on stdout for
+another tool to consume, and no flag at all prints a short text summary.
+
+The path is under `.ai/runs/` deliberately. That directory is gitignored unless the
+profile sets `commit_ai_runs`, and a report is transient orchestration state by
+construction: it is a rendering of records that keep changing, so a copy committed
+today is wrong tomorrow. Writing it to `.ai/report.html` instead would commit it by
+default.
+
+**It groups by `correlation_id`, not by session.** That is the whole reason it is
+worth having. A mailbox tells you what one agent said; a unit of work is often two
+agents and two sessions answering one question, and a view organised by process
+splits it in half. Envelopes with no `trace` are collected separately and are never
+given a duration or a token count — an unmeasured trace and a zero one are different
+facts, and only one of them is true.
+
+The page shows, in order: the context band against the most recent reported token
+count, the work units with their envelopes, the ledger with its unproven count, the
+checkpoints, and the declared graphs laid out in dependency levels.
+
+Three properties are worth knowing because they bound what the report can tell you:
+
+- **It reads files and runs nothing.** It does not shell out to
+  `claude agents --json`, so it shows what sessions *wrote*, not what is running.
+  For that question the CLI is still the only answer. The upside is that the report
+  works months later, on a machine with no CLI, and produces the same bytes twice.
+- **Everything on the page is untrusted text.** A summary, a body, a checkpoint
+  intent: all of it is agent-written, and the contract says repository text is
+  evidence rather than authority. So the page carries no `<script>` element at all,
+  no inline handler, no external stylesheet or font, and a `default-src 'none'`
+  policy; evidence paths render as text rather than links. A report that executed
+  what an agent wrote into a summary would be a way to attack you with your own
+  tooling.
+- **Strings are redacted on the way out**, in `--json` as well as in the page, and
+  no file that an `evidence` entry points at is ever opened. Evidence is a path, and
+  it stays a path.
+
+`--out` never overwrites silently — pass `--force` — and refuses to write through a
+symlink, the same rule the installer and the checkpoint writer follow.
+
 ## Session start
 
 Generated `CLAUDE.md` opens the working model with two commands, before any code is read:
@@ -583,6 +639,9 @@ python scripts/ai-harness/harness_bus.py read --session $LANE_SID
 
 # 6. Sweep before you finish.
 python scripts/ai-harness/harness_session.py sweep --root . --stop
+
+# 7. Read the whole pass back as one page, grouped by unit of work.
+python scripts/ai-harness/harness_report.py --out .ai/runs/report.html
 ```
 
 Step 5 is the one people skip. A delegate's completion message is a claim, not

@@ -82,3 +82,5 @@ Fleet defaults:
 ## Escalation path
 
 Start Lite or Standard. Escalate only when observed tasks justify the next tier. Downgrade when orchestration cost repeatedly exceeds its quality gain.
+
+A tier is a ceiling on what the harness *can* do, never a floor on what it must do. Standard installs a researcher and a reviewer; it does not oblige a session to call them. Within any tier, most tasks should still route Direct - read the named files, change them, run the smallest check. An operator who reports the harness feels slow is usually describing a routing failure inside a correctly chosen tier, not a tier chosen too high.

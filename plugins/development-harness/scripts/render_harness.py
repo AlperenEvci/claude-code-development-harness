@@ -84,7 +84,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.7.0"
+GENERATOR_VERSION = "1.9.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -691,7 +691,7 @@ def execution_context(profile: dict[str, Any]) -> dict[str, str]:
 
     if delegate == "claude-only":
         return {
-            "orchestration_description": "Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, bounded Claude implementation, and independent verification. Skip the full pipeline for trivial obvious edits.",
+            "orchestration_description": "Route a software-development task to the cheapest step that can carry it, while protecting the main Claude context. Use when you cannot name the files a change touches, or when something other than this session will execute it: isolated reconnaissance, durable decisions, a self-contained spec, bounded Claude implementation, and independent verification. A change whose files you can already name is made directly, without any of it.",
             "harness_purpose_scope": "Claude Code roles",
             "working_model_execution_step": "Execute the bounded spec in Claude, directly or through a narrow Claude implementation subagent.",
             "implementation_role_line": "- Implementation path: main Claude or a bounded Claude implementation subagent working against an explicit contract.",
@@ -710,7 +710,7 @@ No Codex-specific project skill is installed. Claude still uses the same evidenc
 
     if delegate == "codex-plugin":
         return {
-            "orchestration_description": "Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, Codex implementation through the official Claude Code plugin, and independent verification. Skip the full pipeline for trivial obvious edits.",
+            "orchestration_description": "Route a software-development task to the cheapest step that can carry it, while protecting the main Claude context. Use when you cannot name the files a change touches, or when something other than this session will execute it: isolated reconnaissance, durable decisions, a self-contained spec, Codex implementation through the official Claude Code plugin, and independent verification. A change whose files you can already name is made directly, without any of it.",
             "harness_purpose_scope": "Claude Code and Codex",
             "working_model_execution_step": "Delegate scoped execution to Codex through the configured official Claude Code plugin wrapper.",
             "implementation_role_line": "- Codex plugin delegate: implementation against an explicit contract through `codex:codex-rescue`.",
@@ -737,7 +737,7 @@ The optional automatic review gate remains disabled unless an operator deliberat
         }
 
     return {
-        "orchestration_description": "Route software-development tasks by complexity while protecting the main Claude context. Use for non-trivial feature work, debugging, refactors, migrations, or reviews that may need isolated reconnaissance, durable decisions, a self-contained spec, direct Codex CLI implementation, and independent verification. Skip the full pipeline for trivial obvious edits.",
+        "orchestration_description": "Route a software-development task to the cheapest step that can carry it, while protecting the main Claude context. Use when you cannot name the files a change touches, or when something other than this session will execute it: isolated reconnaissance, durable decisions, a self-contained spec, direct Codex CLI implementation, and independent verification. A change whose files you can already name is made directly, without any of it.",
         "harness_purpose_scope": "Claude Code and Codex",
         "working_model_execution_step": "Delegate scoped execution through the configured direct Codex CLI wrapper.",
         "implementation_role_line": "- Codex CLI delegate: implementation against an explicit contract in a separate Codex process.",
@@ -863,6 +863,10 @@ SESSION_TOOL_SCRIPTS = (
     "harness_agentgen.py",
     "harness_checkpoint.py",
     "harness_progress.py",
+    # 1.8 added the reader. Everything above writes a record; nothing joined the
+    # records back together, so the state of a run was only ever readable one
+    # file at a time.
+    "harness_report.py",
 )
 
 #: Where the session tooling lands in a target repository. Alongside the fleet
@@ -948,6 +952,23 @@ def agent_sessions_section(profile: dict[str, Any]) -> str:
             "it was made for. A need never names its own tools; authority comes from "
             "the capability tier. Writing one into `.claude/agents/` is a separate "
             "`promote` step that is dry-run by default.",
+            "",
+            "### Reading what happened",
+            "",
+            f"`{SESSION_TOOL_DIR}/harness_report.py` joins the mailboxes, the "
+            "ledger, the checkpoints, the context budget, and the declared graphs "
+            "into one page, grouped by `correlation_id` rather than by session, "
+            "because that is the unit of work:",
+            "",
+            "```bash",
+            f"python {SESSION_TOOL_DIR}/harness_report.py --out .ai/runs/report.html",
+            "```",
+            "",
+            "It reads files and runs nothing, so it shows what sessions wrote "
+            "rather than what is running now - `claude agents --json --cwd .` is "
+            "still the only answer to that. The page carries no script and loads "
+            "nothing over the network, because every summary and body on it is "
+            "agent-written text.",
             "",
             "### Teardown",
             "",
@@ -1041,12 +1062,12 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
         "workflows_markdown": workflows_markdown(profile),
         "custom_components_markdown": custom_components_markdown(profile),
         "researcher_instruction": (
-            "Use `harness-codebase-researcher` when raw exploration would pollute the main context."
+            "Dispatch `harness-codebase-researcher` with the Agent tool when raw exploration would pollute the main context."
             if has_project_agents
-            else "In Lite, keep reconnaissance narrowly scoped in the main session or use Claude Code's built-in Explore worker; no project researcher is installed."
+            else "In Lite, keep reconnaissance narrowly scoped in the main session, or dispatch the built-in Explore agent with the Agent tool; no project researcher is installed."
         ),
         "reviewer_instruction": (
-            "Use `harness-code-reviewer` for an independent, read-only verification pass when the change is important or risky."
+            "Dispatch `harness-code-reviewer` with the Agent tool for an independent, read-only pass."
             if has_project_agents
             else "In Lite, the main Claude session performs the independent verification; no project reviewer is installed."
         ),
@@ -1056,12 +1077,12 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
             else "Fleet is not installed. Keep execution sequential unless the harness is deliberately upgraded."
         ),
         "researcher_role_text": (
-            "`harness-codebase-researcher` maps codebase evidence in an isolated read-only context."
+            "`harness-codebase-researcher`, dispatched with the Agent tool, maps codebase evidence in an isolated read-only context."
             if has_project_agents
             else "No dedicated project researcher is installed; use narrow main-session inspection or built-in Explore."
         ),
         "reviewer_role_text": (
-            "`harness-code-reviewer` independently checks the diff, spec, and verification evidence."
+            "`harness-code-reviewer`, dispatched with the Agent tool, independently checks the diff, spec, and verification evidence."
             if has_project_agents
             else "The main Claude session owns independent verification."
         ),
@@ -1531,17 +1552,20 @@ def session_start_section(profile: dict[str, Any]) -> str:
     if not has_session_tools(profile):
         return (
             "## Session start\n\n"
-            "Before working, read `.ai/backlog.md` for unfinished work. This tier "
-            "installs no session tooling, so there is nothing to run - the record "
-            "is prose, and keeping it current is manual."
+            "When you are picking up prior work, read `.ai/backlog.md` first. A "
+            "self-contained task the user just described needs no such lookup. This "
+            "tier installs no session tooling, so there is nothing to run - the "
+            "record is prose, and keeping it current is manual."
         )
 
     return "\n".join([
         "## Session start",
         "",
-        "Two commands, before reading any code. They answer what the last session "
-        "was doing and what is actually finished, and both are cheaper than "
-        "reconstructing either from the repository:",
+        "**Run these when you are resuming work, not on every task.** They answer "
+        "what the last session was doing and what is actually finished, and both "
+        "are cheaper than reconstructing either from the repository. A task the "
+        "user just described in full is already its own brief; reading a handoff "
+        "for it spends a round trip to learn nothing:",
         "",
         "```bash",
         f"python {SESSION_TOOL_DIR}/harness_checkpoint.py resume",
@@ -1562,7 +1586,9 @@ def session_start_section(profile: dict[str, Any]) -> str:
         f"`harness_progress.py check` exits 3 while anything is unproven, so "
         "\"is this done\" is a question a script can ask.",
         "",
-        "Before finishing, write the handoff:",
+        "Write a handoff when you are leaving work unfinished, or when what you "
+        "learned would cost the next session real time to rediscover. A closed "
+        "task that changed nothing durable does not need one:",
         "",
         "```bash",
         f"python {SESSION_TOOL_DIR}/harness_checkpoint.py write \\",

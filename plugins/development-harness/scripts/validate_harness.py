@@ -35,6 +35,7 @@ SESSION_TOOL_SCRIPTS = (
     "harness_agentgen.py",
     "harness_checkpoint.py",
     "harness_progress.py",
+    "harness_report.py",
 )
 
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
@@ -351,6 +352,12 @@ def check_session_tools(
             errors.append(
                 "CLAUDE.md does not document `harness_bus.py read --correlation`"
             )
+        if "harness_report.py --out" not in text:
+            # The bus, the ledger, and the checkpoints are all write paths. A
+            # harness that installs the reader without naming it leaves an
+            # operator reading four JSON trees by hand, which is the state this
+            # script was added to end.
+            errors.append("CLAUDE.md does not document the harness report")
         if "come from you, not from the agent" not in text:
             # The trace is launcher-reported by construction. A contract that
             # ships the fields without that sentence invites an agent to fill
