@@ -2505,6 +2505,34 @@ class EvalCaseTests(unittest.TestCase):
             "untrusted repository text is the plugin's central safety claim",
         )
 
+    def test_no_case_grades_a_skill_tool_call(self) -> None:
+        """`tool_used: Skill` cannot fire for this plugin, in either direction.
+
+        Measured, not reasoned about: a headless
+        `claude -p "/development-harness:audit safety" --plugin-dir ...` run against a
+        real fixture produced nine tool uses and no Skill among them, while following
+        the skill body exactly - the interpreter probe first, then the plugin's own
+        scripts. A slash command inlines the skill body rather than calling a tool, and
+        every skill here sets `disable-model-invocation: true`, so the model cannot
+        invoke one by name either.
+
+        That makes a `min: 1` Skill grader fail for a reason unrelated to behavior, and
+        a `max: 0` one pass no matter what. Both are noise. The plugin's own scripts are
+        the honest with-only signal: they live under the plugin root, so the no-plugin
+        baseline arm cannot reach them.
+        """
+        for path, case in self.cases():
+            for grader in case["graders"]:
+                if grader.get("type") != "tool_used":
+                    continue
+                with self.subTest(case=path.parent.name, grader=grader["name"]):
+                    self.assertNotEqual(
+                        grader.get("tool"),
+                        "Skill",
+                        "a Skill grader cannot fire here; assert on the plugin's own "
+                        "scripts instead (see this test's docstring)",
+                    )
+
     def test_the_readme_counts_match_reality(self) -> None:
         """The README states a test count and a case count. Both drifted within an hour.
 

@@ -26,6 +26,11 @@ Three cases scaffold their fixture, so they also need the scaffold grant:
 claude plugin eval ./plugins/development-harness --allow-tools Bash Edit --scaffold
 ```
 
+**This costs real money.** A measured headless run of the audit path spent about
+**$0.24 for five turns**. The cases here budget 10–16 turns, default to 3 runs each, and
+the ablation adds a second arm — so a full pass over six cases is on the order of tens of
+dollars, not cents. Narrow while iterating and run the whole suite deliberately.
+
 Useful narrowing while iterating:
 
 ```bash
@@ -36,8 +41,19 @@ claude plugin eval ./plugins/development-harness --tag safety --allow-tools Bash
 By default the runner adds a **no-plugin baseline arm** and reports the score delta.
 That is the number to watch. Absolute scores drift with the model; the delta between
 "with the plugin" and "without it" is what says whether the plugin earns its context.
-Graders marked `arm: with-only` — including any `tool_used` grader on `Skill` — are
-plugin-fired indicators and sit outside the score rather than inflating it.
+Graders marked `arm: with-only` are plugin-fired indicators and sit outside the score
+rather than inflating it.
+
+The runner's own documentation offers `tool_used: Skill` as that indicator. **It does
+not work for this plugin**, and the cases here use `tool_used: Bash` matching
+`inspect_project.py` or `check_installed.py` instead. Two reasons, both measured rather
+than assumed: a slash-command prompt inlines the skill body instead of calling a `Skill`
+tool, and every skill here sets `disable-model-invocation: true`, so the model cannot
+invoke one by name either. A headless run against a real fixture produced nine tool uses
+and no `Skill` among them — while following the skill body exactly, probing the
+interpreter first and then running the plugin's scripts. Those scripts live under the
+plugin root, so the baseline arm cannot reach them, which makes them the honest signal.
+`test_no_case_grades_a_skill_tool_call` keeps a `Skill` grader from creeping back in.
 
 ## Availability
 

@@ -86,8 +86,3 @@ graders:
     exists: false
     weight: 2
 
-  - type: tool_used
-    name: the-setup-skill-fired
-    tool: Skill
-    min: 1
-    arm: with-only

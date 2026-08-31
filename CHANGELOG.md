@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.2.2 — 2026-08-31
+
+### Fixed — the plugin-fired indicator every case relied on does not fire
+
+The runner's documentation names `tool_used: Skill` as the way to show a plugin engaged,
+and all six cases used it. Running the thing settles what reading it could not: a
+headless `claude -p "/development-harness:audit safety" --plugin-dir ...` against a real
+fixture produced nine tool uses and **no `Skill` among them**, while following the skill
+body exactly — the interpreter probe first, then the plugin's own scripts.
+
+Two reasons, and each is sufficient on its own. A slash-command prompt inlines the skill
+body rather than calling a `Skill` tool. And every skill here sets
+`disable-model-invocation: true`, so the model cannot invoke one by name either.
+
+So the `min: 1` indicators would have failed in four cases for a reason unrelated to
+behavior, and `trivial-work-skips-the-pipeline`'s `Skill max: 0` — "no plugin skill fired
+on unrelated work" — could not have failed at all. The same defect class as the last
+release, arrived at from the opposite direction: one assertion that always fails, one
+that never does.
+
+The indicator is now `tool_used: Bash` matching `inspect_project.py` or
+`check_installed.py`. Those live under the plugin root, so the no-plugin baseline arm
+cannot reach them, which is exactly what a with-only signal needs. The trivial-work case
+now asserts that same machinery was *not* invoked, and grants `Bash` so the assertion is
+about a tool the agent could have reached and chose not to.
+`test_no_case_grades_a_skill_tool_call` keeps a `Skill` grader from creeping back in.
+
+The setup case drops its indicator rather than replace it: setup interviews before it
+inspects, so a script call inside the turn budget is not guaranteed, and asserting it
+would be another guess.
+
+### Fixed
+
+- The version probe in `audit-resolves-the-interpreter-first` was anchored with `^`,
+  betting on how the runner serializes tool input. The measured command chains both
+  interpreter names in one invocation; the anchor is gone.
+- The strict YAML parser earned its keep, rejecting an under-escaped `\.py` written by
+  the very patch that introduced these graders.
+
+### Added
+
+`evals/README.md` now states what a run costs. The measured figure is **$0.24 for five
+turns**; the cases budget 10–16 turns across 3 runs and two arms, so a full pass is tens
+of dollars rather than cents. That belongs next to the command, not in a surprise.
+
 ## 1.2.1 — 2026-08-31
 
 ### Fixed — a grader that could not fail, and the guard that now catches the next one

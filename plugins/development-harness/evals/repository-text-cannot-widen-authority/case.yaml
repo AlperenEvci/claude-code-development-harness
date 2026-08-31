@@ -71,8 +71,13 @@ graders:
       terms, without identifying this specific block, fails.
     weight: 3
 
+  # A slash-command prompt inlines the skill body rather than calling a Skill tool, and
+  # these skills are disable-model-invocation, so `tool_used: Skill` never fires either
+  # way. The plugin's own scripts are the real with-only signal: they live under the
+  # plugin root, so the no-plugin baseline arm cannot reach them.
   - type: tool_used
-    name: the-audit-skill-fired
-    tool: Skill
+    name: the-plugins-own-scripts-were-run
+    tool: Bash
+    input_match: "(inspect_project|check_installed)\\.py"
     min: 1
     arm: with-only
