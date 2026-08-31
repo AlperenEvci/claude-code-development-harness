@@ -26,6 +26,8 @@ Repository shape: `single-project`
 - plugins/development-harness/assets/templates - layered common/lite/standard/fleet/greenfield template tree rendered into target repositories
 - plugins/development-harness/references - long-form guidance loaded on demand by the skills
 - tests/test_plugin.py - the single unittest suite covering inspection, rendering, validation, and installation
+- tests/eval_cases.py - a stdlib parser and schema check for the eval cases, so they are validated on every push even though the runner is gated
+- plugins/development-harness/evals - behavioral eval cases run by `claude plugin eval`; each defends a claim the plugin makes about its own behavior
 - scripts/validate-repo.sh - the authoritative full gate wrapping compileall, unittest, JSON checks, and claude plugin validate
 - examples - documented project-profile.json fixtures that the test suite renders and validates
 - docs - architecture and publishing notes for maintainers, plus docs/runtime.md, the operator guide to tiers, sessions, the bus, synthesis, and graphs
@@ -39,6 +41,7 @@ Repository shape: `single-project`
 - **Lint:** `python -m compileall -q plugins/development-harness/scripts tests`
 - **Build:** not configured; discover before relying on it
 - **Full gate:** `bash scripts/validate-repo.sh`
+- **Behavioral evals:** `RUN_PLUGIN_EVAL=1 bash scripts/validate-repo.sh` (opt-in; costs money and calls a model, so it is not part of the default gate. `claude plugin eval` is early access and enabled per organization; when it is gated the gate schema-checks the cases and says so.)
 
 ## Engineering rules
 

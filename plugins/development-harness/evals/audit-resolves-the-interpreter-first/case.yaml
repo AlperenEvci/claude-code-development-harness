@@ -1,0 +1,47 @@
+schema_version: "1.1"
+name: audit-resolves-the-interpreter-first
+description: >
+  Both skills run their scripts through one interpreter name that must be resolved by
+  probing, not assumed. Version 1.1.0 shipped with `python3` hardcoded, which on
+  Windows resolves to a Microsoft Store alias stub, so the first step of every command
+  failed for every Windows user. The unit suite now forbids the literal, but a literal
+  is not the invariant. The invariant is the order: probe for a working interpreter,
+  then run a script with the name that answered. This case grades that order in a real
+  trace.
+
+tags: [audit, regression, platform, free-graders]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  prompt: |
+    /development-harness:audit safety
+  max_turns: 14
+  timeout_seconds: 480
+  allowed_tools: [Read, Glob, Grep, Skill, Bash]
+
+runs: 3
+
+graders:
+  - type: tool_order
+    name: an-interpreter-is-probed-before-any-script-runs
+    before:
+      tool: Bash
+      input_match: "--version"
+    after:
+      tool: Bash
+      input_match: "inspect_project\\.py"
+    weight: 3
+
+  - type: tool_used
+    name: the-probe-is-a-version-check-not-a-script
+    tool: Bash
+    input_match: "^[^|;&]*python3? --version"
+    min: 1
+
+  - type: tool_used
+    name: the-audit-skill-fired
+    tool: Skill
+    min: 1
+    arm: with-only

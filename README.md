@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.1.1](https://img.shields.io/badge/Version-1.1.1-7C3AED?style=flat-square)
+![Version 1.2.0](https://img.shields.io/badge/Version-1.2.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -423,6 +423,18 @@ CONFLICT   existing content requires deliberate merge
 BLOCKED    unsafe destination or filesystem condition
 ```
 
+## How those claims are checked
+
+A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
+
+**Structure** is covered by 107 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+
+**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds five cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
+
+Two honest caveats. `claude plugin eval` is in early access and enabled per organization, so on most accounts — including this project's CI — it will not run; the cases are still parsed and schema-checked on every push so they cannot rot unnoticed. And **they have not yet been executed against a live model**, so treat them as a stated contract rather than a passing result.
+
+The number worth watching when they do run is not the score but the **delta** against the no-plugin baseline arm, which is the only figure that says whether the harness earns the context it occupies.
+
 ## Requirements
 
 - Claude Code `2.1.196+` for setup and audit; the 1.0 session runtime was exercised against `2.1.251`
@@ -450,6 +462,7 @@ No Python package installation is required. The plugin scripts use the standard 
 
 - [Runtime guide: sessions, bus, tiers, and graphs](docs/runtime.md)
 - [Architecture](docs/architecture.md)
+- [Eval suite: what each case defends](plugins/development-harness/evals/README.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Publishing and releases](docs/publishing.md)

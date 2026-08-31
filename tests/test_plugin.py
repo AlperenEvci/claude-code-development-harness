@@ -14,9 +14,17 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+# `unittest discover -s tests` puts this directory on sys.path already; be explicit
+# so `python -m unittest tests.test_plugin` resolves the helper too.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import eval_cases
+
+
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "development-harness"
 SCRIPTS = PLUGIN / "scripts"
+EVALS = PLUGIN / "evals"
 
 # The command surface. A directory under `skills/` is a slash command.
 PLUGIN_SKILLS = ("agent", "audit", "session", "setup", "spec")
@@ -2348,6 +2356,136 @@ class BusCliTests(unittest.TestCase):
         schema = json.loads(result.stdout)
         self.assertEqual(schema.get("type"), "object")
         self.assertIn("kind", schema.get("properties", {}))
+
+
+class EvalCaseTests(unittest.TestCase):
+    """The eval suite is authored blind, so the parser is the only gate it has.
+
+    `claude plugin eval` is early access and enabled per organization, so neither this
+    machine nor CI can execute a single case. Files that nothing reads rot silently, and
+    these files encode the plugin's safety claims - the worst possible thing to let rot.
+    So the schema the runner enforces is checked here on every push.
+
+    `tests/eval_cases.py` carries the parser and the schema, including why the YAML
+    subset is deliberately strict.
+    """
+
+    def cases(self) -> list:
+        found = list(eval_cases.discover(EVALS))
+        self.assertTrue(found, f"no eval cases found under {EVALS}")
+        return found
+
+    def test_every_case_matches_the_schema_the_runner_enforces(self) -> None:
+        for path, case in self.cases():
+            with self.subTest(case=path.parent.name):
+                eval_cases.validate(case, path.parent.name)
+
+    def test_a_case_directory_name_matches_the_case_name(self) -> None:
+        """`--case <glob>` filters on the name, and the report lists it.
+
+        A directory that disagrees with the name inside it makes both misleading.
+        """
+        for path, case in self.cases():
+            with self.subTest(case=path.parent.name):
+                self.assertEqual(case["name"], path.parent.name)
+
+    def test_a_declared_scaffold_script_exists_and_is_bash(self) -> None:
+        """The runner executes it as `bash <path>` with the scaffold dir as cwd.
+
+        A missing file fails the case at setup, which reads like a behavior failure.
+        """
+        for path, case in self.cases():
+            script = case.get("context", {}).get("scaffold_script")
+            if not script:
+                continue
+            with self.subTest(case=path.parent.name):
+                resolved = path.parent / script
+                self.assertTrue(resolved.is_file(), f"{resolved} is missing")
+                body = resolved.read_text(encoding="utf-8")
+                self.assertTrue(
+                    body.startswith("#!/usr/bin/env bash"),
+                    f"{resolved} needs a bash shebang",
+                )
+                self.assertIn("set -eu", body, f"{resolved} must fail loudly, not partially")
+
+    def test_a_scaffold_never_plants_a_real_looking_credential(self) -> None:
+        """One case deliberately plants a .env, and it must stay obviously inert.
+
+        A fixture is committed, public, and copied by anyone extending the suite. The
+        case works precisely because a correct agent never opens the file, so there is
+        never a reason for the value to look real.
+        """
+        for path, _ in self.cases():
+            for script in path.parent.glob("*.sh"):
+                body = script.read_text(encoding="utf-8")
+                for line in body.splitlines():
+                    if not re.search(r"(KEY|TOKEN|SECRET|PASSWORD)\s*=", line):
+                        continue
+                    with self.subTest(script=script.name, line=line.strip()):
+                        self.assertRegex(
+                            line,
+                            r"(?i)(placeholder|not-a-real|fixture|example|dummy)",
+                            "a fixture credential must name itself as fake",
+                        )
+
+    def test_the_tools_a_case_needs_are_declared_and_documented(self) -> None:
+        """A gated tool used by a case but absent from the README's command is a case
+        that silently reports a missing-grant notice instead of running."""
+        readme = (EVALS / "README.md").read_text(encoding="utf-8")
+        for path, case in self.cases():
+            declared = set(case["execution"].get("allowed_tools", []))
+            for tool in declared & set(eval_cases.GATED_TOOLS):
+                with self.subTest(case=path.parent.name, tool=tool):
+                    self.assertIn(
+                        "--allow-tools", readme, "the README must show the operator grant"
+                    )
+                    self.assertRegex(
+                        readme,
+                        rf"--allow-tools[^\n`]*\b{tool}\b",
+                        f"{path.parent.name} needs {tool}; the README's command omits it",
+                    )
+
+    def test_a_grader_that_asserts_absence_is_free_not_judged(self) -> None:
+        """Absence is the one thing an LLM grader is worst at.
+
+        Every "did not do X" claim in this suite must be a deterministic grader, or the
+        safety cases become vibes. This is the rule that keeps optimizer and evaluator
+        decoupled where it matters most.
+        """
+        for path, case in self.cases():
+            for grader in case["graders"]:
+                asserts_absence = (
+                    (grader["type"] == "tool_used" and grader.get("max") == 0)
+                    or (grader["type"] == "file_exists" and grader.get("exists") is False)
+                    or (grader["type"] == "regex" and grader.get("match") == "not_contains")
+                )
+                if not asserts_absence:
+                    continue
+                with self.subTest(case=path.parent.name, grader=grader["name"]):
+                    self.assertIn(grader["type"], ("tool_used", "file_exists", "regex"))
+
+    def test_the_suite_still_covers_the_defects_that_shipped(self) -> None:
+        """Named regressions, so deleting the case is a deliberate act and not a drift.
+
+        Both entries here are defects this repository actually shipped or nearly did.
+        """
+        by_name = {case["name"]: case for _, case in self.cases()}
+        self.assertIn(
+            "audit-resolves-the-interpreter-first",
+            by_name,
+            "the Windows interpreter defect must keep a regression case",
+        )
+        self.assertIn(
+            "repository-text-cannot-widen-authority",
+            by_name,
+            "untrusted repository text is the plugin's central safety claim",
+        )
+
+    def test_the_readme_lists_every_case(self) -> None:
+        readme = (EVALS / "README.md").read_text(encoding="utf-8")
+        for path, case in self.cases():
+            with self.subTest(case=case["name"]):
+                self.assertIn(case["name"], readme)
 
 
 if __name__ == "__main__":

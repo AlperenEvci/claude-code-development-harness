@@ -71,6 +71,40 @@ Two defects were found and fixed along the way, both of which had shipped in pha
 - **Publishing.** `docs/publishing.md` describes tagging and marketplace listing.
   The tag and any public release remain a deliberate operator action.
 
+### From the external practice review
+
+`.ai/reports/0002-external-practice-review.md` benchmarked this harness against
+published work from Anthropic, Google, OpenAI, LangChain, and Matt Pocock, and found
+five gaps. They are ordered by whether they change what the product *is*.
+
+1. ~~**No evals.**~~ **Started in 1.2.0.** Five behavioral cases under
+   `plugins/development-harness/evals/`, schema-checked on every push by
+   `EvalCaseTests`. Two things are still open here, and neither is cosmetic:
+   **the cases have never been executed** — `claude plugin eval` is early access and
+   enabled per organization, so no scored run has confirmed the graders match live
+   behavior — and the suite covers `audit` and routing only. `setup`, the skill that
+   actually writes files, has no case, because it interviews and a non-interactive
+   eval cannot answer it. Solving that probably means `context.history_file`.
+2. **The context policy is a declaration with no mechanism.**
+   `context_policy.on_ceiling: "checkpoint-and-handoff"` is validated against the
+   rendered Markdown and nothing else — the validator confirms the documentation
+   matches the profile, which is two descriptions of an intention and no mechanism.
+   Deep Agents implements both halves: offload tool results over ~20k tokens to the
+   filesystem behind a reference and a short preview, and summarize at ~85% of the
+   window into session intent, artifacts, and next steps. `.ai/runs/` is already the
+   right home. Nothing writes a checkpoint into it.
+3. **Progress is Markdown prose, not a machine-checked ledger.** Anthropic's
+   long-running-harness work prescribes a JSON feature list as ground truth with every
+   item `passes: false` until proven, a per-session checkpoint commit, and a mandatory
+   session-start checklist. It also reports that models overwrite Markdown more readily
+   than JSON — which is aimed squarely at this file.
+4. **Trace fields on the bus envelope** — correlation id, duration, tokens. The hard
+   part (typed, append-only, capped, schema'd) is done; these three turn a mailbox into
+   an evidence base the eval loop can consume.
+5. **A repository-shape audit.** Pocock's claim is that codebase structure is the
+   single biggest lever on agent output quality. `audit` checks the harness, not
+   whether the repository is shaped for agents. The inspector already has the reach.
+
 ### Affected files
 
 `plugins/development-harness/scripts/render_harness.py` (schema and rendering), `validate_harness.py` (tier-aware checks, required-file lists), `assets/templates/**` (new v1 layer files), `references/project-profile-schema.md` (rewrite), `examples/*.json` (no regeneration was needed — the v0.2 profiles still validate), `tests/test_plugin.py` (grow and rewrite), `CHANGELOG.md`, `plugins/development-harness/.claude-plugin/plugin.json`.

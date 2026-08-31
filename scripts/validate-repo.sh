@@ -59,3 +59,37 @@ if command -v claude >/dev/null 2>&1; then
 else
   echo "NOTICE: Claude Code CLI not found; skipped official plugin validation."
 fi
+
+# The behavioral eval suite is deliberately NOT part of the default gate. It spends
+# money, it calls a model so it is not reproducible, and it needs an operator grant for
+# gated tools -- three things a per-push gate must not have. The cases are still checked
+# on every run: EvalCaseTests parses each one against the runner's schema in the unit
+# suite above. Set RUN_PLUGIN_EVAL=1 to actually score behavior.
+if ! command -v claude >/dev/null 2>&1; then
+  echo "NOTICE: Claude Code CLI not found; eval cases were schema-checked only."
+  EVAL_STATE="absent"
+else
+  # Capture the probe rather than piping it to `grep -q`. Under `pipefail`, grep exits
+  # on its first match and closes the pipe, `claude` dies of SIGPIPE with 141, and the
+  # pipeline reports failure even though the pattern matched -- so the gated case reads
+  # as "available". The eval gate itself is only reachable by running the command;
+  # `--help` prints full usage whether or not the account has access.
+  EVAL_PROBE="$(claude plugin eval "$ROOT/plugins/development-harness" \
+    --case __availability_probe__ 2>&1 || true)"
+  case "$EVAL_PROBE" in
+    *"early access"*) EVAL_STATE="gated" ;;
+    *) EVAL_STATE="available" ;;
+  esac
+fi
+
+if [ "$EVAL_STATE" = "gated" ]; then
+  echo "NOTICE: 'claude plugin eval' is gated (early access, enabled per organization);"
+  echo "        eval cases were schema-checked only."
+elif [ "$EVAL_STATE" = "available" ] && [ "${RUN_PLUGIN_EVAL:-0}" = "1" ]; then
+  echo "Running the behavioral eval suite (RUN_PLUGIN_EVAL=1)."
+  claude plugin eval "$ROOT/plugins/development-harness" \
+    --allow-tools Bash Edit --scaffold --threshold "${EVAL_THRESHOLD:-0.8}"
+elif [ "$EVAL_STATE" = "available" ]; then
+  echo "NOTICE: 'claude plugin eval' is available but not run by default."
+  echo "        Score behavior with: RUN_PLUGIN_EVAL=1 bash scripts/validate-repo.sh"
+fi
