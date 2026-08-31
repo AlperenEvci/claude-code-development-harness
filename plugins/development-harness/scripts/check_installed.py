@@ -45,6 +45,12 @@ STANDARD_REQUIRED = [
     "scripts/ai-harness/harness_bus.py",
     "scripts/ai-harness/harness_session.py",
     "scripts/ai-harness/harness_agentgen.py",
+    # 1.3 and 1.4 added two more, and this list did not follow them. An
+    # installed harness missing these has a context band and a definition of
+    # done that are prose again, which is exactly what those releases fixed.
+    "scripts/ai-harness/harness_checkpoint.py",
+    "scripts/ai-harness/harness_progress.py",
+    ".ai/progress.json",
 ]
 
 FLEET_REQUIRED = [
@@ -62,34 +68,67 @@ def read_text(path: Path) -> str:
         return ""
 
 
+def frontmatter_list(text: str, key: str) -> list[str] | None:
+    """Return a YAML block-sequence frontmatter value, or None when absent."""
+    match = re.search(
+        rf"^{re.escape(key)}:[ \t]*\n((?:[ \t]*-[ \t]*\S+[ \t]*\n)+)",
+        text,
+        re.MULTILINE,
+    )
+    if match is None:
+        return None
+    return [line.strip().lstrip("-").strip() for line in match.group(1).splitlines()]
+
+
 def check_agent_authority(
     rel: str, text: str, errors: list[str], warnings: list[str]
-) -> None:
+) -> str | None:
     """Read an installed agent's authority off its own frontmatter.
 
     The installed harness is the copy that actually runs, and it can be edited
-    after installation. An agent declaring a read-only tier while carrying an
-    edit-accepting permission mode is an escalation regardless of how it got
-    there, so it is an error rather than a warning.
+    after installation, so the tier a file names is checked against what the
+    file actually grants rather than against the profile that produced it. An
+    agent declaring a read-only tier while carrying edit-accepting authority is
+    an escalation regardless of how it got there, and so an error.
+
+    This mirrors `validate_harness.check_declared_tier` deliberately. The
+    package validator is the last gate before installation; this is the only
+    gate after it, and a boundary enforced on one side of the copy and not the
+    other is not a boundary. Returns the capability it found, or None.
     """
     match = re.search(r"^capability:\s*(\S+)\s*$", text, re.MULTILINE)
     if match is None:
         warnings.append(f"agent does not declare a capability tier: {rel}")
-        return
+        return None
 
     capability = match.group(1).strip().strip("\"'")
     tier = CAPABILITY_TIERS.get(capability)
     if tier is None:
         errors.append(f"agent declares unknown capability {capability!r}: {rel}")
-        return
+        return None
 
-    if tier["writes"]:
-        return
-    for mode in EDIT_ACCEPTING_MODES:
-        if re.search(rf"^permissionMode:\s*{mode}\s*$", text, re.MULTILINE):
-            errors.append(
-                f"{capability} agent carries permission mode {mode}: {rel}"
-            )
+    # The whole list, not a prefix: a substring match would accept an agent that
+    # kept its tier's tools and appended Write to them.
+    if frontmatter_list(text, "tools") != tier["tools"]:
+        errors.append(f"agent tools do not match its {capability} tier: {rel}")
+
+    if (frontmatter_list(text, "disallowedTools") or []) != tier["disallowed"]:
+        errors.append(
+            f"agent does not deny the tools its {capability} tier forbids: {rel}"
+        )
+
+    if f"permissionMode: {tier['permission_mode']}" not in text:
+        errors.append(
+            f"agent permission mode does not match its {capability} tier: {rel}"
+        )
+
+    if not tier["writes"]:
+        for mode in EDIT_ACCEPTING_MODES:
+            if re.search(rf"^permissionMode:\s*{mode}\s*$", text, re.MULTILINE):
+                errors.append(
+                    f"{capability} agent carries permission mode {mode}: {rel}"
+                )
+    return capability
 
 
 def frontmatter_keys(text: str) -> set[str]:
@@ -242,6 +281,9 @@ def main() -> None:
         if not path.is_file():
             continue
         text = read_text(path)
+        # Reset per file: the component check below reads it, and a value left
+        # over from the previous path would be answering about another file.
+        declared: str | None = None
         if PLACEHOLDER.search(text):
             errors.append(f"unresolved template placeholder: {rel}")
         if rel.endswith("SKILL.md"):
@@ -253,7 +295,7 @@ def main() -> None:
             for key in ("name", "description"):
                 if key not in keys:
                     errors.append(f"agent missing {key} frontmatter: {rel}")
-            check_agent_authority(rel, text, errors, warnings)
+            declared = check_agent_authority(rel, text, errors, warnings)
         if rel.startswith(".claude/rules/") and rel in dynamic:
             if "paths" not in frontmatter_keys(text):
                 errors.append(f"generated scoped rule missing paths frontmatter: {rel}")
@@ -266,15 +308,19 @@ def main() -> None:
             if component["profile"].get("manual_only", True) and "disable-model-invocation" not in keys:
                 errors.append(f"manual generated project skill is model-invocable: {rel}")
         if component and component["kind"] == "additional_agents":
-            required_fragments = (
-                "tools:\n  - Read\n  - Grep\n  - Glob",
-                "disallowedTools:\n  - Write\n  - Edit\n  - Bash",
-                "permissionMode: plan",
-            )
-            for fragment in required_fragments:
-                if fragment not in text:
-                    errors.append(f"generated domain agent is not read-only: {rel}")
-                    break
+            # What the tier grants is checked above, for every agent file in the
+            # project. What is specific to a generated one is that it must name
+            # a tier at all: the renderer always writes one, so a file that has
+            # lost it has been edited, and an unnamed tier is unenforceable.
+            #
+            # This replaced a literal `Read/Grep/Glob` fragment match, which was
+            # the pre-1.0 rule that every domain agent is read-only. Capability
+            # tiers superseded that in 1.0, and a correctly generated verifier
+            # or implementer had been failing here ever since.
+            if declared is None:
+                errors.append(
+                    f"generated domain agent declares no capability tier: {rel}"
+                )
 
     codex_path = root / ".claude/skills/harness-codex-delegate/SKILL.md"
     codex_skill = read_text(codex_path)

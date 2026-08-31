@@ -3433,3 +3433,130 @@ class ShapeScanTests(unittest.TestCase):
         reference = (PLUGIN / "references/repository-shape.md").read_text(encoding="utf-8")
         self.assertIn("No file is opened", reference)
         self.assertIn("not coverage", reference.lower())
+
+
+class InstalledCheckerAgreesWithGeneratorTests(unittest.TestCase):
+    """The last gate before installation and the only gate after it must agree.
+
+    Both defects this class covers shipped for several releases because nothing
+    ever ran the checker over a package the generator had just produced.
+    """
+
+    def install(self, temp_path: Path, example: Path) -> Path:
+        staging = temp_path / ("staged-" + example.stem)
+        target = temp_path / ("project-" + example.stem)
+        run(PYTHON, str(SCRIPTS / "render_harness.py"),
+            "--config", str(example), "--output", str(staging))
+        shutil.copytree(staging / "payload", target)
+        return target
+
+    def check(self, target: Path) -> subprocess.CompletedProcess[str]:
+        return run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                   "--root", str(target), check=False)
+
+    def test_every_shipped_example_passes_its_own_installed_check(self) -> None:
+        """A harness the generator just wrote must not fail the checker.
+
+        Two of the three examples failed this for eleven releases: the checker
+        still carried the pre-1.0 rule that every generated domain agent is
+        read-only, as a literal Read/Grep/Glob fragment, so a correctly
+        generated `verifier` or `implementer` was reported as an escalation.
+        """
+        examples = sorted((REPO / "examples").glob("*.json"))
+        self.assertTrue(examples, "no example profiles to check")
+        for example in examples:
+            with self.subTest(example=example.name), tempfile.TemporaryDirectory() as temp:
+                result = self.check(self.install(Path(temp), example))
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                self.assertNotIn("ERROR", output)
+
+    def test_the_required_files_follow_the_scripts_the_renderer_installs(self) -> None:
+        """The list had not moved since 1.2 while the renderer added two scripts."""
+        checker = load_script("check_installed.py", "check_installed_under_test")
+        required = set(checker.STANDARD_REQUIRED)
+        for name in RENDERER.SESSION_TOOL_SCRIPTS:
+            with self.subTest(script=name):
+                self.assertIn(f"scripts/ai-harness/{name}", required)
+
+    def test_a_harness_missing_the_newer_scripts_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = self.install(Path(temp), REPO / "examples/standard-codex-plugin.json")
+            for rel in (
+                "scripts/ai-harness/harness_checkpoint.py",
+                "scripts/ai-harness/harness_progress.py",
+                ".ai/progress.json",
+            ):
+                (target / rel).unlink()
+
+            output = self.check(target).stdout + self.check(target).stderr
+            for rel in (
+                "scripts/ai-harness/harness_checkpoint.py",
+                "scripts/ai-harness/harness_progress.py",
+                ".ai/progress.json",
+            ):
+                with self.subTest(missing=rel):
+                    self.assertIn(f"missing required file: {rel}", output)
+
+    def test_an_installed_agent_that_widens_its_tier_is_caught(self) -> None:
+        """The fix must not have loosened what the checker actually guards."""
+        with tempfile.TemporaryDirectory() as temp:
+            target = self.install(Path(temp), REPO / "examples/standard-codex-plugin.json")
+            agent = target / ".claude/agents/harness-gate-runner.md"
+            text = agent.read_text(encoding="utf-8")
+            self.assertIn("capability: verifier", text)
+            write_lf(agent, text.replace(
+                "tools:\n  - Read\n  - Grep\n  - Glob\n  - Bash",
+                "tools:\n  - Read\n  - Grep\n  - Glob\n  - Bash\n  - Write",
+            ))
+
+            result = self.check(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "agent tools do not match its verifier tier",
+                result.stdout + result.stderr,
+            )
+
+    def test_an_installed_agent_that_drops_its_denials_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = self.install(Path(temp), REPO / "examples/standard-codex-plugin.json")
+            agent = target / ".claude/agents/harness-gate-runner.md"
+            text = agent.read_text(encoding="utf-8")
+            write_lf(agent, text.replace("disallowedTools:\n  - Write\n  - Edit\n", ""))
+
+            result = self.check(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "does not deny the tools its verifier tier forbids",
+                result.stdout + result.stderr,
+            )
+
+    def test_an_installed_agent_whose_mode_drifts_from_its_tier_is_caught(self) -> None:
+        """Not edit-accepting is not the same as correct for the tier."""
+        with tempfile.TemporaryDirectory() as temp:
+            target = self.install(Path(temp), REPO / "examples/standard-codex-plugin.json")
+            agent = target / ".claude/agents/harness-gate-runner.md"
+            text = agent.read_text(encoding="utf-8")
+            write_lf(agent, text.replace("permissionMode: plan", "permissionMode: default"))
+
+            result = self.check(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "agent permission mode does not match its verifier tier",
+                result.stdout + result.stderr,
+            )
+
+    def test_a_generated_agent_stripped_of_its_tier_is_caught(self) -> None:
+        """An unnamed tier is unenforceable, and the renderer always writes one."""
+        with tempfile.TemporaryDirectory() as temp:
+            target = self.install(Path(temp), REPO / "examples/standard-codex-plugin.json")
+            agent = target / ".claude/agents/harness-gate-runner.md"
+            text = agent.read_text(encoding="utf-8")
+            write_lf(agent, text.replace("capability: verifier\n", ""))
+
+            result = self.check(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "generated domain agent declares no capability tier",
+                result.stdout + result.stderr,
+            )

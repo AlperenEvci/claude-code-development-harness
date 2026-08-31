@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.6.1 - 2026-08-31
+
+### Fixed - the installed-harness checker disagreed with the generator
+
+`check_installed.py` is the only gate that runs *after* a harness is installed: step 6 of
+setup, and part of every audit. Two of the three profiles shipped in `examples/` failed
+it, on packages this plugin had just rendered and `validate_harness.py` had just passed.
+Nothing caught it because nothing ever ran the checker over a freshly generated package.
+
+**A correctly generated agent was reported as an escalation.** The checker still carried
+the pre-1.0 rule that every generated domain agent is read-only, written as a literal
+`tools:\n  - Read\n  - Grep\n  - Glob` fragment match. Capability tiers superseded that
+rule in 1.0.0 - the package validator was rewritten for it and says so in its own
+docstring - but this copy was not. Since then a `verifier` (which legitimately holds
+`Bash`) or an `implementer` (which legitimately holds `Write`) produced:
+
+```text
+ERROR: generated domain agent is not read-only: .claude/agents/harness-gate-runner.md
+```
+
+The check now derives the expected tools, denials, and permission mode from
+`CAPABILITY_TIERS`, mirroring `validate_harness.check_declared_tier`. It compares whole
+lists rather than fragments, so an agent that keeps its tier's tools and appends `Write`
+is still caught - and that is now tested from the installed side rather than only the
+package side. What remains specific to a generated agent is that it must name a tier at
+all: the renderer always writes one, so a file that has lost it has been edited.
+
+**Three files added since 1.2 were never required.** `harness_checkpoint.py` (1.3.0),
+`harness_progress.py` (1.4.0), and `.ai/progress.json` (1.4.0) were absent from
+`STANDARD_REQUIRED`, so the checker called a 1.2-era harness complete. An installed
+harness missing them has a context band and a definition of done that are prose again,
+which is exactly what those two releases fixed. A test now walks
+`render_harness.SESSION_TOOL_SCRIPTS` and asserts every entry is required, so the list
+cannot fall behind the renderer again.
+
+### Note for anyone upgrading an existing harness
+
+An installed harness carries no version stamp - `harness-manifest.json` and
+`.development-harness-generated.json` stay in the staging directory and are never copied
+into the project. Which release produced an installed harness is therefore inferred from
+what is present, and `check_installed.py` is the tool that now answers it correctly.
+
+### Tests
+
+Seven new tests, 172 to 179. The first of them renders every shipped example, installs it,
+and requires a clean check - the test that would have caught both defects on the day they
+landed. Eight planted defects, including a revival of the fragment rule itself, are each
+caught.
+
+While mirroring the validator the checker also gained an assertion it never had: the
+permission mode must *match* the declared tier, not merely avoid the edit-accepting ones.
+A `reader` carrying `permissionMode: default` used to pass.
+
 ## 1.6.0 - 2026-08-31
 
 ### Added - repository shape in the scan
