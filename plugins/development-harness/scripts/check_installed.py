@@ -50,6 +50,8 @@ STANDARD_REQUIRED = [
     # done that are prose again, which is exactly what those releases fixed.
     "scripts/ai-harness/harness_checkpoint.py",
     "scripts/ai-harness/harness_progress.py",
+    # 1.8. Without it the recorded state is present but unreadable as a whole.
+    "scripts/ai-harness/harness_report.py",
     ".ai/progress.json",
 ]
 

@@ -261,6 +261,30 @@ rejects CRLF so the regression cannot return.
 - Local Windows full gate green throughout: 83 tests, 2 skipped for symlink
   privilege.
 
+## 1.8.0 - the observability layer
+
+A Rust/Tauri shell was discussed and deferred rather than rejected outright. The
+argument that settled it: the harness already emits every number the shell would
+display, so the missing piece was a view, not a runtime. Two things a desktop app
+would genuinely add — a visual graph editor and a supervisor that survives the
+terminal, which is also where the open `--max-budget-usd` gap lives — remain real,
+and the HTML the report writes is the frontend such a shell would load. So the view
+was built first, and the process question stays open until something measured
+demands it.
+
+`harness_report.py` shipped as the seventh installed script. Details in
+`CHANGELOG.md` and `docs/runtime.md`; the contract it was built against is
+`.ai/specs/0001-harness-report.md`.
+
+One deviation from that spec, found during implementation and worth recording
+because it was not obvious from the outside: the spec said to lay graphs out using
+`harness_graph.py`'s execution plan. `harness_graph.py` is **not** one of the scripts
+installed into a target repository, so the installed copy would have failed to
+import it. The layering is done locally instead, and the difference turned out to be
+the right shape anyway — a validator must refuse a graph with a cycle, and a view
+must still draw one, so the report reports what it could not order rather than
+raising.
+
 ### Repository
 
 Work continues on a private copy, `AlperenEvci/claude-code-development-harness`.

@@ -8,8 +8,13 @@ process table. See `.ai/decisions/0002-session-substrate.md`.
 Two things earn a script rather than a paragraph of prose:
 
 `launch` turns a capability tier into the exact command that enforces it, so the
-tier is executable rather than copy-pasted. It prints the command and never runs
-it. Starting an agent is the operator's action, and a command on screen can be
+tier is executable rather than copy-pasted. It prints the command; `--exec` runs
+it, and only a tier that cannot write may be run that way.
+
+The asymmetry is the point. An orchestrator already dispatches read-only workers
+in-process without asking, so requiring a human to copy-paste a read-only CLI
+session buys no safety and costs a round trip. A tier that writes is different in
+kind: it changes the repository, so its command stays on screen where it can be
 read before it is run.
 
 `sweep` finds background sessions this repository left behind. Background
@@ -226,11 +231,46 @@ def cmd_launch(args: argparse.Namespace) -> int:
     except SessionError as exc:
         fail(str(exc))
 
+    if getattr(args, "execute", False):
+        return run_launch(argv, args.capability)
+
     if args.json:
         print(json.dumps(argv, indent=2))
         return 0
     print(" ".join(quote(item) for item in argv))
     return 0
+
+
+def run_launch(argv: list[str], capability: str) -> int:
+    """Run a launch command, for the tiers where running it is the cheap path.
+
+    The gate is `writes`, read from the shared tier table rather than from a
+    second list here. A writing tier is refused with the command still printed,
+    so a refusal hands the operator what they need instead of only a complaint.
+    """
+    if CAPABILITY_TIERS[capability]["writes"]:
+        print(" ".join(quote(item) for item in argv))
+        fail(
+            f"--exec refuses {capability} because this tier writes to the "
+            "repository. The command is printed above; run it yourself, or "
+            "dispatch a read-only tier instead."
+        )
+
+    binary = find_claude()
+    if binary is None:
+        fail("claude is not on PATH; cannot --exec")
+
+    proc = subprocess.run(  # noqa: S603  (argv built from the tier table)
+        [binary, *argv[1:]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr)
+    return proc.returncode
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -319,10 +359,11 @@ def main() -> None:
 
     launch = sub.add_parser(
         "launch",
-        help="Print the command that launches a session under a capability tier.",
+        help="Print, or with --exec run, the command that launches a session.",
         description=(
-            "Prints the command and does not run it. Starting an agent is the "
-            "operator's action."
+            "Prints the command by default. --exec runs it, and only for a tier "
+            "that cannot write; starting something that changes the repository "
+            "stays the operator's action."
         ),
     )
     launch.add_argument("--capability", required=True, choices=sorted(CAPABILITY_TIERS))
@@ -345,6 +386,16 @@ def main() -> None:
         ),
     )
     launch.add_argument("--json", action="store_true", help="Emit argv as JSON")
+    launch.add_argument(
+        "--exec",
+        dest="execute",
+        action="store_true",
+        help=(
+            "Run the command instead of printing it. Read-only tiers only: a "
+            "tier that writes is refused, with its command printed for the "
+            "operator to run."
+        ),
+    )
     launch.set_defaults(func=cmd_launch)
 
     listing = sub.add_parser("list", help="List sessions started under this repository.")

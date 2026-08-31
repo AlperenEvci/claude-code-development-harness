@@ -20,6 +20,21 @@ decision here is not obvious.
 This skill declares no pre-approved tools. Each command goes through the normal
 permission flow, deliberately: these commands dispatch agents.
 
+## Use this only for what the Agent tool cannot do
+
+A separate CLI session is the expensive dispatch. It pays a cold start, a filesystem
+return channel, and a sweep afterwards to catch what it left running. Three properties
+justify that, and nothing else does:
+
+- the lane needs its own **worktree**,
+- it must **outlive** the session that started it,
+- it **writes concurrently** with another lane.
+
+Isolation alone is not on that list. The Agent tool already runs a subagent in an
+isolated context, in-process, in parallel, and returns the conclusion directly - so
+reconnaissance, review, and verification belong there, not here. Routing them through
+this skill buys nothing and costs a round trip per dispatch.
+
 ## Preconditions
 
 If `scripts/ai-harness/harness_session.py` does not exist, stop. Either the harness is
@@ -38,8 +53,14 @@ not an interpreter.
 
 ## launch
 
-`launch` **prints** the command. It never runs it: starting an agent is the operator's
-action, and this skill does not take it for them.
+`launch` **prints** the command by default. `--exec` runs it, and only a tier that
+cannot write may be run that way:
+
+- **read-only tiers** (`reader`, `verifier`) accept `--exec`. An orchestrator already
+  dispatches read-only workers in-process without asking, so making a human copy-paste
+  a read-only CLI session buys no safety and costs a round trip.
+- **`implementer` is refused**, with its command printed anyway. It changes the
+  repository, so it stays on screen where it can be read before it is run.
 
 ```bash
 <python> scripts/ai-harness/harness_session.py launch \
@@ -55,7 +76,8 @@ A writing lane needs a worktree and a scope, and only a writing lane may detach:
   --task "Execute .ai/specs/<task>.md"
 ```
 
-Show the operator the printed command and let them run it.
+For a read-only tier, add `--exec` and read the result. For a writing tier, show the
+operator the printed command and let them run it.
 
 **Do not work around a refusal.** The two you will meet are load-bearing:
 

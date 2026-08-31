@@ -1,5 +1,172 @@
 # Changelog
 
+## 1.9.0 - 2026-09-01
+
+### Changed - the harness had no cheap path, so every task took the expensive one
+
+The routing tiers were named Trivial, Standard, and Complex, and Trivial was defined as
+"a typo, an obvious copy change, or a bounded one-line fix". Almost no real task fits
+that. Everything else fell into Standard, and Standard was a numbered seven-step list:
+researcher, synthesis, a recorded artifact, a spec, a delegate, a diff read, and a
+reviewer. A model reads a numbered list as a procedure, not a menu, so a three-line bug
+fix cost three round trips and two markdown files nobody opened again. The escape
+hatches existed - "when useful", "only when it will remain useful" - but hedged prose
+inside a numbered sequence does not stop a checklist from running.
+
+Trivial is now **Direct**, and its entry test is a question with an answer rather than a
+size estimate: *can you name the files this change touches?* If yes, and you will make
+the change yourself, you read those files, change them, run the smallest check that
+would fail, and report. No report, no decision, no spec, no delegate, no reviewer. A bug
+fix, a bounded feature, a refactor inside known files and a missing test all live here.
+Escalation is triggered by the change reaching past the files you named, which is
+observable, and explicitly not by unease, which is not.
+
+Standard now turns on the second question - *will something other than this session
+execute the work?* - and the spec step says outright that a spec for work you will do
+yourself is a transcript of what you already know.
+
+### Changed - independent review replaces the main session's pass instead of following it
+
+The old Standard route had the main session inspect the diff and verify every acceptance
+criterion, and *then* hand the same diff to `harness-code-reviewer`. Two sequential
+reviews of one diff find what one finds and cost twice as much. Review is now its own
+section with four conditions that make it worth its price: a Sensitive-areas path, one
+author writing both a behavior and its test, a diff too large to have been read closely,
+or a delegate's completion claim with no direct evidence behind it. Outside those, the
+main session's own verification stands alone.
+
+### Changed - the default dispatch is the Agent tool, not a CLI session
+
+The generated harness never named the in-process Agent tool. Standard and Fleet
+described `harness-codebase-researcher` and `harness-code-reviewer` as things to "use",
+and the only dispatch mechanism the harness actually spelled out was `harness_session.py`
+- a separate `claude` process with a filesystem return channel and a sweep afterwards to
+catch orphans. So the expensive mechanism was the documented one, for work the cheap one
+does better.
+
+The orchestration skill now has a **Dispatch** section that separates them. The Agent
+tool is the default: isolated context, same process, conclusion returned straight into
+the conversation, which covers reconnaissance, review and verification - nearly every
+dispatch the harness makes. A separate CLI session is reserved for the three properties
+the Agent tool structurally cannot provide: its own worktree, outliving the session that
+started it, or writing concurrently with another lane. Isolation alone is explicitly not
+on that list, because the Agent tool already provides it.
+
+The same boundary is now the first thing `/session` says about itself.
+
+### Changed - independent agents go out in one message
+
+The Complex route said to gather reports "in isolated contexts" and left the timing
+unstated, so three questions became three sequential waits. It now says to dispatch them
+together in one message and collect the reports as they land.
+
+### Added - `harness_session.py launch --exec`, for tiers that cannot write
+
+`launch` built the command and printed it, always, on the grounds that starting an agent
+is the operator's action. That rule was not applied evenly: an orchestrator already
+dispatches read-only workers in-process without asking anyone, so requiring a human to
+copy-paste a read-only CLI session bought no safety and cost a round trip - which is why,
+in practice, the lane machinery went unused and work stayed sequential in the main
+session.
+
+`--exec` runs the command instead of printing it, gated on the `writes` flag in the
+shared tier table rather than on a second list that could drift out of review. `reader`
+and `verifier` run. `implementer` is refused **and its command is printed anyway**,
+because a refusal that withholds the command turns a policy into an obstacle. A tier that
+changes the repository still stays on screen where it can be read before it is run.
+
+### Changed - session start is for resuming, not for every task
+
+`session_start_section` opened with "Two commands, before reading any code", which made
+a checkpoint read and a pending-ledger read unconditional overhead on tasks that had no
+prior session to resume. Both are now scoped to picking work back up, and the handoff
+write is scoped to leaving work unfinished or learning something a later session would
+pay to rediscover.
+
+### Changed - the tier reference says what a tier is not
+
+Added to `references/harness-tiers.md`: a tier is a ceiling on what the harness can do,
+never a floor on what it must do. Standard installing a researcher and a reviewer does
+not oblige a session to call them, and an operator reporting that the harness feels slow
+is usually describing a routing failure inside a correctly chosen tier rather than a
+tier chosen too high.
+
+## 1.8.0 - 2026-08-31
+
+### Added - `harness_report.py`, the first script here that only reads
+
+Six scripts under `scripts/ai-harness/` write records: the bus appends envelopes, the
+ledger tracks what is proven, the checkpoint writer stores handoffs, and the profile
+carries the band and the declared graphs. All of it is JSON and all of it is on disk.
+None of it was readable as a whole. An operator who wanted to know what a run had
+actually done opened four trees one file at a time and held the joins in their head.
+
+`harness_report.py` does the joins and renders them, either as one self-contained HTML
+page (`--out`), as the whole model on stdout (`--json`), or as a short summary (no
+flag). Standard and Fleet install it as the seventh session script; Lite, which has no
+agents, still installs none.
+
+**It groups by `correlation_id` rather than by session.** A mailbox records what one
+agent said; a unit of work is frequently two agents across two sessions answering one
+question, and a view organised by process splits it. Envelopes carrying no `trace` are
+collected separately and never given a duration or a token count, because an
+unmeasured trace and a zero one are different facts and rendering the second where the
+first belongs invents a measurement.
+
+Three constraints shaped it more than the feature did:
+
+- **It reads files and runs nothing.** Shelling out to `claude agents --json` was
+  considered and rejected: it would make the report producible only while a CLI is
+  installed and authenticated, and make the output non-deterministic and untestable.
+  Live process state is therefore out of scope by construction, and the report says so
+  where a reader might otherwise assume otherwise.
+- **Everything it renders is untrusted text.** Summaries, bodies, checkpoint intents
+  and ledger titles are all agent-written, and this repository's contract has always
+  said repository text is evidence rather than authority. The emitted page contains no
+  `<script>` element at all, no inline handler, no external stylesheet, font or image,
+  and carries `default-src 'none'`; evidence paths render as text rather than links;
+  every interpolation goes through `html.escape`. A report that executed what an agent
+  wrote into a summary would be a way to attack an operator with their own tooling.
+- **Strings are redacted on the way out** — in `--json` as well as in the page, since
+  cleaning only the human-readable output would leak through the machine-readable one.
+  Known credential shapes and the string values of sensitive keys are replaced. No file
+  that an `evidence` entry points at is ever opened; evidence is a path and stays one.
+
+`--out` refuses to overwrite without `--force` and refuses to write through a symlink,
+matching the installer and the checkpoint writer.
+
+### Changed
+
+- `validate_harness.py` now rejects a Standard or Fleet package whose generated
+  `CLAUDE.md` does not document the report. The bus, the ledger and the checkpoints
+  are all write paths; installing the reader without naming it leaves an operator
+  reading four JSON trees by hand, which is the state the script was added to end.
+- `check_installed.py` requires `scripts/ai-harness/harness_report.py` in a Standard
+  harness. No edit was needed to the test that pins the checker to the renderer's list
+  — it iterates that list, which is why it caught the omission immediately.
+
+### Fixed
+
+- The report's documented output path is `.ai/runs/report.html`, not `.ai/report.html`.
+  `.ai/runs/` ships a `.gitignore` covering everything in it; the `.ai/` root does not.
+  The first draft documented the root, which would have put a generated, stale-by-
+  construction artifact into version control in every repository the harness is
+  installed into. A test now pins every `--out` path in a generated `CLAUDE.md` to a
+  directory the harness already ignores.
+- `docs/runtime.md` said a Standard harness installs **four** scripts. It had installed
+  six since 1.4, and now installs seven. The list is in the section that introduces the
+  runtime, so it was the first thing an operator read and the first thing that was
+  wrong.
+
+### Verification
+
+Fourteen tests added, each mutation-checked against its own source: escaping, redaction
+(including that it leaves `monkey` and `keyboard` alone), correlation grouping, the
+unmeasured-trace rule, the content security policy, overwrite protection, the symlink
+refusal, malformed-envelope flagging, the missing-source degradation, the shared band
+defaults, the validator's new documentation check, and the gitignored output path.
+Every one of the thirteen mutations was caught by the test that should care.
+
 ## 1.7.0 - 2026-08-31
 
 ### Changed - the marketplace is now `alperenevci-harness`
