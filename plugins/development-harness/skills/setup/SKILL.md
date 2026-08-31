@@ -8,10 +8,16 @@ allowed-tools:
   - Read
   - Grep
   - Glob
+  - Bash(python3 --version)
+  - Bash(python --version)
   - Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/inspect_project.py *)
+  - Bash(python ${CLAUDE_PLUGIN_ROOT}/scripts/inspect_project.py *)
   - Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_harness.py *)
+  - Bash(python ${CLAUDE_PLUGIN_ROOT}/scripts/render_harness.py *)
   - Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py *)
+  - Bash(python ${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py *)
   - Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_installed.py *)
+  - Bash(python ${CLAUDE_PLUGIN_ROOT}/scripts/check_installed.py *)
   - Bash(${CLAUDE_PLUGIN_DATA}/workspaces/*/generated/install-harness.sh *)
   - Bash(claude plugin list --json)
   - Bash(command -v codex)
@@ -47,12 +53,31 @@ Generate repository files in English unless the user explicitly asks otherwise. 
 - Every generated orchestration workflow must bypass the expensive research/spec/delegation pipeline for trivial obvious edits.
 - Greenfield setup creates context and a harness. It does **not** build the application or install its dependencies.
 
+## Resolve the Python interpreter
+
+Every script below runs through one interpreter name. Resolve it once, first:
+
+```bash
+python3 --version
+```
+
+If that fails, use:
+
+```bash
+python --version
+```
+
+Substitute the name that printed a version for `<python>` in every later command in
+this skill. Do not assume `python3`: on Windows the bare name resolves to a Microsoft
+Store alias stub that is not an interpreter and exits with an error, and every later
+step would fail with a message about installing Python from the Store.
+
 ## 1. Inspect and select the entry path
 
 Run:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/inspect_project.py" \
+<python> "${CLAUDE_PLUGIN_ROOT}/scripts/inspect_project.py" \
   --root "${CLAUDE_PROJECT_DIR}" \
   --data-root "${CLAUDE_PLUGIN_DATA}"
 ```
@@ -224,12 +249,12 @@ Never place `allowed_tools` in generated custom skills or tool/permission overri
 Render and validate:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/render_harness.py" \
+<python> "${CLAUDE_PLUGIN_ROOT}/scripts/render_harness.py" \
   --config "<staging_dir>/project-profile.json" \
   --output "<staging_dir>/generated" \
   --force
 
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py" \
+<python> "${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py" \
   "<staging_dir>/generated"
 ```
 
@@ -265,7 +290,7 @@ The generated project skills and agents use a `harness-` prefix to reduce collis
 Run:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_installed.py" \
+<python> "${CLAUDE_PLUGIN_ROOT}/scripts/check_installed.py" \
   --root "${CLAUDE_PROJECT_DIR}"
 ```
 

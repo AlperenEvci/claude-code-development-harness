@@ -4,7 +4,7 @@
 
 The marketplace root is the repository root, not `plugins/development-harness/`. Push the whole tree — `/plugin marketplace add` reads `.claude-plugin/marketplace.json` at the top level and resolves the plugin from there.
 
-This repository is currently **private**, so `marketplace add` works only for accounts with read access. Making it public is a deliberate choice and changes nothing else in the layout.
+The repository is public, so `marketplace add` works for anyone. Nothing else in the layout depends on visibility.
 
 ## 2. Validate locally
 

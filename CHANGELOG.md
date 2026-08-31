@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.1.0 — 2026-08-31
+
+### Fixed — the plugin could not run on Windows
+
+Both skills invoked their scripts as `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/..."`.
+On Windows the bare name `python3` resolves to a Microsoft Store alias stub that
+is not an interpreter: it prints an install prompt and exits non-zero. So
+`/development-harness:setup` failed at its first step on the platform this plugin
+is developed on.
+
+This is the third site of one defect. The test suite had it, the gate script had
+it, and both were fixed — while the skills, the only part an end user actually
+runs, kept it. Fixing a class of defect in the places you happen to be looking is
+not fixing the class.
+
+- Both skills now resolve the interpreter by **running** a candidate rather than
+  assuming a name, and substitute it into every later command.
+- `allowed-tools` permits both names. The allowlist matches a literal prefix, so a
+  rule for `python3 script.py` does not permit `python script.py`; a skill that
+  resolved its interpreter at runtime would otherwise have been blocked by its own
+  allowlist on whichever platform it did not anticipate.
+- Two tests pin this: no skill may run a script through a bare `python3`, and an
+  interpreter allowlist entry must cover both names.
+
+### Added — three commands that drive an installed harness
+
+The 1.0 runtime shipped with no command surface. Sessions, the bus, and agent
+synthesis were reachable only by typing Python invocations by hand, which is not a
+feature anyone uses. The loop the architecture describes now has commands:
+
+- **`/development-harness:spec`** — turn an accepted decision into a self-contained
+  contract under `.ai/specs/`. It reads the project's real verification commands
+  from `AGENTS.md` rather than inventing them, refuses to overwrite an existing
+  spec, and stops at the contract instead of implementing it.
+- **`/development-harness:session`** — dispatch, list, read, and sweep. It prints
+  launch commands rather than running them, and it names the two refusals that are
+  load-bearing so they are not worked around.
+- **`/development-harness:agent`** — synthesize a bounded agent for an unforeseen
+  need, emit it inline, and promote it only as a separate dry-run-first step.
+
+None of the three pre-approves any tool. `setup` pre-approves its own deterministic
+scripts because an interview would otherwise prompt a dozen times; these three are
+short, so the cheaper answer is the safer one, and every write or dispatch goes
+through the normal permission flow. A test pins that too.
+
+`session` and `agent` require Standard or Fleet, and say so and stop when the
+runtime is absent rather than failing partway.
+
 ## 1.0.1 — 2026-08-31
 
 Ownership and documentation. No behavior change: the renderer, validator,

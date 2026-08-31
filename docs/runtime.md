@@ -33,6 +33,21 @@ repository is the code the plugin's own test suite ran against. `validate_harnes
 compares each installed copy to its plugin original by SHA-256 and rejects a package
 whose copy has drifted.
 
+## The commands that wrap all of this
+
+Every raw invocation in this guide has a command in front of it, and the command is
+usually the better entry point because it checks preconditions and reads the refusals
+for you:
+
+| Command | Wraps |
+|---|---|
+| `/development-harness:spec` | writing the contract a lane executes |
+| `/development-harness:session` | `harness_session.py` and `harness_bus.py` |
+| `/development-harness:agent` | `harness_agentgen.py` |
+
+The raw commands stay documented because a command is a convenience and the script is
+the contract. When the two ever disagree, the script is right.
+
 ## The mental model
 
 **A session is a record, not a process.** The harness keeps no process table of its

@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.0.1](https://img.shields.io/badge/Version-1.0.1-7C3AED?style=flat-square)
+![Version 1.1.0](https://img.shields.io/badge/Version-1.1.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -32,7 +32,9 @@ One guided command:
 >
 > Raw exploration belongs in isolated agents. Product judgment, accepted decisions, executable contracts, and verified outcomes belong in the main session.
 
-**Version 1.0 turns that principle into machinery.** A harness no longer only writes instruction files that ask an agent to behave. It installs a context budget the validator can check, work graphs that render to executable Workflow scripts, capability tiers enforced by launch flags rather than by prose, and a small runtime for starting, tracking, and tearing down agent sessions. See [What 1.0 installs](#what-10-installs).
+**Version 1.0 turned that principle into machinery.** A harness no longer only writes instruction files that ask an agent to behave. It installs a context budget the validator can check, work graphs that render to executable Workflow scripts, capability tiers enforced by launch flags rather than by prose, and a small runtime for starting, tracking, and tearing down agent sessions. See [What 1.0 installs](#what-10-installs).
+
+**Version 1.1 gave that runtime a command surface** — `spec`, `session`, and `agent` — and fixed the interpreter defect that made the plugin unusable on Windows.
 
 ## Install
 
@@ -44,7 +46,7 @@ Inside Claude Code:
 /reload-plugins
 ```
 
-> The repository is private, so `marketplace add` works for accounts that have read access to it. To develop against a local checkout instead, start Claude Code with `claude --plugin-dir ./plugins/development-harness`.
+> To develop against a local checkout instead, start Claude Code with `claude --plugin-dir ./plugins/development-harness`.
 
 Then run:
 
@@ -57,6 +59,34 @@ You can include context directly:
 ```text
 /development-harness:setup new B2B SaaS for US virtual-mailbox operators. Serious MVP. Claude owns architecture and specs; Codex implements. No automatic commits, network access, or deploys.
 ```
+
+## Commands
+
+Two commands build and inspect a harness. Three drive one that already exists, and they follow the loop the whole architecture is built around: **decide, then specify, then dispatch, then verify.**
+
+| Command | Does | Needs |
+|---|---|---|
+| `/development-harness:setup` | create, adopt, or upgrade a harness | any folder |
+| `/development-harness:audit` | read-only review of an existing harness | any repo |
+| `/development-harness:spec` | write a self-contained contract into `.ai/specs/` | a harness |
+| `/development-harness:session` | launch, list, read, and sweep agent sessions | Standard/Fleet |
+| `/development-harness:agent` | synthesize a bounded agent for an unforeseen need | Standard/Fleet |
+
+A typical pass through the loop:
+
+```text
+/development-harness:spec add idempotency keys to the billing retry path
+   ↓  writes .ai/specs/billing-idempotency-keys.md
+/development-harness:session launch an implementer against that spec
+   ↓  prints the command; you run it
+/development-harness:session read the bus, then verify the diff yourself
+   ↓
+/development-harness:session sweep
+```
+
+`spec` reads your real verification commands out of `AGENTS.md` rather than inventing them, and refuses to overwrite an existing contract. `session` **prints** launch commands instead of running them — starting an agent stays your action. `agent` emits a definition inline by default, because an agent you needed once should not become one every future session inherits.
+
+`setup` and `audit` pre-approve only their own deterministic scripts, so a long interview does not prompt a dozen times. The other three pre-approve nothing: they write files or dispatch agents, and they are short enough that the cheaper answer is also the safer one.
 
 ## Two ways to start
 
@@ -399,6 +429,8 @@ BLOCKED    unsafe destination or filesystem condition
 - Python `3.10+`
 - Git recommended; required for Fleet/worktrees
 - Codex optional
+
+Windows, macOS, and Linux. The skills resolve a Python interpreter by running it rather than assuming a name, because on Windows the bare name `python3` is a Microsoft Store alias stub.
 
 No Python package installation is required. The plugin scripts use the standard library only, and there is no build step.
 

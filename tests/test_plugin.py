@@ -17,6 +17,9 @@ REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "development-harness"
 SCRIPTS = PLUGIN / "scripts"
 
+# The command surface. A directory under `skills/` is a slash command.
+PLUGIN_SKILLS = ("agent", "audit", "session", "setup", "spec")
+
 # The plugin scripts are invoked as subprocesses. Use this interpreter rather
 # than the bare name "python3": Windows has no python3.exe outside the
 # Microsoft Store alias stub, which exits non-zero without running anything.
@@ -229,12 +232,89 @@ class PluginStructureTests(unittest.TestCase):
         )
 
     def test_plugin_skills_are_explicit_and_reference_existing_scripts(self) -> None:
-        for skill_name in ("setup", "audit"):
+        for skill_name in PLUGIN_SKILLS:
             path = PLUGIN / "skills" / skill_name / "SKILL.md"
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
             self.assertIn(f"name: {skill_name}", text)
             self.assertIn("disable-model-invocation: true", text)
             self.assertNotIn("${CLAUDE_SKILL_DIR}", text)
+
+    def test_every_shipped_skill_directory_is_a_known_command(self) -> None:
+        """A skill directory is a slash command the moment it is installed.
+
+        So the command surface is whatever `skills/` contains, and a directory
+        added without being listed here ships an undocumented command.
+        """
+        found = sorted(p.name for p in (PLUGIN / "skills").iterdir() if p.is_dir())
+        self.assertEqual(found, sorted(PLUGIN_SKILLS))
+
+    def test_no_skill_hardcodes_python3_for_a_script_it_runs(self) -> None:
+        """On Windows the bare name `python3` is a Store alias stub, not Python.
+
+        This defect had already been fixed twice — in the test suite and in the
+        gate script — while the skills still carried it, which made the plugin's
+        own entry point unusable on the platform it is developed on. A command
+        block that names `python3` directly is the regression.
+        """
+        for skill_name in PLUGIN_SKILLS:
+            text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            body = text.split("---", 2)[-1]
+            offenders = [
+                line
+                for line in body.splitlines()
+                if line.strip().startswith("python3 ") and ".py" in line
+            ]
+            self.assertEqual(
+                offenders,
+                [],
+                f"{skill_name}/SKILL.md runs a script through a bare `python3`, "
+                "which is a Microsoft Store stub on Windows; use the resolved "
+                "`<python>` placeholder instead",
+            )
+
+    def test_an_interpreter_allowlist_entry_covers_both_names(self) -> None:
+        """`allowed-tools` matches a literal prefix.
+
+        A rule for `python3 script.py` does not permit `python script.py`, so a
+        skill that resolves its interpreter at runtime would be blocked by its own
+        allowlist on whichever platform it did not anticipate.
+        """
+        for skill_name in PLUGIN_SKILLS:
+            text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            three = set(re.findall(r"^  - Bash\(python3 (.+)\)$", text, re.MULTILINE))
+            plain = set(re.findall(r"^  - Bash\(python (.+)\)$", text, re.MULTILINE))
+            self.assertEqual(
+                three,
+                plain,
+                f"{skill_name}/SKILL.md permits one interpreter name but not the "
+                f"other; only in python3: {sorted(three - plain)}, only in "
+                f"python: {sorted(plain - three)}",
+            )
+
+    def test_the_new_commands_do_not_pre_approve_tools(self) -> None:
+        """`spec`, `session`, and `agent` write files or dispatch agents.
+
+        `setup` pre-approves its own deterministic scripts because an interview
+        would otherwise prompt a dozen times. These three are short, so the
+        cheaper answer is the safer one: no `allowed-tools` at all, and every
+        command goes through the normal permission flow.
+        """
+        for skill_name in ("spec", "session", "agent"):
+            text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            frontmatter = text.split("---", 2)[1]
+            self.assertNotIn(
+                "allowed-tools",
+                frontmatter,
+                f"{skill_name}/SKILL.md pre-approves tools; widening a writing or "
+                "dispatching command's permissions needs a separately reviewed "
+                "change, not a frontmatter edit",
+            )
 
         setup = (PLUGIN / "skills" / "setup" / "SKILL.md").read_text()
         for script in ("inspect_project.py", "render_harness.py", "validate_harness.py", "check_installed.py"):
