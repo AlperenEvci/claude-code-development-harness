@@ -37,7 +37,13 @@ from harness_capabilities import (  # noqa: E402  (sibling module, resolved abov
     CAPABILITY_TIERS,
 )
 
-ENVELOPE_VERSION = 1
+ENVELOPE_VERSION = 2
+
+#: Version 2 adds the optional `trace` object. Envelopes are append-only, so a
+#: repository that has been running since version 1 has version 1 records on
+#: disk, and refusing to read them would discard the history the bus exists to
+#: keep. Reading accepts both; writing always produces the current version.
+SUPPORTED_ENVELOPE_VERSIONS = (1, 2)
 
 #: What an envelope is for. Deliberately small — a vocabulary an orchestrator can
 #: branch on without reading prose. `result` closes a task, `finding` reports
@@ -59,6 +65,11 @@ AGENT_NAME_PATTERN = re.compile(r"\A[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 MAX_SUMMARY_CHARS = 200
 MAX_BODY_BYTES = 64 * 1024
 MAX_EVIDENCE_ITEMS = 50
+
+#: A run longer than a day is a typo, not a measurement. The cap is here to catch
+#: a millisecond/second mix-up rather than to express a policy about runtimes.
+MAX_DURATION_MS = 24 * 60 * 60 * 1000
+MAX_TOKENS = 100_000_000
 
 BUS_DIRNAME = "bus"
 
@@ -159,6 +170,62 @@ def normalize_evidence(value: Any) -> list[str]:
     return items
 
 
+def normalize_trace(
+    correlation_id: str | None,
+    duration_ms: Any,
+    tokens_in: Any,
+    tokens_out: Any,
+) -> dict[str, Any] | None:
+    """Assemble the optional `trace` object, or None when nothing was measured.
+
+    These three fields are what turn a mailbox into something an eval loop can
+    consume: which envelopes belong to one unit of work, how long it took, and
+    what it cost. Without them the bus records what was claimed and nothing about
+    the run that produced it.
+
+    They are supplied by whoever launched the agent, and that is deliberate. A
+    foreground session returns `usage` and `num_turns` to its launcher; an agent
+    asked to report its own duration and token count is guessing, and a guess
+    recorded as a measurement is worse than a blank. So `trace` is set through
+    the CLI by the orchestrator and is absent from the agent-facing JSON schema.
+    """
+    trace: dict[str, Any] = {}
+
+    if correlation_id is not None:
+        text = str(correlation_id).strip()
+        if not UUID_PATTERN.match(text):
+            raise BusError(
+                f"correlation id must be a UUID, got {correlation_id!r}. It ties "
+                "envelopes from one unit of work together across agents."
+            )
+        trace["correlation_id"] = text.lower()
+
+    if duration_ms is not None:
+        if isinstance(duration_ms, bool) or not isinstance(duration_ms, int):
+            raise BusError("duration_ms must be an integer number of milliseconds")
+        if duration_ms < 0 or duration_ms > MAX_DURATION_MS:
+            raise BusError(
+                f"duration_ms is {duration_ms}, expected 0..{MAX_DURATION_MS}"
+            )
+        trace["duration_ms"] = duration_ms
+
+    for label, value in (("input", tokens_in), ("output", tokens_out)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise BusError(f"tokens.{label} must be an integer")
+        if value < 0 or value > MAX_TOKENS:
+            raise BusError(f"tokens.{label} is {value}, expected 0..{MAX_TOKENS}")
+        trace.setdefault("tokens", {})[label] = value
+
+    if not trace:
+        return None
+    # Recorded as reported, for the same reason `capability` is. The bus knows
+    # what the launcher said the run cost. It did not measure it.
+    trace["reported_by"] = "launcher"
+    return trace
+
+
 def build_envelope(
     *,
     session_id: str,
@@ -172,6 +239,10 @@ def build_envelope(
     task: str | None = None,
     envelope_id: str | None = None,
     created_at: str | None = None,
+    correlation_id: str | None = None,
+    duration_ms: Any = None,
+    tokens_in: Any = None,
+    tokens_out: Any = None,
 ) -> dict[str, Any]:
     """Validate the parts of an envelope and assemble it. Raises `BusError`."""
     if not UUID_PATTERN.match(str(session_id or "")):
@@ -237,6 +308,9 @@ def build_envelope(
         "body": body,
         "evidence": normalize_evidence(evidence),
         "next": (str(next_step).strip() or None) if next_step else None,
+        # Absent rather than an empty object when nothing was measured: a blank
+        # trace and an unmeasured one are different facts.
+        "trace": normalize_trace(correlation_id, duration_ms, tokens_in, tokens_out),
     }
     return envelope
 
@@ -247,10 +321,11 @@ def validate_envelope(data: Any, label: str) -> list[str]:
     if not isinstance(data, dict):
         return [f"{label}: not a JSON object"]
 
-    if data.get("envelope_version") != ENVELOPE_VERSION:
+    version = data.get("envelope_version")
+    if version not in SUPPORTED_ENVELOPE_VERSIONS:
         errors.append(
-            f"{label}: envelope_version is {data.get('envelope_version')!r}, "
-            f"expected {ENVELOPE_VERSION}"
+            f"{label}: envelope_version is {version!r}, "
+            f"expected one of {SUPPORTED_ENVELOPE_VERSIONS}"
         )
 
     expected_keys = {
@@ -266,6 +341,7 @@ def validate_envelope(data: Any, label: str) -> list[str]:
         "body",
         "evidence",
         "next",
+        "trace",
     }
     unknown = sorted(set(data) - expected_keys)
     if unknown:
@@ -288,6 +364,10 @@ def validate_envelope(data: Any, label: str) -> list[str]:
             evidence=data.get("evidence"),
             next_step=data.get("next"),
             task=data.get("task"),
+            correlation_id=(data.get("trace") or {}).get("correlation_id"),
+            duration_ms=(data.get("trace") or {}).get("duration_ms"),
+            tokens_in=((data.get("trace") or {}).get("tokens") or {}).get("input"),
+            tokens_out=((data.get("trace") or {}).get("tokens") or {}).get("output"),
         )
     except BusError as exc:
         errors.append(f"{label}: {exc}")
@@ -409,6 +489,10 @@ def cmd_post(args: argparse.Namespace) -> int:
             evidence=list(args.evidence or []),
             next_step=args.next,
             task=args.task,
+            correlation_id=args.correlation,
+            duration_ms=args.duration_ms,
+            tokens_in=args.tokens_in,
+            tokens_out=args.tokens_out,
         )
         target = write_envelope(root, envelope)
     except BusError as exc:
@@ -426,6 +510,17 @@ def cmd_read(args: argparse.Namespace) -> int:
         found = read_envelopes(root, args.session, args.kind or None)
     except BusError as exc:
         fail(str(exc))
+
+    if args.correlation:
+        wanted = str(args.correlation).strip().lower()
+        if not UUID_PATTERN.match(wanted):
+            fail(f"correlation id must be a UUID, got {args.correlation!r}")
+        found = [
+            (path, data)
+            for path, data in found
+            if isinstance(data, dict)
+            and (data.get("trace") or {}).get("correlation_id") == wanted
+        ]
 
     if args.json:
         print(json.dumps([data for _, data in found], indent=2, ensure_ascii=False))
@@ -497,6 +592,20 @@ def main() -> None:
     post.add_argument("--evidence", action="append", default=[], help="Repeatable citation")
     post.add_argument("--next", help="Suggested next step")
     post.add_argument("--task", help="Contract this envelope answers, e.g. a spec path")
+    post.add_argument(
+        "--correlation",
+        help=(
+            "UUID tying every envelope from one unit of work together, across "
+            "agents and sessions. Reuse it for each leg of the same task."
+        ),
+    )
+    post.add_argument(
+        "--duration-ms",
+        type=int,
+        help="How long the run took. Supplied by whoever launched it, not by the agent.",
+    )
+    post.add_argument("--tokens-in", type=int, help="Input tokens the run consumed.")
+    post.add_argument("--tokens-out", type=int, help="Output tokens the run produced.")
     post.set_defaults(func=cmd_post)
 
     read = sub.add_parser("read", help="Read envelopes, oldest first.")
@@ -504,6 +613,10 @@ def main() -> None:
     read.add_argument("--session", help="Limit to one session UUID")
     read.add_argument(
         "--kind", action="append", choices=list(ENVELOPE_KINDS), help="Repeatable filter"
+    )
+    read.add_argument(
+        "--correlation",
+        help="Limit to one unit of work, across every agent that touched it.",
     )
     read.add_argument("--json", action="store_true", help="Emit raw JSON")
     read.set_defaults(func=cmd_read)

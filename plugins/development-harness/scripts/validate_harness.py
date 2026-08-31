@@ -344,6 +344,21 @@ def check_session_tools(
             # A background session outlives its invoker. A harness that never
             # states the teardown step leaves orphans by default.
             errors.append("CLAUDE.md does not document the session teardown sweep")
+        if "read --correlation" not in text:
+            # Without the correlation id a bus is a pile of mailboxes: you can
+            # read what one agent said, never what one unit of work cost. The
+            # field only earns its keep if the contract says how to use it.
+            errors.append(
+                "CLAUDE.md does not document `harness_bus.py read --correlation`"
+            )
+        if "come from you, not from the agent" not in text:
+            # The trace is launcher-reported by construction. A contract that
+            # ships the fields without that sentence invites an agent to fill
+            # them in by guessing, which is how a guess becomes a measurement.
+            errors.append(
+                "CLAUDE.md documents the trace fields but not that they are "
+                "launcher-reported"
+            )
 
     ledger = payload / ".ai" / "progress.json"
     if not ledger.is_file():

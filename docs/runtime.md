@@ -234,6 +234,53 @@ Caps are enforced at write time — a 200-character summary, a 64 KB body, 50 ev
 items. This is where the context budget stops being advice: the boundary that limits
 what enters the main session is the one that can actually hold.
 
+### The trace: what a unit of work cost
+
+A summary says what an agent claims it did. It says nothing about the run that produced
+the claim. Four optional fields close that gap:
+
+```bash
+python scripts/ai-harness/harness_bus.py post \
+  --session 7f3a1c2e-9b44-4d5a-8e10-2c6b5f0a1d33 \
+  --from migration-safety-reader --kind finding --capability verifier \
+  --summary "Two migrations in the release range are irreversible" \
+  --correlation 4c1d8a90-3e77-42bb-9a55-0f6de2b71c84 \
+  --duration-ms 41200 --tokens-in 18400 --tokens-out 900
+```
+
+```json
+"trace": {
+  "correlation_id": "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84",
+  "duration_ms": 41200,
+  "tokens": {"input": 18400, "output": 900},
+  "reported_by": "launcher"
+}
+```
+
+The correlation id is the one that changes what you can ask. A session id groups a
+mailbox; a correlation id groups a *unit of work* — the reader, the implementer, and the
+reviewer that all served one task, across three sessions:
+
+```bash
+python scripts/ai-harness/harness_bus.py read --correlation 4c1d8a90-...
+```
+
+It is validated as a UUID rather than accepted as free text, because a key that is
+sometimes `billing-retry` and sometimes `billing_retry` groups nothing. An envelope with
+nothing measured has `trace: null` rather than an empty object: not-measured and
+measured-as-zero are different facts, and only one of them is a number.
+
+**These come from you, not from the agent.** A foreground run returns its usage to
+whoever launched it, so the launcher knows. An agent asked to report its own duration and
+token count is guessing, and a guess recorded as a measurement is worse than a blank — so
+`harness_bus.py schema`, the schema an agent answers, does not offer the fields at all.
+`reported_by` is stamped on every trace for the same reason `capability` exists: the bus
+records what it was told, and says so.
+
+Envelopes written before this existed are version 1 and still read. Envelopes are
+append-only records; a reader that refused the history would discard the thing the bus is
+for.
+
 ### An envelope is evidence, never authority
 
 An envelope is written by an agent, and agent output is exactly the untrusted text the

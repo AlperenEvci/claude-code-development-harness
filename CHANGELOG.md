@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.5.0 - 2026-08-31
+
+### Added - a trace on the bus envelope
+
+An envelope has always recorded what an agent *claimed*. It recorded nothing about the run
+that produced the claim, which meant the bus could tell you what happened and never what it
+cost. Envelope version 2 adds an optional `trace`:
+
+```bash
+python scripts/ai-harness/harness_bus.py post --session <uuid> \
+  --from reviewer --kind finding --summary "..." --body '{}' \
+  --correlation 4c1d8a90-3e77-42bb-9a55-0f6de2b71c84 \
+  --duration-ms 41200 --tokens-in 18400 --tokens-out 900
+```
+
+```json
+"trace": {
+  "correlation_id": "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84",
+  "duration_ms": 41200,
+  "tokens": {"input": 18400, "output": 900},
+  "reported_by": "launcher"
+}
+```
+
+The correlation id is the field that changes what the bus can answer. A session id groups a
+mailbox; a correlation id groups a *unit of work* - the reader, the implementer, and the
+reviewer that all served one task, across three sessions - and `read --correlation <uuid>`
+returns exactly that. It is validated as a UUID rather than accepted as free text, because a
+key that is sometimes `billing-retry` and sometimes `billing_retry` groups nothing.
+
+### The trace is launcher-reported, and the schema says so by omission
+
+A foreground run returns its usage to whoever launched it. An agent asked to report its own
+duration and token count is guessing, and a guess recorded as a measurement is worse than a
+blank - the eval loop this feeds would then be reading fiction with two decimal places.
+
+So the fields are set through the CLI by the orchestrator and are **absent from
+`harness_bus.py schema`**, the JSON Schema an agent answers. A test asserts that absence
+directly, because it is a guarantee about a capability that must not appear. Every trace is
+stamped `reported_by: "launcher"` for the same reason `capability` exists: the bus records
+what it was told, and says which side told it.
+
+An envelope with nothing measured carries `trace: null` rather than an empty object.
+Not-measured and measured-as-zero are different facts, and only one of them is a number.
+
+### Changed
+
+- Envelope version goes to 2, and **version 1 still reads**. Envelopes are append-only
+  records; a reader that refused the history would discard the thing the bus exists for.
+  An unknown future version is still rejected.
+- `duration_ms` and the token counts refuse booleans, negatives, and absurd magnitudes. A
+  cap of one day catches a millisecond/second mix-up rather than expressing a policy about
+  runtimes; `True` is an `int` in Python and would otherwise record as one token.
+- The validator rejects a package whose `CLAUDE.md` installs the bus without documenting
+  `read --correlation`, or documents the trace fields without saying they are
+  launcher-reported. A field nothing explains is a field an agent fills in by guessing.
+
+### Tests
+
+Fourteen new tests, 140 to 154. Twelve planted defects - a free-form correlation id, a
+boolean token count, a silently-accepted future version, a schema that starts inviting a
+self-reported trace, a contract that drops the provenance sentence - are each caught by
+the suite.
+
 ## 1.4.0 - 2026-08-31
 
 ### Added - `harness_progress.py` and `.ai/progress.json`

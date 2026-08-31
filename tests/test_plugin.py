@@ -3045,3 +3045,185 @@ class ProgressRenderTests(unittest.TestCase):
             self.assertTrue(
                 any("progress.json is missing" in error for error in errors), errors
             )
+
+
+class EnvelopeTraceTests(unittest.TestCase):
+    """Correlation id, duration, and tokens: what makes the bus readable by an eval loop."""
+
+    SESSION = "11111111-2222-3333-4444-555555555555"
+    CORRELATION = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def envelope(self, **overrides):
+        kwargs = dict(
+            session_id=self.SESSION,
+            sender="mapper",
+            kind="result",
+            summary="Retry wiring mapped",
+            body={"paths": ["src/retry.js"]},
+        )
+        kwargs.update(overrides)
+        return BUS.build_envelope(**kwargs)
+
+    def test_an_envelope_without_measurements_has_no_trace(self) -> None:
+        """A blank trace and an unmeasured one are different facts."""
+        self.assertIsNone(self.envelope()["trace"])
+
+    def test_the_trace_records_what_was_measured(self) -> None:
+        trace = self.envelope(
+            correlation_id=self.CORRELATION,
+            duration_ms=41_200,
+            tokens_in=18_400,
+            tokens_out=900,
+        )["trace"]
+        self.assertEqual(trace["correlation_id"], self.CORRELATION)
+        self.assertEqual(trace["duration_ms"], 41_200)
+        self.assertEqual(trace["tokens"], {"input": 18_400, "output": 900})
+        # Same standing as `capability`: the bus knows what it was told.
+        self.assertEqual(trace["reported_by"], "launcher")
+
+    def test_a_correlation_id_must_be_a_uuid(self) -> None:
+        """It becomes a filter key across sessions; a free-form string is not one."""
+        with self.assertRaises(BUS.BusError):
+            self.envelope(correlation_id="the-billing-work")
+
+    def test_a_negative_or_absurd_duration_is_refused(self) -> None:
+        for bad in (-1, BUS.MAX_DURATION_MS + 1):
+            with self.assertRaises(BUS.BusError):
+                self.envelope(duration_ms=bad)
+
+    def test_a_boolean_is_not_a_token_count(self) -> None:
+        """`True` is an int in Python, and would otherwise record as 1 token."""
+        with self.assertRaises(BUS.BusError):
+            self.envelope(tokens_in=True)
+
+    def test_the_agent_facing_schema_offers_no_trace_fields(self) -> None:
+        """The agent must not be invited to report its own duration or token use.
+
+        A foreground run returns usage to its launcher, which knows. An agent
+        asked for the same numbers is guessing, and a guess recorded as a
+        measurement is worse than a blank.
+        """
+        properties = BUS.envelope_schema()["properties"]
+        for field in ("trace", "correlation_id", "duration_ms", "tokens"):
+            self.assertNotIn(field, properties)
+
+    def test_a_version_one_envelope_still_reads(self) -> None:
+        """Envelopes are append-only, so old records exist and must stay readable."""
+        legacy = self.envelope()
+        legacy["envelope_version"] = 1
+        del legacy["trace"]
+        self.assertEqual(BUS.validate_envelope(legacy, "legacy"), [])
+
+    def test_an_unknown_envelope_version_is_still_rejected(self) -> None:
+        legacy = self.envelope()
+        legacy["envelope_version"] = 99
+        self.assertTrue(BUS.validate_envelope(legacy, "future"))
+
+    def test_reading_by_correlation_returns_one_unit_of_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            script = str(SCRIPTS / "harness_bus.py")
+            base = [PYTHON, script, "post", "--root", str(root),
+                    "--session", self.SESSION, "--body", "{}"]
+            run(*base, "--from", "mapper", "--kind", "result",
+                "--summary", "Mapped", "--correlation", self.CORRELATION)
+            run(*base, "--from", "reviewer", "--kind", "finding",
+                "--summary", "Found", "--correlation", self.CORRELATION)
+            run(*base, "--from", "other", "--kind", "status", "--summary", "Unrelated")
+
+            everything = run(PYTHON, script, "read", "--root", str(root), "--json")
+            self.assertEqual(len(json.loads(everything.stdout)), 3)
+
+            correlated = run(PYTHON, script, "read", "--root", str(root),
+                             "--correlation", self.CORRELATION, "--json")
+            senders = {item["from"] for item in json.loads(correlated.stdout)}
+            self.assertEqual(senders, {"mapper", "reviewer"})
+
+    def test_a_posted_trace_survives_the_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            script = str(SCRIPTS / "harness_bus.py")
+            run(PYTHON, script, "post", "--root", str(root), "--session", self.SESSION,
+                "--from", "mapper", "--kind", "result", "--summary", "Mapped",
+                "--body", "{}", "--duration-ms", "41200",
+                "--tokens-in", "18400", "--tokens-out", "900")
+            written = json.loads(
+                run(PYTHON, script, "read", "--root", str(root), "--json").stdout
+            )[0]
+            self.assertEqual(written["trace"]["duration_ms"], 41_200)
+            self.assertEqual(written["trace"]["tokens"]["output"], 900)
+            self.assertEqual(run(PYTHON, script, "validate", "--root", str(root)).returncode, 0)
+
+
+class TraceDocumentationTests(unittest.TestCase):
+    """The trace fields only matter if the generated contract explains them."""
+
+    def render(self, temp_path: Path, tier: str) -> Path:
+        config = temp_path / "profile.json"
+        output = temp_path / f"generated-{tier}"
+        write_lf(config, json.dumps(profile(tier), indent=2) + chr(10))
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output
+
+    def test_the_contract_documents_reading_by_correlation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            claude_md = (
+                self.render(Path(temp), "standard") / "payload/CLAUDE.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("--correlation", claude_md)
+            self.assertIn("read --correlation", claude_md)
+            self.assertIn("--duration-ms", claude_md)
+            # The point of the field: one unit of work, not one mailbox.
+            self.assertIn("come from you, not from the agent", claude_md)
+
+    def test_lite_documents_no_trace_for_a_bus_it_does_not_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            claude_md = (
+                self.render(Path(temp), "lite") / "payload/CLAUDE.md"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("--correlation", claude_md)
+
+    def test_the_validator_rejects_a_contract_that_drops_the_correlation_read(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            claude_md = output / "payload/CLAUDE.md"
+            text = claude_md.read_text(encoding="utf-8")
+            write_lf(claude_md, text.replace("read --correlation", "read"))
+
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(
+                json.loads((output / "project-profile.json").read_text(encoding="utf-8")),
+                output / "payload",
+                errors,
+            )
+            self.assertTrue(
+                any("read --correlation" in error for error in errors),
+                f"the validator did not flag the missing command: {errors}",
+            )
+
+    def test_the_validator_rejects_a_contract_that_drops_the_provenance_line(
+        self,
+    ) -> None:
+        """Ship the fields without that sentence and an agent fills them in."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            claude_md = output / "payload/CLAUDE.md"
+            text = claude_md.read_text(encoding="utf-8")
+            write_lf(
+                claude_md,
+                text.replace("come from you, not from the agent", "are recorded"),
+            )
+
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(
+                json.loads((output / "project-profile.json").read_text(encoding="utf-8")),
+                output / "payload",
+                errors,
+            )
+            self.assertTrue(
+                any("launcher-reported" in error for error in errors),
+                f"the validator did not flag the missing provenance: {errors}",
+            )

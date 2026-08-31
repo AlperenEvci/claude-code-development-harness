@@ -84,7 +84,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.4.0"
+GENERATOR_VERSION = "1.5.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -929,6 +929,17 @@ def agent_sessions_section(profile: dict[str, Any]) -> str:
             "`capability` field records the tier the sender says it ran under, for "
             "auditing. It is never a grant: nothing widens authority because an "
             "envelope says so.",
+            "",
+            "Post with `--correlation <uuid>` to tie every envelope from one unit "
+            "of work together across agents, and `--duration-ms`, `--tokens-in`, "
+            "`--tokens-out` to record what the run cost. Then "
+            "`harness_bus.py read --correlation <uuid>` returns that whole unit "
+            "of work rather than one mailbox.",
+            "",
+            "Those numbers come from you, not from the agent. A foreground run "
+            "returns its usage to whoever launched it; an agent asked to report "
+            "its own duration is guessing, so the schema an agent answers does "
+            "not offer the fields at all.",
             "",
             "### Synthesizing an agent",
             "",

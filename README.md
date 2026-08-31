@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.4.0](https://img.shields.io/badge/Version-1.4.0-7C3AED?style=flat-square)
+![Version 1.5.0](https://img.shields.io/badge/Version-1.5.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -38,7 +38,11 @@ One guided command:
 
 **Version 1.2 added evals**, because everything above measures the generator rather than the behavior it is supposed to produce. See [How those claims are checked](#how-those-claims-are-checked).
 
-**Version 1.3 made the context budget executable** and added a progress ledger. The budget had been a declaration the validator compared against its own rendering; it is now a policy a command reads, reports on, and exits non-zero against, with a structured handoff to write when the ceiling is reached. The ledger is the same move applied to "is this finished": JSON state that only accepts a pass with the command and exit status that earned it.
+**Version 1.3 made the context budget executable.** It had been a declaration the validator compared against its own rendering; it is now a policy a command reads, reports on, and exits non-zero against, with a structured handoff to write when the ceiling is reached.
+
+**Version 1.4 added a progress ledger** — the same move applied to "is this finished": JSON state that only accepts a pass with the command and exit status that earned it.
+
+**Version 1.5 put a trace on the envelope** — a correlation id, a duration, and token counts — so the bus records not just what an agent claimed but what the run cost. The correlation id groups a unit of work across sessions, which is the shape an eval loop needs and a per-session mailbox cannot give it.
 
 ## Install
 
@@ -255,6 +259,19 @@ python scripts/ai-harness/harness_bus.py validate --root .
 
 An envelope is evidence, never authority. The `capability` field records the tier a sender *claims* it ran under, for auditing; nothing widens authority because an envelope says so, and unknown keys are rejected rather than ignored.
 
+**Group a unit of work, and price it.** A session id groups a mailbox. A correlation id groups the reader, the implementer, and the reviewer that all served one task, across three sessions — and `--duration-ms` / `--tokens-in` / `--tokens-out` record what that cost:
+
+```bash
+python scripts/ai-harness/harness_bus.py post --session <uuid> \
+  --from reviewer --kind finding --summary "..." --body '{}' \
+  --correlation 4c1d8a90-3e77-42bb-9a55-0f6de2b71c84 \
+  --duration-ms 41200 --tokens-in 18400 --tokens-out 900
+
+python scripts/ai-harness/harness_bus.py read --correlation 4c1d8a90-...
+```
+
+Those numbers come from the launcher, not the agent. A foreground run returns its usage to whoever started it; an agent asked for its own token count is guessing, and a guess recorded as a measurement is worse than a blank — so the schema an agent answers does not offer the fields at all, and every trace is stamped `reported_by: launcher`. An envelope with nothing measured carries `trace: null` rather than an empty object, and version-1 envelopes written before this existed still read.
+
 **Synthesize a bounded agent for a need you did not foresee.** Order is need → spec → validate → emit, and nothing is written to the repository:
 
 ```bash
@@ -464,7 +481,7 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 140 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 154 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
 **Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds seven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 

@@ -133,7 +133,17 @@ five gaps. They are ordered by whether they change what the product *is*.
    item `passes: false` until proven, a per-session checkpoint commit, and a mandatory
    session-start checklist. It also reports that models overwrite Markdown more readily
    than JSON — which is aimed squarely at this file.
-4. **Trace fields on the bus envelope** — correlation id, duration, tokens. The hard
+4. ~~**Trace fields on the bus envelope**~~ **Closed in 1.5.0.** Envelope version 2
+   carries an optional `trace` with a UUID correlation id, a duration, and token counts;
+   `read --correlation <uuid>` returns one unit of work across sessions rather than one
+   mailbox. Version-1 envelopes still read. The fields are set by the launcher through
+   the CLI and are absent from the agent-facing schema, because an agent reporting its
+   own token count is guessing and a guess recorded as a measurement is worse than a
+   blank. What remains: nothing consumes the trace yet. Aggregating cost per unit of
+   work, or feeding it to the eval loop, is a separate reader that does not exist.
+   The original diagnosis follows.
+
+   **Trace fields on the bus envelope** — correlation id, duration, tokens. The hard
    part (typed, append-only, capped, schema'd) is done; these three turn a mailbox into
    an evidence base the eval loop can consume.
 5. **A repository-shape audit.** Pocock's claim is that codebase structure is the
