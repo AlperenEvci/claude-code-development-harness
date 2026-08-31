@@ -77,14 +77,30 @@ Two defects were found and fixed along the way, both of which had shipped in pha
 published work from Anthropic, Google, OpenAI, LangChain, and Matt Pocock, and found
 five gaps. They are ordered by whether they change what the product *is*.
 
-1. ~~**No evals.**~~ **Started in 1.2.0.** Five behavioral cases under
-   `plugins/development-harness/evals/`, schema-checked on every push by
-   `EvalCaseTests`. Two things are still open here, and neither is cosmetic:
-   **the cases have never been executed** — `claude plugin eval` is early access and
-   enabled per organization, so no scored run has confirmed the graders match live
-   behavior — and the suite covers `audit` and routing only. `setup`, the skill that
-   actually writes files, has no case, because it interviews and a non-interactive
-   eval cannot answer it. Solving that probably means `context.history_file`.
+1. ~~**No evals.**~~ **Started in 1.2.0, extended through 1.2.3.** Seven behavioral
+   cases under `plugins/development-harness/evals/`, schema-checked on every push by
+   `EvalCaseTests`, which now also refuses an absence grader that cannot fail and a
+   `Skill` grader that cannot fire. Three things remain open.
+
+   **The cases have never been executed.** `claude plugin eval` is early access and
+   enabled per organization, so no scored run has confirmed that the graders match live
+   behavior. This is the one that matters: everything below is coverage, and this is
+   whether the coverage is real. Three releases in a row shipped a grader that always
+   passed or always failed, each caught by reasoning or by a cheap probe rather than by
+   a run — which is exactly the failure mode a run would have caught first.
+
+   **`session` and `agent` are uncovered, and the blocker is fixture plumbing.** Both
+   skills stop when `harness_session.py` or `harness_agentgen.py` is absent, and those
+   arrive only by installing a rendered harness; a scaffold script runs in a stripped
+   environment with no path back to the plugin root to copy one from. The way through is
+   either a scaffold that can reach the plugin, or a pre-rendered harness checked in as
+   fixture data. Neither is free.
+
+   **`setup`'s interview is uncovered.** `setup-builds-nothing-before-the-dry-run`
+   grades the prohibitions that hold with no answers at all, which is the safety half
+   and the half that can be graded non-interactively. The interview itself — the part
+   that decides what gets rendered — needs an answering party;
+   `context.history_file` is the likely route in and has not been tried.
 2. **The context policy is a declaration with no mechanism.**
    `context_policy.on_ceiling: "checkpoint-and-handoff"` is validated against the
    rendered Markdown and nothing else — the validator confirms the documentation
