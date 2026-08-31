@@ -1,7 +1,8 @@
 {
   "name": "harness-tools",
   "owner": {
-    "name": "Ege"
+    "name": "Alperen Evci",
+    "url": "https://github.com/AlperenEvci"
   },
   "description": "Greenfield and existing-project Claude Code development harness tooling with optional Codex integration.",
   "plugins": [

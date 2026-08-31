@@ -186,14 +186,15 @@ class PluginStructureTests(unittest.TestCase):
         self.assertEqual(manifest["name"], "development-harness")
         self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
 
-    def test_the_version_is_the_same_in_all_three_places(self) -> None:
+    def test_the_version_is_the_same_everywhere_it_is_written_down(self) -> None:
         """`AGENTS.md` forbids bumping the manifest without the CHANGELOG entry.
 
         Nothing enforced that. Asserting a hardcoded literal here would not
         either — it just makes the release edit one file longer. So this pins the
-        three against each other: the manifest a marketplace reads, the version
-        the renderer stamps into every generated package, and the CHANGELOG
-        section that says what changed. A release that forgets one now fails.
+        four against each other: the manifest a marketplace reads, the version
+        the renderer stamps into every generated package, the CHANGELOG section
+        that says what changed, and the badge the README shows a stranger. A
+        release that forgets one now fails.
         """
         manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
         version = manifest["version"]
@@ -215,6 +216,16 @@ class PluginStructureTests(unittest.TestCase):
             any(heading.split(" ")[0] == version for heading in headings),
             f"CHANGELOG.md has no section for released version {version}; "
             f"found {headings[:3]}",
+        )
+
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        badges = re.findall(r"img\.shields\.io/badge/Version-([0-9.]+)-", readme)
+        self.assertTrue(badges, "README.md has no version badge")
+        self.assertEqual(
+            badges,
+            [version] * len(badges),
+            "the README version badge is the first thing a stranger reads; it "
+            f"says {badges} while the plugin ships {version}",
         )
 
     def test_plugin_skills_are_explicit_and_reference_existing_scripts(self) -> None:

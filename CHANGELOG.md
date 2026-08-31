@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.0.1 — 2026-08-31
+
+Ownership and documentation. No behavior change: the renderer, validator,
+installer, and the four runtime scripts are byte-for-byte what 1.0.0 shipped,
+and the version moves only because `plugin.json` is itself distributed.
+
+### Changed — ownership
+
+- The plugin manifest and the marketplace manifest now name Alperen Evci as
+  author and owner, with the repository and homepage pointing at
+  `AlperenEvci/claude-code-development-harness`.
+- `LICENSE` carries both copyright lines. The MIT terms require the original
+  notice to survive, so the upstream one stays rather than being replaced, and
+  `ACKNOWLEDGMENTS.md` states the origin plainly.
+- Install instructions point at this repository instead of upstream.
+
+### Changed — documentation
+
+The 1.0 capabilities shipped with no operator-facing documentation. `README.md`
+still described the 0.2 harness, and `SECURITY.md` still promised that generated
+agents are "fixed to Read, Grep, and Glob" — a claim capability tiers had already
+made false. A safety document that overstates its guarantees is worse than one
+that says nothing.
+
+- `docs/runtime.md` is new: the operator guide to tiers, session dispatch, the
+  bus, agent synthesis, teardown, work graphs, and the context budget. Every
+  command and every error message in it was produced by running the tool.
+- `README.md` gains a "What 1.0 installs" section covering the four capabilities,
+  and its generated-tree diagram now marks which directories are conditional.
+  Two claims in the first draft were wrong and were caught by rendering a package
+  and reading the file list: `harness_graph.py` is not installed into a project,
+  and `.ai/bus/` is created on first post rather than at install time.
+- `SECURITY.md` describes the tiers, the two-key gate on `implementer`, the
+  refusal of authority keys in a synthesized need, the bus as untrusted evidence,
+  and `--restricted` for untrusted repositories.
+- `CONTRIBUTING.md` and `docs/publishing.md` name the real full gate rather than a
+  `python3` invocation that cannot run on Windows, and record that the version is
+  pinned in three places by a test.
+
 ## 1.0.0 — 2026-08-31
 
 The v1.0 harness upgrade, phases 1 through 4. See

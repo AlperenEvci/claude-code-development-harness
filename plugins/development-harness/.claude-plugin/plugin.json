@@ -1,10 +1,11 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "development-harness",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Create a project-specific Claude Code development harness from a blank folder or safely adopt and upgrade an existing repository, with optional Codex integration.",
   "author": {
-    "name": "Ege"
+    "name": "Alperen Evci",
+    "url": "https://github.com/AlperenEvci"
   },
   "license": "MIT",
   "keywords": [
@@ -18,5 +19,7 @@
     "project-bootstrap"
   ],
   "displayName": "Development Harness",
-  "defaultEnabled": true
+  "defaultEnabled": true,
+  "homepage": "https://github.com/AlperenEvci/claude-code-development-harness",
+  "repository": "https://github.com/AlperenEvci/claude-code-development-harness"
 }

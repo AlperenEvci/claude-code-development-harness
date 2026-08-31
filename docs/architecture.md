@@ -63,7 +63,7 @@ Preferred for Standard when OpenAI's official `codex@openai-codex` plugin is ins
 
 ### `codex-cli`
 
-Direct `codex exec` with the spec on stdin and repository-scoped `workspace-write`. This transport is required for Fleet in version 0.2 because it exposes deterministic worktree, directory, and lane-process control.
+Direct `codex exec` with the spec on stdin and repository-scoped `workspace-write`. This transport is required for Fleet because it exposes deterministic worktree, directory, and lane-process control.
 
 ### `claude-only`
 

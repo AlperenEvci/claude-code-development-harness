@@ -28,7 +28,7 @@ Repository shape: `single-project`
 - tests/test_plugin.py - the single unittest suite covering inspection, rendering, validation, and installation
 - scripts/validate-repo.sh - the authoritative full gate wrapping compileall, unittest, JSON checks, and claude plugin validate
 - examples - documented project-profile.json fixtures that the test suite renders and validates
-- docs - architecture and publishing notes for maintainers
+- docs - architecture and publishing notes for maintainers, plus docs/runtime.md, the operator guide to tiers, sessions, the bus, synthesis, and graphs
 
 ## Commands
 
