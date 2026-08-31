@@ -12,7 +12,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Compile scripts
-        run: python3 -m compileall plugins/development-harness/scripts
-      - name: Run tests
-        run: python3 -m unittest discover -s tests -v
+      # The one command AGENTS.md names as the full gate. CI used to reimplement a
+      # subset of it inline, which left the gate script itself unexercised - and it
+      # rotted: it invoked `python3`, which on Windows resolves to the Microsoft
+      # Store alias stub, so the documented full gate could not run at all on the
+      # primary development machine and nothing noticed, because nothing ran it.
+      # Running the script here means the command developers are told to run is the
+      # command CI runs.
+      - name: Full gate
+        run: bash scripts/validate-repo.sh
