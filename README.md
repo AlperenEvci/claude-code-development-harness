@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.2.3](https://img.shields.io/badge/Version-1.2.3-7C3AED?style=flat-square)
+![Version 1.3.0](https://img.shields.io/badge/Version-1.3.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -37,6 +37,8 @@ One guided command:
 **Version 1.1 gave that runtime a command surface** — `spec`, `session`, and `agent` — and fixed the interpreter defect that made the plugin unusable on Windows.
 
 **Version 1.2 added evals**, because everything above measures the generator rather than the behavior it is supposed to produce. See [How those claims are checked](#how-those-claims-are-checked).
+
+**Version 1.3 made the context budget executable.** It had been a declaration the validator compared against its own rendering; it is now a policy a command reads, reports on, and exits non-zero against, with a structured handoff to write when the ceiling is reached.
 
 ## Install
 
@@ -153,6 +155,17 @@ Four capabilities landed in 1.0, in dependency order. Each one is optional in th
 ```
 
 The validator compares the rendered contract against the profile and rejects drift, so the band in your instructions cannot quietly stop matching the band you chose.
+
+Until 1.3 that was the whole mechanism, and it was weaker than the heading above claimed: the profile and the prose agreed with each other, and nothing measured anything. `scripts/ai-harness/harness_checkpoint.py` now reads the band from the installed profile, reports the zone, and exits `3` at or over the ceiling so a script or a hook can branch on the policy rather than on a paragraph:
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py status --used 165000
+python scripts/ai-harness/harness_checkpoint.py write --intent "..." --next "..."
+```
+
+`write` records intent, artifacts, and next steps under `.ai/runs/`, never overwrites, refuses a symlinked destination, and refuses a handoff with no next step — a checkpoint missing that is a summary, and the next session still has to reconstruct the plan.
+
+The token count is yours to supply. Nothing running as a subprocess can observe the context window of the session that started it, and a tool that produced that number itself would be inventing the measurement it exists to check.
 
 ### 2. Work graphs that render to executable scripts
 
@@ -429,7 +442,7 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 110 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 125 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
 **Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds seven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 

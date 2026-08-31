@@ -1,5 +1,82 @@
 # Changelog
 
+## 1.3.0 - 2026-08-31
+
+### Added - `harness_checkpoint.py`, so the context policy is a mechanism
+
+`context_policy` has been in the profile since 0.6, and until now nothing read it. The
+band was rendered into `AGENTS.md`, the validator confirmed the rendered prose matched
+the profile, and that was the whole thing: two descriptions of an intention agreeing with
+each other. An agent could run to the edge of its window without anything noticing,
+because nothing was measuring and nothing acted.
+
+The missing half was smaller than it looked. `.ai/harness/project-profile.json` is already
+installed in every harnessed repository and already carries the normalized policy, so the
+band was data the whole time - it simply had no reader.
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py status --used 165000
+```
+
+reads the band and the declared action from that file, reports the zone, and exits `3` at
+or over the ceiling so a script or a hook can branch on the policy without parsing prose.
+The action it names is the profile's, not the tool's.
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py write \
+  --intent "..." --next "..." --artifact src/billing/retry.js
+```
+
+writes `.ai/runs/<timestamp>-<slug>/checkpoint.md` and `.json` - intent, artifacts, next
+steps. Four properties are enforced rather than suggested, and each is a test:
+
+- **At least one next step.** A handoff without one is a summary; the reader still has to
+  reconstruct the plan, which is the failure the record exists to prevent.
+- **Never overwrite**, like a bus envelope.
+- **No symlinks**, like the installer - a symlinked `.ai/runs` puts a durable artifact
+  somewhere the operator did not choose.
+- **Paths, never contents.** The changed-file list comes from a read-only `git status`,
+  and one of those paths is eventually a `.env`.
+
+`resume` prints the most recent checkpoint, so a fresh session starts from the record
+rather than from what someone remembers of the transcript.
+
+### What it deliberately does not do
+
+It does not measure the context window. Nothing running as a subprocess can observe the
+window of the session that started it, so `--used` is supplied by the caller. A tool that
+produced that number itself would be inventing the measurement it exists to check, and the
+generated `AGENTS.md` says so where an operator will read it rather than burying it here.
+
+Lite installs no session tooling and so gets no checkpoint tool; for that tier the band
+stays a documented convention, which the contract now states instead of implying.
+
+### Changed
+
+- `SESSION_TOOL_SCRIPTS` gains `harness_checkpoint.py` in both the renderer and the
+  validator, so standard and fleet install it byte-identical and lite still installs
+  nothing. Standard payloads go from 26 to 27 files, fleet from 28 to 29.
+- The `## Context budget` section of a generated `AGENTS.md` now carries the commands and
+  the honest limitation. The validator rejects a payload that installs the tool without
+  documenting `harness_checkpoint.py status`, because a contract that ships the mechanism
+  and hides it leaves the policy exactly as unenforceable as before.
+
+### Tests
+
+Fifteen new tests, and the suite goes from 110 to 125. All eight planted defects are
+caught: a silent overwrite, an accepted empty handoff, a profile that is read but ignored,
+a default band drifting from the renderer's, a removed symlink refusal, artifact contents
+embedded in the record, the script dropped from the install list, and the validator check
+removed.
+
+Two of those were missed on the first pass, and both were flaws in the tests rather than
+in the code. The symlink test creates a real symlink and skips on Windows, so the guard
+was unverified on half the CI matrix - there is now a second test that asserts the refusal
+without needing the privilege. And the contents test called the builders directly, where a
+relative artifact path does not resolve; the leak failed on a missing file rather than
+being refused, so the assertion never fired. It now runs through the CLI with the
+repository as the working directory.
+
 ## 1.2.3 - 2026-08-31
 
 ### Added - `spec-quotes-real-commands-and-invents-none`

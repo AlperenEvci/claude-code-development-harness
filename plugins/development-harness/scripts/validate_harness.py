@@ -33,6 +33,7 @@ SESSION_TOOL_SCRIPTS = (
     "harness_bus.py",
     "harness_session.py",
     "harness_agentgen.py",
+    "harness_checkpoint.py",
 )
 
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
@@ -342,6 +343,18 @@ def check_session_tools(
             # A background session outlives its invoker. A harness that never
             # states the teardown step leaves orphans by default.
             errors.append("CLAUDE.md does not document the session teardown sweep")
+
+    agents_md = payload / "AGENTS.md"
+    if agents_md.is_file():
+        text = agents_md.read_text(encoding="utf-8")
+        if "harness_checkpoint.py status" not in text:
+            # The whole point of shipping the tool is that the band stops being
+            # prose. A contract that installs it without saying how to run it
+            # leaves the policy exactly as unenforceable as before.
+            errors.append(
+                "AGENTS.md installs the checkpoint tool but does not document "
+                "`harness_checkpoint.py status`"
+            )
 
 
 def check_read_only_agents_are_not_detached(payload: Path, errors: list[str]) -> None:

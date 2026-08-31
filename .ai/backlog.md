@@ -101,7 +101,17 @@ five gaps. They are ordered by whether they change what the product *is*.
    and the half that can be graded non-interactively. The interview itself — the part
    that decides what gets rendered — needs an answering party;
    `context.history_file` is the likely route in and has not been tried.
-2. **The context policy is a declaration with no mechanism.**
+2. ~~**The context policy is a declaration with no mechanism.**~~ **Closed in 1.3.0.**
+   `scripts/ai-harness/harness_checkpoint.py` reads the band and the declared action
+   from the installed profile, exits 3 at the ceiling, and writes a structured handoff
+   under `.ai/runs/` that refuses to omit a next step. What remains is the half no
+   subprocess can do: the token count is caller-reported, because nothing running under
+   a session can observe that session's window. Deep Agents' other half - offloading
+   oversized tool results to the filesystem behind a reference - is a harness-level
+   behavior this plugin cannot implement from outside, and is not on this list as a
+   result. The original diagnosis follows.
+
+   **The context policy is a declaration with no mechanism.**
    `context_policy.on_ceiling: "checkpoint-and-handoff"` is validated against the
    rendered Markdown and nothing else — the validator confirms the documentation
    matches the profile, which is two descriptions of an intention and no mechanism.

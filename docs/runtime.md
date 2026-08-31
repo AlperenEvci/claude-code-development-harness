@@ -381,6 +381,68 @@ The validator compares the rendered sections against the profile and rejects dri
 the band in your instructions cannot quietly stop matching the band you chose. It is
 optional and defaulted; a profile without it renders the default band.
 
+### Checking the band
+
+Until 1.3.0 that was the entire mechanism: the profile and the prose agreed with each
+other, and nothing measured anything. `scripts/ai-harness/harness_checkpoint.py` closes
+that. It reads the band from `.ai/harness/project-profile.json`, which the installer
+already places in every harnessed repository, so the policy is data rather than a
+paragraph someone has to remember.
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py status --used 165000
+```
+
+```
+reported: 165000 tokens
+band:     150000-200000 (in-band)
+policy:   checkpoint-and-handoff (from .../.ai/harness/project-profile.json)
+action:   none yet; you are inside the working band.
+```
+
+It exits `3` at or over the ceiling and `0` below it, so a script or a hook can branch on
+the policy without parsing the output, and the action it names is the one the profile
+declares rather than an opinion held by the tool.
+
+**The token count is supplied by the caller, and that is deliberate.** Nothing running as
+a subprocess can observe the context window of the session that started it. A tool that
+produced a number here would be inventing the measurement its whole purpose is to check,
+which is worse than asking for it.
+
+### Writing the handoff
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py write \
+  --intent "Wire idempotency keys through the billing retry path" \
+  --next "Run npm run verify" \
+  --next "Update .ai/decisions/0001-retry-idempotency.md with the chosen key format" \
+  --artifact src/billing/retry.js \
+  --used 187000
+```
+
+That writes `.ai/runs/<timestamp>-<slug>/checkpoint.md` and `checkpoint.json` — intent,
+artifacts, next steps, on the shape the long-context literature converges on. Four rules
+are enforced rather than suggested:
+
+- **At least one next step.** A handoff without one is a summary, and the next session
+  still has to reconstruct the plan. That is the failure the record exists to prevent, so
+  it is refused rather than accepted with a gap.
+- **Never overwrite.** An existing checkpoint directory is an error, like a bus envelope.
+- **No symlinks.** A symlinked `.ai/runs` would put a durable artifact somewhere the
+  operator did not choose.
+- **Paths, never contents.** Artifacts are recorded by path. The changed-file list comes
+  from a read-only `git status`, and one of those paths is eventually a `.env`.
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py resume
+```
+
+prints the most recent checkpoint, so a fresh session starts from the record rather than
+from what someone remembers of the transcript.
+
+Lite installs no session tooling and therefore no checkpoint tool; for that tier the band
+stays a documented convention.
+
 ## A worked pass
 
 ```bash

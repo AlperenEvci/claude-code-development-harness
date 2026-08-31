@@ -84,7 +84,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.2.3"
+GENERATOR_VERSION = "1.3.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -810,6 +810,42 @@ def context_budget_section(profile: dict[str, Any]) -> str:
         "",
         f"On reaching the ceiling: {action}",
         "",
+    ]
+
+    if has_session_tools(profile):
+        lines += [
+            "The band is data, not advice. `.ai/harness/project-profile.json` carries "
+            "it, and the checkpoint tool reads it, so the policy can be checked rather "
+            "than remembered:",
+            "",
+            "```bash",
+            f"python {SESSION_TOOL_DIR}/harness_checkpoint.py status --used 165000",
+            "```",
+            "",
+            "It exits 3 at or over the ceiling and names the action this profile "
+            "declares. The token count is yours to supply: nothing running as a "
+            "subprocess can observe the context window of the session that started it, "
+            "and a measurement invented by the tool would be worse than none.",
+            "",
+            "A handoff is a written record, not a summary in the transcript:",
+            "",
+            "```bash",
+            f"python {SESSION_TOOL_DIR}/harness_checkpoint.py write \\",
+            '  --intent "What this session was trying to do" \\',
+            '  --next "What the next session must do first" \\',
+            "  --artifact path/to/thing",
+            "```",
+            "",
+            "It writes `.ai/runs/<timestamp>-<slug>/`, never overwrites, and refuses a "
+            "checkpoint with no next step - a handoff missing that leaves the reader to "
+            "reconstruct the plan, which is the failure it exists to prevent. Artifacts "
+            "are recorded as paths, never as contents. "
+            f"`python {SESSION_TOOL_DIR}/harness_checkpoint.py resume` prints the most "
+            "recent one.",
+            "",
+        ]
+
+    lines += [
         "Always:",
         "",
         bullets(
@@ -825,6 +861,7 @@ SESSION_TOOL_SCRIPTS = (
     "harness_bus.py",
     "harness_session.py",
     "harness_agentgen.py",
+    "harness_checkpoint.py",
 )
 
 #: Where the session tooling lands in a target repository. Alongside the fleet

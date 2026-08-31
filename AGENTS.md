@@ -22,7 +22,7 @@ Repository shape: `single-project`
 - plugins/development-harness/.claude-plugin/plugin.json - installable plugin manifest and version
 - plugins/development-harness/skills/setup - the guided Create/Adopt/Upgrade setup workflow
 - plugins/development-harness/skills/audit - the read-only harness audit workflow
-- plugins/development-harness/scripts - stdlib-only inspector, renderer, validator, and installed-harness checker, plus the shared capability-tier table and the session, bus, and agent-synthesis runtime copied into generated repositories
+- plugins/development-harness/scripts - stdlib-only inspector, renderer, validator, and installed-harness checker, plus the shared capability-tier table and the session, bus, agent-synthesis, and context-checkpoint runtime copied into generated repositories
 - plugins/development-harness/assets/templates - layered common/lite/standard/fleet/greenfield template tree rendered into target repositories
 - plugins/development-harness/references - long-form guidance loaded on demand by the skills
 - tests/test_plugin.py - the single unittest suite covering inspection, rendering, validation, and installation

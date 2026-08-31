@@ -217,7 +217,10 @@ before a window is full, so the ceiling is a trigger for action rather than a cl
 
 - `working_band.floor_tokens` / `working_band.ceiling_tokens`: integers between 1000 and 2000000.
   The floor must be below the ceiling. Defaults are 150000 and 200000.
-- `on_ceiling`: `compact`, `checkpoint-and-handoff`, or `stop-and-ask`.
+- `on_ceiling`: `compact`, `checkpoint-and-handoff`, or `stop-and-ask`. On standard
+  and fleet this is executable, not only rendered: `scripts/ai-harness/harness_checkpoint.py status --used N`
+  reads this field and the band from the installed profile, names the action, and
+  exits 3 at or over the ceiling. See `docs/runtime.md`.
   Defaults to `checkpoint-and-handoff`.
 - `isolate_when`: work that must leave the main session for an isolated agent.
   Rendered into `CLAUDE.md`.

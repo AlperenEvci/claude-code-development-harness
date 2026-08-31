@@ -67,6 +67,8 @@ CAPABILITIES = load_script("harness_capabilities.py", "harness_capabilities_unde
 BUS = load_script("harness_bus.py", "harness_bus_under_test")
 SESSION = load_script("harness_session.py", "harness_session_under_test")
 AGENTGEN = load_script("harness_agentgen.py", "harness_agentgen_under_test")
+CHECKPOINT = load_script("harness_checkpoint.py", "harness_checkpoint_under_test")
+RENDERER = load_script("render_harness.py", "render_harness_under_test")
 BASH = VALIDATOR.find_bash()
 
 
@@ -2574,3 +2576,271 @@ class EvalCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckpointPolicyTests(unittest.TestCase):
+    """The band stopped being prose in 1.3.0. These are the claims that made it so."""
+
+    def harnessed(self, temp: str, policy: dict | None = None) -> Path:
+        """A repository with an installed profile, which is where the band lives."""
+        root = Path(temp)
+        installed = root / ".ai" / "harness"
+        installed.mkdir(parents=True)
+        profile_data: dict[str, object] = {"name": "Example"}
+        if policy is not None:
+            profile_data["context_policy"] = policy
+        write_lf(installed / "project-profile.json", json.dumps(profile_data, indent=2) + chr(10))
+        return root
+
+    def test_the_band_is_read_from_the_installed_profile_not_a_default(self) -> None:
+        """The point of the whole change: the profile drives the decision.
+
+        A tool that ignores the profile and applies its own numbers is the same
+        declaration-without-a-mechanism in a new place.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp, {
+                "working_band": {"floor_tokens": 40_000, "ceiling_tokens": 60_000},
+                "on_ceiling": "stop-and-ask",
+            })
+            policy = CHECKPOINT.read_policy(root)
+            self.assertEqual(policy["floor_tokens"], 40_000)
+            self.assertEqual(policy["ceiling_tokens"], 60_000)
+            self.assertEqual(policy["on_ceiling"], "stop-and-ask")
+            # 70k is comfortably inside the harness's own default band, so a tool
+            # using defaults would call this fine.
+            self.assertEqual(CHECKPOINT.zone_for(70_000, 40_000, 60_000), "at-ceiling")
+
+    def test_the_defaults_match_the_ones_the_renderer_normalizes_to(self) -> None:
+        """Two modules carry the same default band. Drift makes them disagree quietly.
+
+        A repository whose profile predates `context_policy` gets this tool's
+        defaults; a re-rendered one gets the renderer's. If those differ, the same
+        repository reports a different zone depending on when it was set up, and
+        neither number looks wrong on its face.
+        """
+        normalized: dict = {}
+        RENDERER.normalize_context_policy(normalized)
+        band = normalized["context_policy"]["working_band"]
+        self.assertEqual(band["floor_tokens"], CHECKPOINT.DEFAULT_FLOOR_TOKENS)
+        self.assertEqual(band["ceiling_tokens"], CHECKPOINT.DEFAULT_CEILING_TOKENS)
+        self.assertEqual(
+            normalized["context_policy"]["on_ceiling"], CHECKPOINT.DEFAULT_ON_CEILING
+        )
+        self.assertEqual(
+            CHECKPOINT.ALLOWED_CEILING_ACTIONS,
+            VALIDATOR.ALLOWED_CEILING_ACTIONS,
+            "the checkpoint tool and the validator disagree about the allowed actions",
+        )
+
+    def test_a_malformed_band_is_refused_rather_than_guessed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp, {
+                "working_band": {"floor_tokens": 200_000, "ceiling_tokens": 100_000},
+            })
+            with self.assertRaises(CHECKPOINT.CheckpointError):
+                CHECKPOINT.read_policy(root)
+
+    def test_a_repository_without_a_profile_still_gets_a_band(self) -> None:
+        """Refusing here would remove the handoff tool exactly when it is needed."""
+        with tempfile.TemporaryDirectory() as temp:
+            policy = CHECKPOINT.read_policy(Path(temp))
+            self.assertEqual(policy["ceiling_tokens"], CHECKPOINT.DEFAULT_CEILING_TOKENS)
+            self.assertIn("defaults", policy["source"])
+
+    def test_the_ceiling_is_reported_with_a_distinct_exit_code(self) -> None:
+        """A caller must be able to branch on the policy without parsing prose."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp, {
+                "working_band": {"floor_tokens": 100_000, "ceiling_tokens": 120_000},
+                "on_ceiling": "stop-and-ask",
+            })
+            script = str(SCRIPTS / "harness_checkpoint.py")
+
+            under = run(PYTHON, script, "--root", str(root), "status", "--used", "110000")
+            self.assertEqual(under.returncode, 0)
+            self.assertIn("in-band", under.stdout)
+
+            over = run(PYTHON, script, "--root", str(root), "status", "--used", "130000",
+                       check=False)
+            self.assertEqual(over.returncode, CHECKPOINT.EXIT_CEILING)
+            self.assertIn("at-ceiling", over.stdout)
+            # The action is the profile's, not the tool's opinion.
+            self.assertIn("stop and ask the operator", over.stdout)
+
+    def test_a_checkpoint_without_a_next_step_is_refused(self) -> None:
+        """A handoff with no next step is the failure the record exists to prevent."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp)
+            with self.assertRaises(CHECKPOINT.CheckpointError) as caught:
+                CHECKPOINT.build_checkpoint(
+                    intent="Trace the retry path",
+                    next_steps=["   "],
+                    artifacts=[],
+                    derived=[],
+                    note=None,
+                    used=None,
+                    policy=CHECKPOINT.read_policy(root),
+                    stamp=CHECKPOINT.now(),
+                )
+            self.assertIn("next step", str(caught.exception))
+
+    def test_a_checkpoint_never_overwrites_an_existing_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp)
+            record = CHECKPOINT.build_checkpoint(
+                intent="Trace the retry path",
+                next_steps=["Run the gate"],
+                artifacts=[],
+                derived=[],
+                note=None,
+                used=None,
+                policy=CHECKPOINT.read_policy(root),
+                stamp=CHECKPOINT.now(),
+            )
+            first = CHECKPOINT.write_checkpoint(root, record, "same-label")
+            self.assertTrue((first / "checkpoint.json").is_file())
+            with self.assertRaises(CHECKPOINT.CheckpointError):
+                CHECKPOINT.write_checkpoint(root, record, "same-label")
+
+    def test_artifacts_are_recorded_as_paths_and_never_as_contents(self) -> None:
+        """Recording a name is allowed; recording what is inside it is not.
+
+        The changed-file list will eventually include a `.env`, and a checkpoint
+        is a durable artifact that outlives the session and may be committed.
+
+        Driven through the CLI with the repository as the working directory,
+        because that is the only arrangement in which a relative artifact path
+        would actually resolve. Calling the builders directly makes the test pass
+        for the wrong reason: the leak fails on a missing file rather than being
+        refused, and the assertion never gets a chance to fire.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp)
+            secret = "SUPER-SECRET-VALUE-a1b2c3"
+            write_lf(root / ".env", f"API_KEY={secret}" + chr(10))
+
+            run(PYTHON, str(SCRIPTS / "harness_checkpoint.py"), "--root", ".",
+                "write", "--intent", "Wire the billing client",
+                "--next", "Rotate the key", "--artifact", ".env", "--no-git",
+                cwd=root)
+
+            written = sorted((root / ".ai" / "runs").iterdir())
+            self.assertEqual(len(written), 1, "expected exactly one checkpoint")
+            for name in ("checkpoint.json", "checkpoint.md"):
+                text = (written[0] / name).read_text(encoding="utf-8")
+                self.assertIn(".env", text, f"{name} should name the path")
+                self.assertNotIn(secret, text, f"{name} leaked the file's contents")
+
+    def test_the_symlink_refusal_binds_without_needing_symlink_privilege(self) -> None:
+        """The real symlink test below skips on Windows, so the guard goes untested here.
+
+        A safety check that is only exercised on one of two CI legs is a check
+        that can be deleted locally and pass. This one asserts the refusal itself
+        by answering `is_symlink` rather than by creating one, so it runs
+        everywhere the suite does.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp)
+            runs = root / ".ai" / "runs"
+
+            def pretend(self: Path) -> bool:
+                return self.name == "runs"
+
+            with mock.patch.object(Path, "is_symlink", pretend):
+                with self.assertRaises(CHECKPOINT.CheckpointError) as caught:
+                    CHECKPOINT.refuse_symlinks(runs, root)
+            self.assertIn("symlink", str(caught.exception))
+
+    @unittest.skipUnless(SYMLINKS, "symlink creation requires privilege here")
+    def test_a_checkpoint_refuses_to_write_through_a_symlink(self) -> None:
+        """Same rule as the installer: a symlink moves a durable artifact off-repo."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp)
+            outside = Path(temp) / "elsewhere"
+            outside.mkdir()
+            (root / ".ai" / "runs").parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(outside, root / ".ai" / "runs", target_is_directory=True)
+
+            record = CHECKPOINT.build_checkpoint(
+                intent="Trace the retry path",
+                next_steps=["Run the gate"],
+                artifacts=[],
+                derived=[],
+                note=None,
+                used=None,
+                policy=CHECKPOINT.read_policy(root),
+                stamp=CHECKPOINT.now(),
+            )
+            with self.assertRaises(CHECKPOINT.CheckpointError) as caught:
+                CHECKPOINT.write_checkpoint(root, record, None)
+            self.assertIn("symlink", str(caught.exception))
+
+    def test_resume_reads_back_what_write_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp)
+            script = str(SCRIPTS / "harness_checkpoint.py")
+            run(PYTHON, script, "--root", str(root), "write",
+                "--intent", "Trace the retry path",
+                "--next", "Run the full gate",
+                "--no-git")
+            resumed = run(PYTHON, script, "--root", str(root), "resume")
+            self.assertIn("Trace the retry path", resumed.stdout)
+            self.assertIn("Run the full gate", resumed.stdout)
+
+    def test_resume_says_so_when_there_is_nothing_to_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(temp)
+            result = run(PYTHON, str(SCRIPTS / "harness_checkpoint.py"),
+                         "--root", str(root), "resume", check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("no checkpoint found", result.stderr)
+
+
+class CheckpointContractTests(unittest.TestCase):
+    """Shipping the tool is half of it. The contract has to say how to run it."""
+
+    def render(self, temp_path: Path, tier: str) -> Path:
+        config = temp_path / "profile.json"
+        output = temp_path / f"generated-{tier}"
+        write_lf(config, json.dumps(profile(tier), indent=2) + chr(10))
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output
+
+    def test_the_contract_documents_the_status_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            agents = (output / "payload/AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("harness_checkpoint.py status", agents)
+            self.assertIn("harness_checkpoint.py write", agents)
+            # The honest limit belongs in the contract, not only in the source.
+            self.assertIn("token count is yours to supply", agents)
+
+    def test_lite_documents_no_checkpoint_tool_it_does_not_install(self) -> None:
+        """Lite ships no session tooling, so a command for it would be a lie."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "lite")
+            agents = (output / "payload/AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("## Context budget", agents)
+            self.assertNotIn("harness_checkpoint.py", agents)
+
+    def test_the_validator_rejects_a_contract_that_hides_the_tool(self) -> None:
+        """The check has to bind, or the documentation can drift back to prose."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            agents = output / "payload/AGENTS.md"
+            text = agents.read_text(encoding="utf-8")
+            self.assertIn("harness_checkpoint.py status", text)
+            write_lf(agents, text.replace("harness_checkpoint.py status", "REMOVED"))
+
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(
+                json.loads((output / "project-profile.json").read_text(encoding="utf-8")),
+                output / "payload",
+                errors,
+            )
+            self.assertTrue(
+                any("harness_checkpoint.py status" in error for error in errors),
+                f"the validator did not flag the missing command: {errors}",
+            )
