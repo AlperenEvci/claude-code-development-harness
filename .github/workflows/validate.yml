@@ -6,7 +6,18 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      # Both, and neither is optional. `ubuntu-latest` is authoritative: two
+      # symlink tests skip on Windows and the POSIX permission-bit assertion only
+      # runs there. But Windows is where this plugin is developed, and Linux-only
+      # CI is exactly why a `python3` invocation shipped in the skills — the one
+      # part an end user actually runs — and stayed broken through two fixes of
+      # the same defect elsewhere. A platform nobody tests is a platform that
+      # breaks quietly.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,4 +31,5 @@ jobs:
       # Running the script here means the command developers are told to run is the
       # command CI runs.
       - name: Full gate
+        shell: bash
         run: bash scripts/validate-repo.sh

@@ -37,4 +37,4 @@ Two rules the test suite now enforces rather than merely asks for:
 - The version is pinned across `plugin.json`, the renderer's `GENERATOR_VERSION`, and the top `CHANGELOG.md` heading. Bumping one alone fails the suite.
 - The four runtime scripts installed under `scripts/ai-harness/` must be byte-identical to their plugin originals. They are copied, not templated, so the installed code is the code the suite tested.
 
-CI on `ubuntu-latest` is the authoritative gate. Two symlink tests skip on Windows and the POSIX permission-bit assertion only runs on Linux, so confirm a local Windows result against CI before calling work verified.
+CI runs the full gate on both `ubuntu-latest` and `windows-latest`. Linux stays authoritative — two symlink tests skip on Windows and the POSIX permission-bit assertion only runs on Linux — but Windows is in the matrix because a Linux-only gate is how a `python3` invocation shipped in the skills and survived two fixes of the same defect elsewhere.

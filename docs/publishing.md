@@ -49,7 +49,7 @@ Release steps:
 2. add the `CHANGELOG.md` section,
 3. bump `plugin.json` and `GENERATOR_VERSION` to match it,
 4. run the full gate,
-5. confirm CI is green on `ubuntu-latest` — it is the authoritative gate, since two symlink tests skip on Windows and the POSIX permission-bit assertion only runs on Linux,
+5. confirm CI is green on both matrix legs — `ubuntu-latest` is authoritative, since two symlink tests skip on Windows and the POSIX permission-bit assertion only runs on Linux, but a red Windows leg still blocks a release,
 6. tag the commit, for example `v1.0.0`,
 7. push the tag and release notes.
 
