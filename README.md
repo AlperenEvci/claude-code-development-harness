@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.3.0](https://img.shields.io/badge/Version-1.3.0-7C3AED?style=flat-square)
+![Version 1.4.0](https://img.shields.io/badge/Version-1.4.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -38,7 +38,7 @@ One guided command:
 
 **Version 1.2 added evals**, because everything above measures the generator rather than the behavior it is supposed to produce. See [How those claims are checked](#how-those-claims-are-checked).
 
-**Version 1.3 made the context budget executable.** It had been a declaration the validator compared against its own rendering; it is now a policy a command reads, reports on, and exits non-zero against, with a structured handoff to write when the ceiling is reached.
+**Version 1.3 made the context budget executable** and added a progress ledger. The budget had been a declaration the validator compared against its own rendering; it is now a policy a command reads, reports on, and exits non-zero against, with a structured handoff to write when the ceiling is reached. The ledger is the same move applied to "is this finished": JSON state that only accepts a pass with the command and exit status that earned it.
 
 ## Install
 
@@ -167,7 +167,29 @@ python scripts/ai-harness/harness_checkpoint.py write --intent "..." --next "...
 
 The token count is yours to supply. Nothing running as a subprocess can observe the context window of the session that started it, and a tool that produced that number itself would be inventing the measurement it exists to check.
 
-### 2. Work graphs that render to executable scripts
+### 2. A progress ledger that cannot be talked into a pass
+
+`.ai/backlog.md` keeps the narrative. `.ai/progress.json` keeps the state, because the one
+question worth machine-checking between sessions — what is actually finished — is the one
+prose is worst at. An item can move from "in progress" to "done" in the same edit that
+changes its wording.
+
+```bash
+python scripts/ai-harness/harness_progress.py list --pending
+python scripts/ai-harness/harness_progress.py pass --id retry-keys --command "npm test" --exit-code 0
+python scripts/ai-harness/harness_progress.py check   # exits 3 while anything is unproven
+```
+
+Every item starts `passes: false` and becomes passing only with the command that proved it
+and that command's exit status. A non-zero one is refused rather than recorded, so there is
+no route to marking work done by asserting it — and hand-editing does not open one, because
+a ledger claiming a pass with no evidence is rejected on read.
+
+Nothing executes an item's `verify` command. It is repository text, which the harness
+treats as evidence and never as authority; running it would make a data file a
+code-execution surface. The tool does not import `subprocess`, and a test keeps it that way.
+
+### 3. Work graphs that render to executable scripts
 
 A `graphs` array declares a DAG of research, review, and implementation nodes. During setup, `harness_graph.py` validates it and emits one executable Workflow script per graph into `.claude/workflows/<graph-name>.js`. The validator refuses a package whose script is missing, orphaned, or no longer parses as JavaScript.
 
@@ -180,7 +202,7 @@ python plugins/development-harness/scripts/harness_graph.py \
 
 Cycles, unknown dependencies, and duplicate node or graph names are rejected by name. Nodes await only their own dependencies, so independent branches run concurrently. Loop safety is structural rather than advisory: `repeat_until` and `max_iterations` are valid only together, the cap is bounded to 2–20, and a generated loop breaks on `done` and logs when it stops at the cap.
 
-### 3. Capability tiers, enforced by the process
+### 4. Capability tiers, enforced by the process
 
 Generated agents declare one of three tiers. The tier alone decides tools and permission mode; a profile can never set them directly, so repository text cannot widen an agent's authority.
 
@@ -204,7 +226,7 @@ Generated agents declare one of three tiers. The tier alone decides tools and pe
 
 Why launch flags rather than frontmatter: `--tools` *removes* a tool rather than gating it, and the removal reaches subagents. A `reader` asked to write was refused twice over — plan mode blocked the call, and `Write` was absent entirely, "in subagents as well as here." An agent cannot escape its tier by delegating.
 
-### 4. Agent sessions, a message bus, and on-demand synthesis
+### 5. Agent sessions, a message bus, and on-demand synthesis
 
 Standard and Fleet harnesses install a small stdlib-only runtime under `scripts/ai-harness/`.
 
@@ -442,7 +464,7 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 125 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 140 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
 **Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds seven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 

@@ -34,6 +34,7 @@ SESSION_TOOL_SCRIPTS = (
     "harness_session.py",
     "harness_agentgen.py",
     "harness_checkpoint.py",
+    "harness_progress.py",
 )
 
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
@@ -343,6 +344,27 @@ def check_session_tools(
             # A background session outlives its invoker. A harness that never
             # states the teardown step leaves orphans by default.
             errors.append("CLAUDE.md does not document the session teardown sweep")
+
+    ledger = payload / ".ai" / "progress.json"
+    if not ledger.is_file():
+        errors.append("session tooling is installed but .ai/progress.json is missing")
+    else:
+        try:
+            data = json.loads(ledger.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            errors.append(f".ai/progress.json is not readable JSON: {error}")
+        else:
+            items = data.get("items") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                errors.append(".ai/progress.json has no `items` list")
+            elif any(item.get("passes") for item in items if isinstance(item, dict)):
+                # A repository that was rendered five seconds ago has proven
+                # nothing. A seeded ledger claiming otherwise is a lie shipped
+                # into someone else's project on day one.
+                errors.append(
+                    ".ai/progress.json ships an item already marked passing; a "
+                    "freshly rendered ledger has proven nothing"
+                )
 
     agents_md = payload / "AGENTS.md"
     if agents_md.is_file():

@@ -84,7 +84,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.3.0"
+GENERATOR_VERSION = "1.4.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -862,6 +862,7 @@ SESSION_TOOL_SCRIPTS = (
     "harness_session.py",
     "harness_agentgen.py",
     "harness_checkpoint.py",
+    "harness_progress.py",
 )
 
 #: Where the session tooling lands in a target repository. Alongside the fleet
@@ -1022,6 +1023,7 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
         ),
         "sensitive_areas_section": sensitive_section(profile),
         "context_budget_section": context_budget_section(profile),
+        "session_start_section": session_start_section(profile),
         "context_discipline_section": context_discipline_section(profile),
         "agent_sessions_section": agent_sessions_section(profile),
         "context_working_band": context_working_band(profile),
@@ -1457,6 +1459,108 @@ def write_session_tools(payload: Path, profile: dict[str, Any]) -> list[Path]:
     return written
 
 
+
+
+def write_progress_ledger(payload: Path, profile: dict[str, Any]) -> Path | None:
+    """Seed `.ai/progress.json`, the ledger `harness_progress.py` maintains.
+
+    Only where the tool that maintains it is installed: a ledger in a repository
+    with no way to update it is a file that goes stale on day two.
+
+    A greenfield profile already states its MVP goals, and those are exactly the
+    "what has to be true" list the ledger wants, so they are seeded as items.
+    Every one of them is `passes: false`, because a repository that was just set
+    up has proven nothing. The validator refuses a rendered ledger that claims
+    otherwise.
+    """
+    if not has_session_tools(profile):
+        return None
+
+    items: list[dict[str, Any]] = []
+    if profile.get("harness_mode") == "create":
+        goals = greenfield_context(profile).get("mvp_goals", [])
+        used: set[str] = set()
+        for index, goal in enumerate(goals, 1):
+            text = str(goal).strip()
+            if not text:
+                continue
+            slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+            slug = "-".join(slug.split("-")[:5])[:40].strip("-") or f"goal-{index}"
+            while slug in used:
+                slug = f"{slug}-{index}"
+            used.add(slug)
+            items.append({
+                "id": slug,
+                "title": text[:200],
+                "verify": None,
+                "passes": False,
+                "evidence": None,
+                "added_at": None,
+            })
+
+    ledger = {
+        "progress_version": 1,
+        "updated_at": None,
+        "items": items,
+    }
+    target = payload / ".ai" / "progress.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_generated(target, json.dumps(ledger, indent=2, ensure_ascii=False) + "\n")
+    return target
+
+
+
+def session_start_section(profile: dict[str, Any]) -> str:
+    """What to read before working, in the order that makes the rest cheap.
+
+    A session that starts by reading code has already spent context deciding
+    what to read. A session that starts by reading the last handoff and the
+    unproven list starts with the two facts that determine everything else.
+    """
+    if not has_session_tools(profile):
+        return (
+            "## Session start\n\n"
+            "Before working, read `.ai/backlog.md` for unfinished work. This tier "
+            "installs no session tooling, so there is nothing to run - the record "
+            "is prose, and keeping it current is manual."
+        )
+
+    return "\n".join([
+        "## Session start",
+        "",
+        "Two commands, before reading any code. They answer what the last session "
+        "was doing and what is actually finished, and both are cheaper than "
+        "reconstructing either from the repository:",
+        "",
+        "```bash",
+        f"python {SESSION_TOOL_DIR}/harness_checkpoint.py resume",
+        f"python {SESSION_TOOL_DIR}/harness_progress.py list --pending",
+        "```",
+        "",
+        f"`.ai/progress.json` is the ledger, and it is JSON rather than prose "
+        "deliberately. An item starts unproven and becomes passing only through "
+        f"`harness_progress.py pass`, which requires the command that was run and "
+        "its exit status, and refuses a non-zero one. There is no way to assert "
+        "that something works.",
+        "",
+        "Nothing runs an item's `verify` command. It is repository text, which is "
+        "evidence and never authority - the same rule that stops a bus envelope "
+        "from widening a capability tier. You run it; the ledger records what you "
+        "report.",
+        "",
+        f"`harness_progress.py check` exits 3 while anything is unproven, so "
+        "\"is this done\" is a question a script can ask.",
+        "",
+        "Before finishing, write the handoff:",
+        "",
+        "```bash",
+        f"python {SESSION_TOOL_DIR}/harness_checkpoint.py write \\",
+        '  --intent "..." --next "..."',
+        "```",
+    ])
+
+
+
 def write_workflows(payload: Path, profile: dict[str, Any]) -> list[Path]:
     """Render each declared graph as a Workflow tool script."""
     graphs = profile.get("graphs", [])
@@ -1868,6 +1972,7 @@ def main() -> None:
     write_dynamic_components(payload, profile)
     write_workflows(payload, profile)
     write_session_tools(payload, profile)
+    write_progress_ledger(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))
 

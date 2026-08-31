@@ -443,6 +443,71 @@ from what someone remembers of the transcript.
 Lite installs no session tooling and therefore no checkpoint tool; for that tier the band
 stays a documented convention.
 
+## The progress ledger
+
+`.ai/backlog.md` holds narrative: what was being done, what is left, what the risks are.
+It is the wrong shape for one specific question, which is what is actually finished.
+Prose can be rewritten in passing, and an item can move from "in progress" to "done" in
+the same edit that changes its wording, with nothing anywhere disagreeing.
+
+`.ai/progress.json` holds that question's answer as state, and
+`scripts/ai-harness/harness_progress.py` maintains it.
+
+```bash
+python scripts/ai-harness/harness_progress.py add \
+  --id retry-idempotency \
+  --title "Retries carry an idempotency key through to the processor" \
+  --verify "npm test"
+
+python scripts/ai-harness/harness_progress.py list --pending
+python scripts/ai-harness/harness_progress.py check    # exits 3 while anything is unproven
+```
+
+Every item starts `passes: false`. It becomes passing only through `pass`, which requires
+the command that was run and the exit status it returned:
+
+```bash
+python scripts/ai-harness/harness_progress.py pass \
+  --id retry-idempotency --command "npm test" --exit-code 0
+```
+
+A non-zero exit code is refused rather than recorded, so there is no route to marking an
+item done by asserting it. Hand-editing does not open one either: the ledger is validated
+on every read, and an item marked passing with no evidence, or with evidence recording a
+failure, is rejected as malformed.
+
+**Nothing runs an item's `verify` command.** That string comes out of a file in the
+repository, and repository text is evidence rather than authority - the same rule that
+stops a bus envelope from widening a capability tier. Executing it would turn a data file
+into a code-execution surface. `harness_progress.py` does not import `subprocess`, and a
+test asserts it never does.
+
+The evidence is recorded as `reported_by: "caller"` for the same reason. The ledger knows
+what someone said happened. It does not know what happened.
+
+A greenfield profile's `mvp_goals` are seeded as items at render time, all unproven, since
+a repository that was set up five seconds ago has proven nothing. The validator rejects a
+package whose ledger ships an item already marked passing.
+
+## Session start
+
+Generated `CLAUDE.md` opens the working model with two commands, before any code is read:
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py resume
+python scripts/ai-harness/harness_progress.py list --pending
+```
+
+They answer what the last session was doing and what is actually finished. Both are
+cheaper than reconstructing either from the repository, and reconstructing them from the
+repository is what a session does by default.
+
+One asymmetry between the two is worth knowing. `.ai/progress.json` is committed, so the
+ledger travels. `.ai/runs/` is gitignored unless the profile sets `commit_ai_runs`, so a
+checkpoint is local to the machine that wrote it by default. That is the right default for
+transient orchestration state, but it means a handoff reaches the next session on your
+machine and not a colleague's. Set `commit_ai_runs` if the handoff is meant to travel.
+
 ## A worked pass
 
 ```bash

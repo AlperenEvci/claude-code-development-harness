@@ -119,7 +119,16 @@ five gaps. They are ordered by whether they change what the product *is*.
    filesystem behind a reference and a short preview, and summarize at ~85% of the
    window into session intent, artifacts, and next steps. `.ai/runs/` is already the
    right home. Nothing writes a checkpoint into it.
-3. **Progress is Markdown prose, not a machine-checked ledger.** Anthropic's
+3. ~~**Progress is Markdown prose, not a machine-checked ledger.**~~ **Closed in 1.4.0.**
+   `.ai/progress.json` is the ledger and `harness_progress.py` maintains it: items start
+   unproven, a pass requires the command and its exit status, a non-zero one is refused,
+   and a hand-edited claim without evidence is rejected on read. `check` exits 3 while
+   anything is unproven. The generated `CLAUDE.md` opens with the session-start checklist.
+   The per-session checkpoint *commit* from Anthropic's write-up is deliberately not
+   implemented: this harness does not commit on the user's behalf. The original diagnosis
+   follows.
+
+   **Progress is Markdown prose, not a machine-checked ledger.** Anthropic's
    long-running-harness work prescribes a JSON feature list as ground truth with every
    item `passes: false` until proven, a per-session checkpoint commit, and a mandatory
    session-start checklist. It also reports that models overwrite Markdown more readily

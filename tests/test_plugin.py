@@ -69,6 +69,7 @@ SESSION = load_script("harness_session.py", "harness_session_under_test")
 AGENTGEN = load_script("harness_agentgen.py", "harness_agentgen_under_test")
 CHECKPOINT = load_script("harness_checkpoint.py", "harness_checkpoint_under_test")
 RENDERER = load_script("render_harness.py", "render_harness_under_test")
+PROGRESS = load_script("harness_progress.py", "harness_progress_under_test")
 BASH = VALIDATOR.find_bash()
 
 
@@ -2843,4 +2844,204 @@ class CheckpointContractTests(unittest.TestCase):
             self.assertTrue(
                 any("harness_checkpoint.py status" in error for error in errors),
                 f"the validator did not flag the missing command: {errors}",
+            )
+
+
+class ProgressLedgerTests(unittest.TestCase):
+    """`passes: false` until proven is the only claim this file makes. It has to hold."""
+
+    def ledger(self, temp: str) -> Path:
+        root = Path(temp)
+        run(PYTHON, str(SCRIPTS / "harness_progress.py"), "--root", str(root), "init")
+        return root
+
+    def cli(self, root: Path, *args: str, check: bool = True):
+        return run(PYTHON, str(SCRIPTS / "harness_progress.py"), "--root", str(root),
+                   *args, check=check)
+
+    def test_an_item_starts_unproven(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.ledger(temp)
+            self.cli(root, "add", "--id", "retry-keys", "--title", "Retries carry a key")
+            data = json.loads((root / ".ai/progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["items"][0]["passes"], False)
+            self.assertIsNone(data["items"][0]["evidence"])
+
+    def test_a_failing_command_cannot_mark_an_item_passing(self) -> None:
+        """The exit code is required so that it can refuse. Otherwise it is decoration."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.ledger(temp)
+            self.cli(root, "add", "--id", "retry-keys", "--title", "Retries carry a key")
+            refused = self.cli(root, "pass", "--id", "retry-keys",
+                               "--command", "npm test", "--exit-code", "1", check=False)
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("refusing to mark", refused.stderr)
+
+            data = json.loads((root / ".ai/progress.json").read_text(encoding="utf-8"))
+            self.assertFalse(data["items"][0]["passes"], "a refused pass still changed state")
+
+    def test_a_proven_item_carries_the_command_that_proved_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.ledger(temp)
+            self.cli(root, "add", "--id", "retry-keys", "--title", "Retries carry a key")
+            self.cli(root, "pass", "--id", "retry-keys",
+                     "--command", "npm test", "--exit-code", "0")
+            item = json.loads((root / ".ai/progress.json").read_text(encoding="utf-8"))["items"][0]
+            self.assertTrue(item["passes"])
+            self.assertEqual(item["evidence"]["command"], "npm test")
+            self.assertEqual(item["evidence"]["exit_code"], 0)
+            # Recorded as a claim, never as something this tool observed.
+            self.assertEqual(item["evidence"]["reported_by"], "caller")
+
+    def test_a_ledger_claiming_a_pass_without_evidence_is_rejected(self) -> None:
+        """Hand-editing is the obvious way around the CLI, so the shape is checked too."""
+        with self.assertRaises(PROGRESS.ProgressError) as caught:
+            PROGRESS.validate_ledger({
+                "progress_version": 1,
+                "items": [{"id": "retry-keys", "title": "x", "passes": True, "evidence": None}],
+            })
+        self.assertIn("no evidence", str(caught.exception))
+
+    def test_a_ledger_claiming_a_pass_on_a_failing_command_is_rejected(self) -> None:
+        with self.assertRaises(PROGRESS.ProgressError):
+            PROGRESS.validate_ledger({
+                "progress_version": 1,
+                "items": [{
+                    "id": "retry-keys", "title": "x", "passes": True,
+                    "evidence": {"command": "npm test", "exit_code": 1},
+                }],
+            })
+
+    def test_init_never_overwrites_an_existing_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.ledger(temp)
+            self.cli(root, "add", "--id", "retry-keys", "--title", "Retries carry a key")
+            again = self.cli(root, "init", check=False)
+            self.assertEqual(again.returncode, 2)
+            data = json.loads((root / ".ai/progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(data["items"]), 1, "init clobbered a ledger with work in it")
+
+    def test_check_exits_three_while_anything_is_unproven(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.ledger(temp)
+            self.assertEqual(self.cli(root, "check").returncode, 0)
+
+            self.cli(root, "add", "--id", "retry-keys", "--title", "Retries carry a key")
+            pending = self.cli(root, "check", check=False)
+            self.assertEqual(pending.returncode, PROGRESS.EXIT_PENDING)
+
+            self.cli(root, "pass", "--id", "retry-keys",
+                     "--command", "npm test", "--exit-code", "0")
+            self.assertEqual(self.cli(root, "check").returncode, 0)
+
+    def test_nothing_in_the_ledger_tool_can_execute_a_verify_command(self) -> None:
+        """`verify` is repository text. Running it would make a data file executable.
+
+        Asserted against the source rather than behavior because the guarantee is
+        the absence of a capability, and the cheapest way to keep an absence is to
+        refuse the import that would provide it.
+        """
+        source = (SCRIPTS / "harness_progress.py").read_text(encoding="utf-8")
+        for forbidden in ("import subprocess", "os.system", "os.popen", "eval(", "exec("):
+            self.assertNotIn(
+                forbidden, source,
+                f"harness_progress.py gained {forbidden!r}; a verify string must "
+                "never become a command this tool runs",
+            )
+
+
+class ProgressRenderTests(unittest.TestCase):
+    """The ledger ships with the harness, and ships proving nothing."""
+
+    def render(self, temp_path: Path, tier: str, config: dict | None = None) -> Path:
+        data = config if config is not None else profile(tier)
+        path = temp_path / "profile.json"
+        output = temp_path / f"generated-{tier}"
+        write_lf(path, json.dumps(data, indent=2) + chr(10))
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(path),
+            "--output", str(output))
+        return output
+
+    def test_a_freshly_rendered_ledger_proves_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            data = json.loads(
+                (output / "payload/.ai/progress.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(data["progress_version"], PROGRESS.PROGRESS_VERSION)
+            self.assertFalse(
+                any(item["passes"] for item in data["items"]),
+                "a repository rendered seconds ago cannot have proven anything",
+            )
+
+    def test_the_rendered_ledger_is_readable_by_the_tool_that_maintains_it(self) -> None:
+        """Two files agreeing on a schema is worth a test; they are written apart."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            PROGRESS.validate_ledger(json.loads(
+                (output / "payload/.ai/progress.json").read_text(encoding="utf-8")
+            ))
+
+    def test_lite_gets_no_ledger_it_has_no_tool_to_maintain(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "lite")
+            self.assertFalse((output / "payload/.ai/progress.json").exists())
+
+    def test_the_session_start_checklist_names_both_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            claude = (output / "payload/CLAUDE.md").read_text(encoding="utf-8")
+            self.assertIn("## Session start", claude)
+            self.assertIn("harness_checkpoint.py resume", claude)
+            self.assertIn("harness_progress.py list --pending", claude)
+            # The invariant a reader most needs, stated where they will read it.
+            self.assertIn("evidence and never authority", claude)
+
+    def test_lite_says_the_record_is_manual_rather_than_naming_absent_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "lite")
+            claude = (output / "payload/CLAUDE.md").read_text(encoding="utf-8")
+            self.assertIn("## Session start", claude)
+            self.assertNotIn("harness_progress.py", claude)
+
+    def test_the_validator_rejects_a_ledger_that_ships_a_pass(self) -> None:
+        """The check has to bind, or a seeded lie reaches someone else's repository."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            ledger = output / "payload/.ai/progress.json"
+            write_lf(ledger, json.dumps({
+                "progress_version": 1,
+                "updated_at": None,
+                "items": [{
+                    "id": "already-done", "title": "Everything works", "verify": None,
+                    "passes": True,
+                    "evidence": {"command": "npm test", "exit_code": 0},
+                    "added_at": None,
+                }],
+            }, indent=2) + chr(10))
+
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(
+                json.loads((output / "project-profile.json").read_text(encoding="utf-8")),
+                output / "payload",
+                errors,
+            )
+            self.assertTrue(
+                any("already marked passing" in error for error in errors),
+                f"the validator accepted a ledger claiming a pass: {errors}",
+            )
+
+    def test_the_validator_notices_a_missing_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            (output / "payload/.ai/progress.json").unlink()
+
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(
+                json.loads((output / "project-profile.json").read_text(encoding="utf-8")),
+                output / "payload",
+                errors,
+            )
+            self.assertTrue(
+                any("progress.json is missing" in error for error in errors), errors
             )

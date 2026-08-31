@@ -1,5 +1,82 @@
 # Changelog
 
+## 1.4.0 - 2026-08-31
+
+### Added - `harness_progress.py` and `.ai/progress.json`
+
+`.ai/backlog.md` has always held unfinished work, and prose is the right shape for most of
+what it holds: what was being attempted, what the risks are, what the next step is. It is
+the wrong shape for exactly one question, and it happens to be the question that matters
+most between sessions - what is actually finished. A Markdown list can be rewritten in
+passing, and an item can move from "in progress" to "done" in the same edit that changes
+its wording, with nothing anywhere disagreeing.
+
+So the state moves to JSON, beside the narrative rather than replacing it. Every item
+starts `passes: false` and becomes passing only through `pass`, which requires the command
+that was run and the exit status it returned:
+
+```bash
+python scripts/ai-harness/harness_progress.py pass \
+  --id retry-idempotency --command "npm test" --exit-code 0
+```
+
+A non-zero exit code is refused rather than recorded, so there is no route to marking work
+done by asserting it. Hand-editing does not open one either: the ledger is validated on
+every read, and an item marked passing with no evidence - or with evidence recording a
+failure - is rejected as malformed rather than quietly repaired.
+
+`check` exits 3 while anything is unproven, which turns "is this done" into a question a
+script can ask.
+
+### The `verify` string is data, and stays data
+
+Each item may carry the command that would prove it. **Nothing runs it.** That string
+comes out of a file in the repository, and repository text is evidence rather than
+authority - the same rule that stops a bus envelope from widening a capability tier.
+Executing it would turn a data file into a code-execution surface, in a tool whose whole
+job is to be trusted about what is true.
+
+`harness_progress.py` does not import `subprocess`, and a test asserts it never does,
+alongside `os.system`, `os.popen`, `eval`, and `exec`. Evidence is recorded as
+`reported_by: "caller"` for the same reason: the ledger knows what someone said happened.
+
+### Added - a session-start checklist in the generated `CLAUDE.md`
+
+Two commands before any code is read:
+
+```bash
+python scripts/ai-harness/harness_checkpoint.py resume
+python scripts/ai-harness/harness_progress.py list --pending
+```
+
+They answer what the last session was doing and what is actually finished, and both are
+cheaper than reconstructing either from the repository - which is what a session does by
+default. Lite gets the section too, saying plainly that its record is prose and manual,
+rather than naming commands that tier does not install.
+
+### Changed
+
+- A greenfield profile's `mvp_goals` are seeded into the ledger at render time, all
+  unproven, because that list is already the "what has to be true" list the ledger wants.
+- The validator rejects a package whose rendered ledger ships an item already marked
+  passing. A repository that was set up five seconds ago has proven nothing, and a seeded
+  claim otherwise is a lie shipped into someone else's project on day one. It also rejects
+  a payload with session tooling and no ledger.
+- Standard payloads go from 27 to 29 files and fleet from 29 to 31 - two each, the
+  script and the ledger it maintains.
+
+### Documented
+
+`.ai/progress.json` is committed, so the ledger travels. `.ai/runs/` is gitignored unless
+the profile sets `commit_ai_runs`, so a checkpoint written by 1.3.0 is local to the machine
+that wrote it. That is the right default for transient orchestration state, but it means a
+handoff reaches the next session on your machine and not a colleague's, and `docs/runtime.md`
+now says so rather than leaving it to be discovered.
+
+### Tests
+
+Fifteen new tests, 125 to 140.
+
 ## 1.3.0 - 2026-08-31
 
 ### Added - `harness_checkpoint.py`, so the context policy is a mechanism
