@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.7.0 - 2026-08-31
+
+### Changed - the marketplace is now `alperenevci-harness`
+
+This repository began as a fork of
+[egecan-af/claude-code-development-harness](https://github.com/egecan-af/claude-code-development-harness),
+and both copies declared the same marketplace name, `harness-tools`. That is fine until
+someone wants both, and it is actively misleading before that: a machine that ran
+`/plugin marketplace add` for either repository ends up with an id that says nothing about
+which one it resolved, and `/plugin marketplace update harness-tools` then silently
+refreshes from whichever source was registered first. Upstream is still at 0.2.0, so an
+update against it returns nothing while looking like it worked.
+
+The fork's marketplace is renamed so the two are distinguishable and can coexist:
+
+```text
+/plugin marketplace add AlperenEvci/claude-code-development-harness
+/plugin install development-harness@alperenevci-harness
+```
+
+Upstream keeps `harness-tools`. Nothing about the plugin itself changed - the rename is
+distribution metadata - but it changes the install command, so it gets a version rather
+than arriving unannounced.
+
+**If you already installed `development-harness@harness-tools`,** you are on the upstream
+0.2.0 copy. Add this marketplace and install from it; the two ids no longer collide, so
+the old one can stay registered or be removed with
+`/plugin marketplace remove harness-tools`.
+
+An installed *harness* is unaffected either way: it is files in your repository, and it is
+upgraded by re-running `/development-harness:setup` in that project, not by a plugin
+update.
+
 ## 1.6.1 - 2026-08-31
 
 ### Fixed - the installed-harness checker disagreed with the generator

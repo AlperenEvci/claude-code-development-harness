@@ -27,7 +27,7 @@ The first validates the marketplace and the referenced plugin manifest; the seco
 
 ```text
 /plugin marketplace add AlperenEvci/claude-code-development-harness
-/plugin install development-harness@harness-tools
+/plugin install development-harness@alperenevci-harness
 /reload-plugins
 ```
 
@@ -62,7 +62,7 @@ Every profile field added since 0.2.0 is optional and defaulted, so 1.0.0 is an 
 Users refresh the marketplace and receive the new plugin version with:
 
 ```text
-/plugin marketplace update harness-tools
+/plugin marketplace update alperenevci-harness
 ```
 
 If a plugin is already installed, Claude Code uses the version change as the update signal.

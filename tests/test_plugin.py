@@ -195,7 +195,7 @@ def greenfield_profile(
 class PluginStructureTests(unittest.TestCase):
     def test_manifests_are_valid_json_and_paths_exist(self) -> None:
         marketplace = json.loads((REPO / ".claude-plugin" / "marketplace.json").read_text())
-        self.assertEqual(marketplace["name"], "harness-tools")
+        self.assertEqual(marketplace["name"], "alperenevci-harness")
         self.assertEqual(len(marketplace["plugins"]), 1)
         source = REPO / marketplace["plugins"][0]["source"]
         self.assertTrue(source.is_dir())

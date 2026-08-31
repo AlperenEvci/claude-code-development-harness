@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.6.1](https://img.shields.io/badge/Version-1.6.1-7C3AED?style=flat-square)
+![Version 1.7.0](https://img.shields.io/badge/Version-1.7.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -52,9 +52,15 @@ Inside Claude Code:
 
 ```text
 /plugin marketplace add AlperenEvci/claude-code-development-harness
-/plugin install development-harness@harness-tools
+/plugin install development-harness@alperenevci-harness
 /reload-plugins
 ```
+
+> The marketplace is `alperenevci-harness`. This repository began as a fork of
+> [egecan-af/claude-code-development-harness](https://github.com/egecan-af/claude-code-development-harness),
+> whose marketplace is `harness-tools`; the names differ so both can be added at once.
+> A machine that installed `development-harness@harness-tools` is on the upstream copy,
+> not this one — remove that marketplace or add this one alongside it.
 
 > To develop against a local checkout instead, start Claude Code with `claude --plugin-dir ./plugins/development-harness`.
 
