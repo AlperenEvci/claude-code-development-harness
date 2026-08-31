@@ -229,6 +229,87 @@ is the shared contract. `isolate_when` renders into the `## Context discipline` 
 `AGENTS.md` or `CLAUDE.md` does not state the configured band, so the rendered contract cannot
 drift from the profile.
 
+## Work graphs
+
+`graphs` is optional and defaults to an empty list. Each entry describes one recurring
+multi-agent procedure as a directed acyclic graph, and renders to a Workflow script at
+`.claude/workflows/<name>.js` plus a line in the `## Work graphs` section of `CLAUDE.md`.
+
+Declare a graph only for a procedure the project actually repeats. A one-off fan-out belongs in
+a spec, not in the profile.
+
+```json
+"graphs": [
+  {
+    "name": "review-changes",
+    "description": "Review the working diff and verify each finding.",
+    "nodes": [
+      {
+        "id": "map",
+        "phase": "Research",
+        "agent": "harness-codebase-researcher",
+        "prompt": "Map the modules the diff touches."
+      },
+      {
+        "id": "bugs",
+        "phase": "Review",
+        "prompt": "Find correctness bugs in the diff.",
+        "depends_on": ["map"]
+      },
+      {
+        "id": "verify",
+        "phase": "Verify",
+        "prompt": "Adversarially verify each reported finding.",
+        "depends_on": ["bugs"],
+        "repeat_until": "no unresolved finding remains",
+        "max_iterations": 3
+      }
+    ]
+  }
+]
+```
+
+Graph fields:
+
+- `name`: normalized to kebab case; becomes the script filename and the Workflow name. Must be
+  unique across graphs.
+- `description`: one line, shown in the Workflow permission dialog.
+- `nodes`: 1 to 40 entries.
+
+Node fields:
+
+- `id`: kebab case, unique within the graph.
+- `prompt`: the instruction the agent receives. Rendered as a template literal with backticks,
+  backslashes, and `${` escaped, so project text cannot interpolate into the generated script.
+- `depends_on`: ids of nodes that must finish first. Every id must exist. Defaults to none.
+- `phase`: progress group. Defaults to `Work`.
+- `agent`: a subagent type, rendered as `agentType`. Defaults to the workflow subagent.
+- `model`, `effort`: optional per-node overrides. Omit unless a node genuinely needs a
+  different tier.
+- `repeat_until` and `max_iterations`: loop control. Both are required together.
+
+### Graph and loop rules
+
+`harness_graph.py` validates every graph before rendering and rejects, with a message naming the
+offending nodes:
+
+- a dependency cycle,
+- a dependency on an unknown node,
+- a duplicate node id or duplicate graph name,
+- `repeat_until` without `max_iterations` — a loop with no hard cap,
+- `max_iterations` without `repeat_until` — a cap with no termination condition,
+- `max_iterations` outside 2 to 20.
+
+A loop therefore always carries both an explicit termination condition and a hard cap. The
+generated node runs `while (attempt < cap)`, breaks when the agent reports `done`, and calls
+`log()` when it stops at the cap instead of exiting silently.
+
+Nodes await only their own dependencies rather than a level barrier, so independent branches run
+concurrently. `validate_harness.py` re-checks that each declared graph has a script, that no
+script is orphaned, and that no script has lost its iteration cap or become invalid JavaScript.
+
+Scripts are generated output. Edit `graphs` and re-render; manual edits are overwritten.
+
 ## Execution transport selection
 
 Select the transport from live evidence, not preference alone:

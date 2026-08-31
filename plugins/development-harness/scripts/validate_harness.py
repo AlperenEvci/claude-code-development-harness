@@ -12,8 +12,10 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +149,107 @@ def format_tokens(value: int) -> str:
     if value >= 1000 and value % 1000 == 0:
         return f"{value // 1000}k"
     return str(value)
+
+
+def workflow_syntax_error(node_binary: str, text: str) -> str:
+    """Syntax-check a workflow script by wrapping it as the async body it really is.
+
+    A workflow script legitimately ends in a top-level `return`, which is invalid
+    in a standalone module, so the body is wrapped before checking.
+    """
+    body = text.replace("export const meta", "const meta", 1)
+    wrapped = (
+        "async function __workflow("
+        "agent, parallel, pipeline, phase, log, args, budget, workflow) {\n"
+        + body
+        + "\n}\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "workflow-probe.mjs"
+        probe.write_text(wrapped, encoding="utf-8")
+        result = subprocess.run(
+            [node_binary, "--check", str(probe)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    if result.returncode == 0:
+        return ""
+    for line in result.stderr.splitlines():
+        if "Error" in line and "Node.js" not in line:
+            return line.strip()
+    return "unknown syntax error"
+
+
+def check_workflows(
+    profile: dict[str, Any],
+    payload: Path,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """Every declared graph must have a runnable script, and no script may be an orphan."""
+    graphs = profile.get("graphs") or []
+    workflow_dir = payload / ".claude" / "workflows"
+
+    declared: dict[str, dict[str, Any]] = {}
+    for graph in graphs:
+        if isinstance(graph, dict) and str(graph.get("name", "")).strip():
+            declared[str(graph["name"]).strip()] = graph
+
+    present = (
+        {path.stem for path in workflow_dir.glob("*.js")}
+        if workflow_dir.is_dir()
+        else set()
+    )
+
+    if not declared:
+        if present:
+            errors.append(
+                ".claude/workflows contains scripts but the profile declares no graphs"
+            )
+        return
+
+    if not workflow_dir.is_dir():
+        errors.append("profile declares graphs but .claude/workflows is missing")
+        return
+
+    for name in sorted(set(declared) - present):
+        errors.append(f"graph {name!r} has no generated workflow script")
+    for name in sorted(present - set(declared)):
+        errors.append(
+            f".claude/workflows/{name}.js does not correspond to a declared graph"
+        )
+
+    node_binary = shutil.which("node")
+    if node_binary is None:
+        warnings.append(
+            "node not found; generated workflow scripts were not syntax-checked"
+        )
+
+    for name in sorted(set(declared) & present):
+        text = (workflow_dir / f"{name}.js").read_text(encoding="utf-8")
+
+        if "export const meta" not in text:
+            errors.append(f"{name}.js is missing the required meta block")
+
+        # A loop that lost its cap could run without bound.
+        for node_spec in declared[name].get("nodes", []):
+            if not isinstance(node_spec, dict):
+                continue
+            cap = node_spec.get("max_iterations")
+            if cap is None:
+                continue
+            if f"while (attempt < {cap})" not in text:
+                errors.append(
+                    f"{name}.js lost the iteration cap for node "
+                    f"{node_spec.get('id')!r}"
+                )
+
+        if node_binary is not None:
+            syntax_error = workflow_syntax_error(node_binary, text)
+            if syntax_error:
+                errors.append(f"{name}.js is not valid JavaScript: {syntax_error}")
 
 
 def check_context_policy(
@@ -497,6 +600,7 @@ def main() -> None:
             warnings.append("fleet worktree helper is not executable")
 
     check_context_policy(profile, payload, errors, warnings)
+    check_workflows(profile, payload, errors, warnings)
 
     for rel in ("AGENTS.md", "CLAUDE.md"):
         path = payload / rel

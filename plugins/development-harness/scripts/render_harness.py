@@ -16,6 +16,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from harness_graph import (  # noqa: E402  (sibling module, resolved above)
+    GraphError,
+    normalize_graphs,
+    render_workflow_script,
+)
+
 ALLOWED_TIERS = {"lite", "standard", "fleet"}
 ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
 ALLOWED_MODES = {"create", "adopt", "upgrade"}
@@ -368,6 +376,7 @@ def load_profile(path: Path) -> dict[str, Any]:
         "generated_language": "English",
         "greenfield_context": None,
         "context_policy": None,
+        "graphs": [],
     }
     for key, value in defaults.items():
         data.setdefault(key, value)
@@ -387,6 +396,11 @@ def load_profile(path: Path) -> dict[str, Any]:
 
     normalize_greenfield_context(data)
     normalize_context_policy(data)
+
+    try:
+        data["graphs"] = normalize_graphs(data.get("graphs"))
+    except GraphError as exc:
+        fail(str(exc))
 
     if tier == "fleet" and not data.get("parallel_writes", False):
         data["fleet_warning"] = (
@@ -699,6 +713,27 @@ def context_working_band(profile: dict[str, Any]) -> str:
     return f"{format_tokens(floor)}-{format_tokens(ceiling)} tokens"
 
 
+def workflows_markdown(profile: dict[str, Any]) -> str:
+    graphs = profile.get("graphs", [])
+    if not graphs:
+        return (
+            "No work graphs are declared. Add a `graphs` entry to the profile and "
+            "re-render to generate a Workflow script for a recurring multi-agent procedure."
+        )
+
+    lines = []
+    for graph in graphs:
+        loops = [node for node in graph["nodes"] if node["repeat_until"] is not None]
+        detail = f"{len(graph['nodes'])} nodes, {len(graph['levels'])} levels"
+        if loops:
+            caps = ", ".join(
+                f"{node['id']} capped at {node['max_iterations']}" for node in loops
+            )
+            detail += f"; bounded loops: {caps}"
+        lines.append(f"- `{graph['name']}` - {graph['description']} ({detail})")
+    return "\n".join(lines)
+
+
 def context_budget_section(profile: dict[str, Any]) -> str:
     """Shared contract text: the budget itself and what to do at the ceiling."""
     policy = context_policy_of(profile)
@@ -782,6 +817,7 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
         "context_budget_section": context_budget_section(profile),
         "context_discipline_section": context_discipline_section(profile),
         "context_working_band": context_working_band(profile),
+        "workflows_markdown": workflows_markdown(profile),
         "custom_components_markdown": custom_components_markdown(profile),
         "researcher_instruction": (
             "Use `harness-codebase-researcher` when raw exploration would pollute the main context."
@@ -1140,6 +1176,23 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
         target.write_text("\n".join(frontmatter), encoding="utf-8")
         written.append(target)
 
+    return written
+
+
+def write_workflows(payload: Path, profile: dict[str, Any]) -> list[Path]:
+    """Render each declared graph as a Workflow tool script."""
+    graphs = profile.get("graphs", [])
+    if not graphs:
+        return []
+
+    target_dir = payload / ".claude" / "workflows"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for graph in graphs:
+        target = target_dir / f"{graph['name']}.js"
+        target.write_text(render_workflow_script(graph), encoding="utf-8")
+        written.append(target)
     return written
 
 
@@ -1532,6 +1585,7 @@ def main() -> None:
             shutil.rmtree(codex_skill_dir)
 
     write_dynamic_components(payload, profile)
+    write_workflows(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))
 

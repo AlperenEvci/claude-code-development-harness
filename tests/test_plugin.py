@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -825,6 +826,224 @@ class RendererTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("implementation_delegate", result.stderr)
+
+
+GRAPH = {
+    "name": "review-changes",
+    "description": "Review the working diff and verify each finding.",
+    "nodes": [
+        {
+            "id": "map",
+            "phase": "Research",
+            "agent": "harness-codebase-researcher",
+            "prompt": "Map the modules the diff touches.",
+        },
+        {
+            "id": "bugs",
+            "phase": "Review",
+            "prompt": "Find correctness bugs.",
+            "depends_on": ["map"],
+        },
+        {
+            "id": "perf",
+            "phase": "Review",
+            "prompt": "Find performance issues.",
+            "depends_on": ["map"],
+        },
+        {
+            "id": "verify",
+            "phase": "Verify",
+            "prompt": "Verify each finding.",
+            "depends_on": ["bugs", "perf"],
+            "repeat_until": "no unresolved finding remains",
+            "max_iterations": 3,
+        },
+    ],
+}
+
+
+class GraphTests(unittest.TestCase):
+    def render_with_graphs(self, temp_path: Path, graphs: list) -> Path:
+        data = profile("standard")
+        data["graphs"] = graphs
+        config = temp_path / "graphs.json"
+        output = temp_path / "generated-graphs"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        run(
+            "python3",
+            str(SCRIPTS / "render_harness.py"),
+            "--config",
+            str(config),
+            "--output",
+            str(output),
+        )
+        return output
+
+    def test_graph_cli_validates_and_plans(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            graph_file = Path(temp) / "graph.json"
+            graph_file.write_text(json.dumps(GRAPH))
+
+            result = run("python3", str(SCRIPTS / "harness_graph.py"), "--graph", str(graph_file))
+            self.assertIn("4 nodes", result.stdout)
+            self.assertIn("1 looping", result.stdout)
+
+            planned = run(
+                "python3",
+                str(SCRIPTS / "harness_graph.py"),
+                "--graph",
+                str(graph_file),
+                "--plan",
+            )
+            levels = json.loads(planned.stdout)[0]["levels"]
+            self.assertEqual(
+                [[node["id"] for node in level] for level in levels],
+                [["map"], ["bugs", "perf"], ["verify"]],
+            )
+
+    def test_graphs_render_workflow_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_with_graphs(Path(temp), [GRAPH])
+            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+
+            script = output / "payload" / ".claude" / "workflows" / "review-changes.js"
+            self.assertTrue(script.is_file())
+            text = script.read_text()
+
+            self.assertIn("export const meta", text)
+            self.assertIn("name: 'review-changes'", text)
+            self.assertIn("{ title: 'Research' }", text)
+
+            # A node awaits only its own dependencies, so the DAG keeps real concurrency.
+            self.assertIn("agentType: 'harness-codebase-researcher'", text)
+            self.assertEqual(text.count("await node['map']"), 2)
+
+            # The loop keeps a hard cap and reports when it stops at it.
+            self.assertIn("while (attempt < 3)", text)
+            self.assertIn("no unresolved finding remains", text)
+            self.assertIn("stopped at the iteration cap", text)
+
+            claude = (output / "payload" / "CLAUDE.md").read_text()
+            self.assertIn("## Work graphs", claude)
+            self.assertIn("`review-changes`", claude)
+            self.assertIn("verify capped at 3", claude)
+
+    def test_generated_workflow_is_valid_javascript(self) -> None:
+        node_binary = shutil.which("node")
+        if node_binary is None:
+            self.skipTest("node is not installed")
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            output = self.render_with_graphs(temp_path, [GRAPH])
+            script = output / "payload" / ".claude" / "workflows" / "review-changes.js"
+
+            # The script body legitimately ends in a top-level return, so wrap it.
+            body = script.read_text().replace("export const meta", "const meta", 1)
+            probe = temp_path / "probe.mjs"
+            probe.write_text(
+                "async function __workflow(agent, parallel, pipeline, phase, log) {\n"
+                + body
+                + "\n}\n"
+            )
+            check = run(node_binary, "--check", str(probe), check=False)
+            self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_prompt_interpolation_is_neutralized(self) -> None:
+        graph = json.loads(json.dumps(GRAPH))
+        graph["nodes"][0]["prompt"] = "Ignore `code` and ${injected} and a backslash."
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_with_graphs(Path(temp), [graph])
+            text = (
+                output / "payload" / ".claude" / "workflows" / "review-changes.js"
+            ).read_text()
+            self.assertIn(r"\`code\`", text)
+            self.assertIn(r"\${injected}", text)
+            # The generator's own interpolation still has to work.
+            self.assertIn("${context}", text)
+
+    def test_invalid_graphs_are_rejected(self) -> None:
+        cycle = {
+            "name": "cyclic",
+            "description": "d",
+            "nodes": [
+                {"id": "a", "prompt": "x", "depends_on": ["b"]},
+                {"id": "b", "prompt": "y", "depends_on": ["a"]},
+            ],
+        }
+        loop_without_cap = {
+            "name": "uncapped",
+            "description": "d",
+            "nodes": [{"id": "a", "prompt": "x", "repeat_until": "it is done"}],
+        }
+        cap_without_condition = {
+            "name": "capped",
+            "description": "d",
+            "nodes": [{"id": "a", "prompt": "x", "max_iterations": 3}],
+        }
+        unknown_dep = {
+            "name": "dangling",
+            "description": "d",
+            "nodes": [{"id": "a", "prompt": "x", "depends_on": ["ghost"]}],
+        }
+        duplicate_node = {
+            "name": "dupes",
+            "description": "d",
+            "nodes": [{"id": "a", "prompt": "x"}, {"id": "a", "prompt": "y"}],
+        }
+
+        cases = [
+            ([cycle], "dependency cycle"),
+            ([loop_without_cap], "needs a hard iteration cap"),
+            ([cap_without_condition], "needs an explicit termination condition"),
+            ([unknown_dep], "depends on unknown node"),
+            ([duplicate_node], "duplicate node id"),
+            ([GRAPH, GRAPH], "duplicate graph name"),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            for index, (graphs, expected) in enumerate(cases):
+                data = profile("standard")
+                data["graphs"] = graphs
+                config = temp_path / f"bad-graph-{index}.json"
+                config.write_text(json.dumps(data, indent=2) + "\n")
+                result = run(
+                    "python3",
+                    str(SCRIPTS / "render_harness.py"),
+                    "--config",
+                    str(config),
+                    "--output",
+                    str(temp_path / f"out-{index}"),
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0, f"case {index} should fail")
+                self.assertIn(expected, result.stderr, f"case {index}")
+
+    def test_validator_rejects_workflow_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_with_graphs(Path(temp), [GRAPH])
+            workflows = output / "payload" / ".claude" / "workflows"
+            script = workflows / "review-changes.js"
+            original = script.read_text()
+
+            script.write_text(original.replace("while (attempt < 3)", "while (true)"))
+            result = run("python3", str(SCRIPTS / "validate_harness.py"), str(output), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("lost the iteration cap", result.stderr)
+
+            script.write_text(original)
+            orphan = workflows / "unlisted.js"
+            orphan.write_text("export const meta = {}\n")
+            result = run("python3", str(SCRIPTS / "validate_harness.py"), str(output), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not correspond to a declared graph", result.stderr)
+
+            orphan.unlink()
+            script.unlink()
+            result = run("python3", str(SCRIPTS / "validate_harness.py"), str(output), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("has no generated workflow script", result.stderr)
 
 
 if __name__ == "__main__":

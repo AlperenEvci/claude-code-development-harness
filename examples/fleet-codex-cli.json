@@ -49,6 +49,40 @@
   "scoped_rules": [],
   "additional_skills": [],
   "additional_agents": [],
+  "graphs": [
+    {
+      "name": "cross-package-change",
+      "description": "Map the blast radius of a change across packages, then verify the shared contracts.",
+      "nodes": [
+        {
+          "id": "map-blast-radius",
+          "phase": "Research",
+          "agent": "harness-codebase-researcher",
+          "prompt": "Map every package that consumes the changed module. Report the importing packages, the exported symbols they rely on, and the shared contracts involved. Return evidence with file paths, not file dumps."
+        },
+        {
+          "id": "contract-review",
+          "phase": "Review",
+          "prompt": "Review the change against the cross-package schema and API contracts named in the map. Report only breakages you can point at in a file.",
+          "depends_on": ["map-blast-radius"]
+        },
+        {
+          "id": "lane-ownership",
+          "phase": "Review",
+          "prompt": "Check that each parallel lane owns a disjoint file surface and that no two lanes write the same file. Report every overlap.",
+          "depends_on": ["map-blast-radius"]
+        },
+        {
+          "id": "verify",
+          "phase": "Verify",
+          "prompt": "Adversarially verify each reported finding. Try to refute it. Treat a finding you cannot reproduce from the cited files as refuted.",
+          "depends_on": ["contract-review", "lane-ownership"],
+          "repeat_until": "every finding is either confirmed with a citation or refuted",
+          "max_iterations": 3
+        }
+      ]
+    }
+  ],
   "commit_ai_reports": true,
   "commit_ai_runs": false,
   "generated_language": "English"

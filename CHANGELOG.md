@@ -2,9 +2,32 @@
 
 ## Unreleased
 
-Phase 1 of the v1.0 harness upgrade. See `.ai/decisions/0001-harness-v1-architecture.md`.
+Phases 1 and 2 of the v1.0 harness upgrade. See `.ai/decisions/0001-harness-v1-architecture.md`.
 
-### Added
+### Added — graph and loop engineering (phase 2)
+
+- Optional `graphs` array in the project profile. Each entry declares one recurring multi-agent
+  procedure as a directed acyclic graph of prompted nodes.
+- `scripts/harness_graph.py`: validates graphs, computes topological levels, and emits the
+  Workflow script. Rejects dependency cycles, unknown dependencies, duplicate node ids, and
+  duplicate graph names, naming the offending nodes.
+- Loop safety is structural, not advisory. `repeat_until` and `max_iterations` are only valid
+  together, the cap is bounded to 2-20, and a generated loop breaks on a reported `done` and
+  `log()`s when it stops at the cap.
+- Generated Workflow scripts under `.claude/workflows/<name>.js`. Each node awaits only its own
+  dependencies, so independent branches run concurrently instead of behind level barriers.
+- Node prompts are escaped into the generated template literal, so project text cannot
+  interpolate into the script.
+- `## Work graphs` section in generated `CLAUDE.md`, listing each graph with its node count,
+  level count, and loop caps.
+- Validator check for missing scripts, orphaned scripts, a missing `export const meta`, a lost
+  iteration cap, and invalid JavaScript. The JavaScript check is skipped with a warning when
+  `node` is unavailable.
+- `examples/fleet-codex-cli.json` declares a `cross-package-change` graph.
+- Tests covering the CLI, rendered DAG structure, prompt escaping, six invalid-graph rejections,
+  and three validator drift cases.
+
+### Added — context budget (phase 1)
 
 - Optional `context_policy` object in the project profile: a working token band, a ceiling
   action, work that must be isolated out of the main session, and standing context rules.
@@ -21,6 +44,8 @@ Phase 1 of the v1.0 harness upgrade. See `.ai/decisions/0001-harness-v1-architec
 
 - `context_policy` defaults to a 150000-200000 token band with `checkpoint-and-handoff`.
   Profiles that omit it stay valid, so this release is backward compatible.
+- `graphs` defaults to empty. A profile without graphs renders a `## Work graphs` section that
+  explains how to declare one, and generates no scripts.
 
 
 ## 0.2.0 — 2026-08-27
