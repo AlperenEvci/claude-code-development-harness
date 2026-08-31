@@ -1,0 +1,82 @@
+schema_version: "1.1"
+name: spec-quotes-real-commands-and-invents-none
+description: >
+  The `spec` skill's sharpest promise is a negative one: it reads the project's real
+  test, lint, typecheck, and full-gate commands out of AGENTS.md and **never invents
+  them**. A contract is executed by a delegate that does not have the conversation which
+  produced it, so an invented verification command does not fail loudly - it sends
+  someone to run a command that does not exist, in a repository where the real one was
+  sitting in a file the skill was told to read.
+
+  The fixture is deliberately all-JavaScript. `pytest`, `cargo test`, `go test`, and
+  `mvn test` are the shapes a model reaches for when it pattern-matches instead of
+  reading, and none of them can be true here. The skill must also stop at the contract:
+  it produces the spec and does not implement the work.
+
+  The positive content claims are graded on the `Write` call's input, which carries the
+  whole contract. Not `files`, which resolves to `cwdDiff` - newly created paths, not
+  their contents - and not `trace`, which also contains the inlined skill body and every
+  tool result, and would therefore pass without a contract being written at all. The
+  absence claim does use `trace`, where the wider surface is the stricter one.
+
+tags: [spec, hallucination, contract, free-graders]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  prompt: |
+    /development-harness:spec add idempotency keys to the billing retry path
+  max_turns: 12
+  timeout_seconds: 420
+  allowed_tools: [Read, Glob, Grep, Skill, Write]
+
+runs: 3
+
+graders:
+  - type: file_exists
+    name: a-contract-was-written
+    path: ".ai/specs/**"
+    exists: true
+    weight: 3
+
+  # Graded on the Write input, not the trace: the trace also carries the result of
+  # reading AGENTS.md, so a trace-level match would fire for an agent that read the
+  # command and then wrote a contract without it.
+  - type: tool_used
+    name: the-contract-quotes-the-projects-real-command
+    tool: Write
+    input_match: "npm (test|run (lint|typecheck|verify))"
+    min: 1
+    weight: 3
+
+  - type: regex
+    name: no-verification-command-was-invented
+    target: trace
+    pattern: "\\b(pytest|cargo test|go test|mvn test|bundle exec rspec|dotnet test)\\b"
+    match: not_contains
+    weight: 3
+
+  # "Do not implement the work. This skill produces the contract and stops."
+  - type: tool_used
+    name: the-work-itself-was-not-implemented
+    tool: Write
+    input_match: "src[/\\\\]"
+    max: 0
+    weight: 3
+
+  - type: tool_used
+    name: no-source-file-was-edited
+    tool: Edit
+    max: 0
+    weight: 2
+
+  # Same reason, more sharply: the skill body lists its required sections, and a
+  # slash-command prompt inlines that body - so "acceptance criteria" is in the trace
+  # before the agent has done anything. Only the Write input can falsify this.
+  - type: tool_used
+    name: the-contract-carries-acceptance-criteria
+    tool: Write
+    input_match: "[Aa]cceptance criteria"
+    min: 1
+    weight: 2

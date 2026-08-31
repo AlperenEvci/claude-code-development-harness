@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.2.3 - 2026-08-31
+
+### Added - `spec-quotes-real-commands-and-invents-none`
+
+The seventh eval case, and the first to grade a skill outside `audit` and `setup`. It
+buys the `spec` skill's sharpest promise, which is a negative one: the contract quotes the
+project's real verification commands and **invents none**. That claim is worth a case
+because an invented command fails quietly. A contract is executed by a delegate who was
+not present for the conversation that produced it, so a fabricated `pytest` does not
+announce itself - it sends someone to run a command that does not exist, in a repository
+where the real one was sitting in the file the skill was told to read.
+
+The fixture is all-JavaScript on purpose. `pytest`, `cargo test`, `go test`, `mvn test`,
+`bundle exec rspec`, and `dotnet test` are the shapes a model reaches for when it
+pattern-matches instead of reading, and in that repository every one of them is provably
+wrong.
+
+### Fixed - two graders in that case could not have failed
+
+Both were written against `target: trace`, and `trace` is the entire transcript: the
+inlined skill body, every tool input, and every tool *result*.
+
+`the-contract-carries-acceptance-criteria` was the worse of the two. A slash-command
+prompt inlines the skill body, and the skill body lists "Acceptance criteria" among the
+sections it requires - so the string was in the trace before the agent had done anything
+at all. `the-projects-real-verification-command-is-quoted` was the same defect one step
+softer: the trace carries the result of reading `AGENTS.md`, so it would have fired for an
+agent that read `npm test` and then wrote a contract without it.
+
+Both claims are about the contract that was written, so both now grade the `Write` call's
+input, which carries the whole file - `inputText` is a `JSON.stringify` of the entire tool
+input, content included. The absence grader deliberately stays on `trace`, because for an
+absence claim the wider surface is the stricter one, and the fixture contains none of the
+forbidden words for a tool result to smuggle in.
+
+This is the third release in a row to ship a grader that always passes or always fails.
+The pattern is stable enough to name: a grader is only worth its weight if you can say
+what would make it fail.
+
+### Changed - `allowed_tools` gates permission, not the tool registry
+
+Measured, because the natural assumption is the opposite and four cases rest on it. A
+headless run granted only `Read` and asked for a file write produced one `Write`
+*attempt*, an `is_error: true` result reading *Claude requested permissions to edit ...
+which is a sensitive file*, and no file on disk.
+
+So a tool left out of `allowed_tools` is still offered to the model; only the call is
+denied. `tool_used` counts `tool_use` blocks rather than successful calls, which makes
+`Write max: 0` in the audit cases a real assertion - it fails if the agent so much as
+reaches for the tool - and a stricter one than granting `Write` would give. An earlier
+draft of `evals/README.md` claimed the reverse, and claimed it about four cases when only
+two grant a write tool. Both are corrected.
+
+### Fixed
+
+- `evals/README.md` said three cases scaffold their fixture. All seven do, and have for
+  two releases.
+- The README now records why `session` and `agent` have no cases. Both skills stop when
+  `harness_session.py` or `harness_agentgen.py` is missing, and those arrive only by
+  installing a rendered harness; a scaffold script runs in a stripped environment with no
+  path back to the plugin root to copy them from. It is a fixture-plumbing blocker, not an
+  oversight, and covering them needs either a scaffold that can reach the plugin or a
+  pre-rendered harness checked in as fixture data.
+
 ## 1.2.2 — 2026-08-31
 
 ### Fixed — the plugin-fired indicator every case relied on does not fire

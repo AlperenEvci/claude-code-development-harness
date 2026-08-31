@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.2.2](https://img.shields.io/badge/Version-1.2.2-7C3AED?style=flat-square)
+![Version 1.2.3](https://img.shields.io/badge/Version-1.2.3-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -431,7 +431,7 @@ A list like the one above is worth what its verification is worth, so here is ex
 
 **Structure** is covered by 110 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
-**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds six cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
+**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds seven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 
 Two honest caveats. `claude plugin eval` is in early access and enabled per organization, so on most accounts — including this project's CI — it will not run; the cases are still parsed and schema-checked on every push so they cannot rot unnoticed. And **they have not yet been executed against a live model**, so treat them as a stated contract rather than a passing result.
 
