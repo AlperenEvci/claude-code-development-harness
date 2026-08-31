@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Phase 1 of the v1.0 harness upgrade. See `.ai/decisions/0001-harness-v1-architecture.md`.
+
+### Added
+
+- Optional `context_policy` object in the project profile: a working token band, a ceiling
+  action, work that must be isolated out of the main session, and standing context rules.
+- `## Context budget` section in generated `AGENTS.md`, stating the band and what to do on
+  reaching the ceiling.
+- `## Context discipline` section in generated `CLAUDE.md`, listing what belongs in an isolated
+  agent rather than the main session.
+- Validator check rejecting a package whose profile lacks a normalized `context_policy`, or whose
+  `AGENTS.md` or `CLAUDE.md` does not state the configured band, so the contract cannot drift
+  from the profile.
+- Tests covering rendered defaults, custom values, and six invalid-policy rejections.
+
+### Changed
+
+- `context_policy` defaults to a 150000-200000 token band with `checkpoint-and-handoff`.
+  Profiles that omit it stay valid, so this release is backward compatible.
+
+
 ## 0.2.0 — 2026-08-27
 
 ### Added

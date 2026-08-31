@@ -39,6 +39,37 @@ ALLOWED_GENERATED_LANGUAGES = {"English"}
 ALLOWED_CLAUDE_MODEL_ALIASES = {"inherit", "haiku", "sonnet", "opus", "fable"}
 ALLOWED_GREENFIELD_DEPTHS = {"context-only", "ready-to-build"}
 ALLOWED_GIT_INITIALIZATION = {"already-initialized", "after-harness", "defer"}
+ALLOWED_CEILING_ACTIONS = {"compact", "checkpoint-and-handoff", "stop-and-ask"}
+
+CEILING_ACTION_TEXT = {
+    "compact": (
+        "compact the conversation, then continue from the compacted state."
+    ),
+    "checkpoint-and-handoff": (
+        "checkpoint durable findings into `.ai/`, then hand off to a fresh session or an "
+        "isolated agent. Do not keep accumulating."
+    ),
+    "stop-and-ask": (
+        "stop and ask the operator how to proceed. Do not silently continue past the budget."
+    ),
+}
+
+DEFAULT_ISOLATE_WHEN = [
+    "Broad codebase search or repository mapping",
+    "Log, build, or test output triage",
+    "Dependency, migration, or blast-radius surveys",
+]
+
+DEFAULT_CONTEXT_ALWAYS = [
+    "Load reference material on demand; do not pre-load it.",
+    "Return conclusions and evidence, not raw file dumps.",
+    "Write durable findings to `.ai/` so the transcript is not the memory.",
+    "Keep specs self-contained so a receiving agent never needs the original conversation.",
+]
+
+MIN_BAND_TOKENS = 1000
+MAX_BAND_TOKENS = 2_000_000
+
 GENERATOR_VERSION = "0.2.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
@@ -152,6 +183,60 @@ def normalize_greenfield_context(data: dict[str, Any]) -> None:
         )
 
     data["greenfield_context"] = context
+
+
+def normalize_context_policy(data: dict[str, Any]) -> None:
+    """Normalize the context budget that keeps working context inside the reasoning band."""
+    policy = data.get("context_policy")
+    if policy is None:
+        policy = {}
+    if not isinstance(policy, dict):
+        fail("context_policy must be an object")
+
+    band = policy.get("working_band", {})
+    if not isinstance(band, dict):
+        fail("context_policy.working_band must be an object")
+
+    def band_value(key: str, default: int) -> int:
+        raw = band.get(key, default)
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            fail(f"context_policy.working_band.{key} must be an integer number of tokens")
+        if raw < MIN_BAND_TOKENS or raw > MAX_BAND_TOKENS:
+            fail(
+                f"context_policy.working_band.{key} must be between "
+                f"{MIN_BAND_TOKENS} and {MAX_BAND_TOKENS}"
+            )
+        return raw
+
+    floor = band_value("floor_tokens", 150_000)
+    ceiling = band_value("ceiling_tokens", 200_000)
+    if floor >= ceiling:
+        fail("context_policy.working_band.floor_tokens must be less than ceiling_tokens")
+
+    action = str(policy.get("on_ceiling", "checkpoint-and-handoff")).strip().lower()
+    if action not in ALLOWED_CEILING_ACTIONS:
+        fail(f"context_policy.on_ceiling must be one of {sorted(ALLOWED_CEILING_ACTIONS)}")
+
+    isolate_when = policy.get("isolate_when")
+    isolate_when = (
+        list(DEFAULT_ISOLATE_WHEN)
+        if isolate_when is None
+        else normalize_string_list(isolate_when, "context_policy.isolate_when")
+    )
+
+    always = policy.get("always")
+    always = (
+        list(DEFAULT_CONTEXT_ALWAYS)
+        if always is None
+        else normalize_string_list(always, "context_policy.always")
+    )
+
+    data["context_policy"] = {
+        "working_band": {"floor_tokens": floor, "ceiling_tokens": ceiling},
+        "on_ceiling": action,
+        "isolate_when": isolate_when,
+        "always": always,
+    }
 
 
 def load_profile(path: Path) -> dict[str, Any]:
@@ -282,6 +367,7 @@ def load_profile(path: Path) -> dict[str, Any]:
         "commit_ai_runs": False,
         "generated_language": "English",
         "greenfield_context": None,
+        "context_policy": None,
     }
     for key, value in defaults.items():
         data.setdefault(key, value)
@@ -300,6 +386,7 @@ def load_profile(path: Path) -> dict[str, Any]:
             fail(f"{list_key} must be an array")
 
     normalize_greenfield_context(data)
+    normalize_context_policy(data)
 
     if tier == "fleet" and not data.get("parallel_writes", False):
         data["fleet_warning"] = (
@@ -593,6 +680,72 @@ Configured transport: `codex-cli`.
 The project wrapper sends `.ai/specs/current-task.md` to a separate local `codex exec` process through stdin. This transport is also required by Fleet in version 0.2 because it exposes explicit worktree, directory, and lane-process control.""",
     }
 
+
+def format_tokens(value: int) -> str:
+    if value >= 1000 and value % 1000 == 0:
+        return f"{value // 1000}k"
+    return str(value)
+
+
+def context_policy_of(profile: dict[str, Any]) -> dict[str, Any]:
+    policy = profile.get("context_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def context_working_band(profile: dict[str, Any]) -> str:
+    band = context_policy_of(profile).get("working_band", {})
+    floor = int(band.get("floor_tokens", 150_000))
+    ceiling = int(band.get("ceiling_tokens", 200_000))
+    return f"{format_tokens(floor)}-{format_tokens(ceiling)} tokens"
+
+
+def context_budget_section(profile: dict[str, Any]) -> str:
+    """Shared contract text: the budget itself and what to do at the ceiling."""
+    policy = context_policy_of(profile)
+    action = CEILING_ACTION_TEXT.get(
+        str(policy.get("on_ceiling", "checkpoint-and-handoff")),
+        CEILING_ACTION_TEXT["checkpoint-and-handoff"],
+    )
+    lines = [
+        f"Working band: **{context_working_band(profile)}**. This is a working budget, "
+        "not the model's context limit.",
+        "",
+        "Reasoning quality degrades well before a context window is full. Capacity is not a "
+        "target: filling the window buys volume at the cost of the judgment the task needs.",
+        "",
+        f"On reaching the ceiling: {action}",
+        "",
+        "Always:",
+        "",
+        bullets(
+            policy.get("always", []),
+            "Keep the working context small and prefer durable artifacts over transcript history.",
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def context_discipline_section(profile: dict[str, Any]) -> str:
+    """Claude-specific routing: what leaves the main session."""
+    policy = context_policy_of(profile)
+    lines = [
+        "## Context discipline",
+        "",
+        f"Keep the main session inside the working band ({context_working_band(profile)}). "
+        "It holds judgment, synthesis, decisions, specs, and verification, not raw exploration.",
+        "",
+        "Push into an isolated agent rather than the main session:",
+        "",
+        bullets(
+            policy.get("isolate_when", []),
+            "Any investigation whose raw output is much larger than its conclusion.",
+        ),
+        "",
+        "Bring back a conclusion with evidence references, not the material the agent read.",
+    ]
+    return "\n".join(lines)
+
+
 def computed_context(profile: dict[str, Any]) -> dict[str, str]:
     tier = str(profile.get("harness_tier", "standard"))
     has_project_agents = tier in {"standard", "fleet"}
@@ -626,6 +779,9 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
             "Do not push, deploy, expose secrets, or broaden permissions without approval.",
         ),
         "sensitive_areas_section": sensitive_section(profile),
+        "context_budget_section": context_budget_section(profile),
+        "context_discipline_section": context_discipline_section(profile),
+        "context_working_band": context_working_band(profile),
         "custom_components_markdown": custom_components_markdown(profile),
         "researcher_instruction": (
             "Use `harness-codebase-researcher` when raw exploration would pollute the main context."

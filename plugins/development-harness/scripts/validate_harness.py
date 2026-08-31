@@ -21,6 +21,7 @@ PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 FENCED_BLOCK = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
 GENERATION_MARKER = ".development-harness-generated.json"
+ALLOWED_CEILING_ACTIONS = {"compact", "checkpoint-and-handoff", "stop-and-ask"}
 FORBIDDEN_CODEX_DEFAULTS = (
     "--dangerously-bypass-approvals-and-sandbox",
     "--dangerously-skip-permissions",
@@ -140,6 +141,67 @@ def expected_dynamic_paths(profile: dict[str, Any], errors: list[str]) -> list[s
             name = component_name(item.get("name"))
             paths.append(f"{base}/{name}{suffix}")
     return paths
+
+
+def format_tokens(value: int) -> str:
+    if value >= 1000 and value % 1000 == 0:
+        return f"{value // 1000}k"
+    return str(value)
+
+
+def check_context_policy(
+    profile: dict[str, Any],
+    payload: Path,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """The context budget is a safety-relevant contract, so verify it survived rendering."""
+    policy = profile.get("context_policy")
+    if not isinstance(policy, dict):
+        errors.append("project-profile.json is missing a normalized context_policy object")
+        return
+
+    band = policy.get("working_band")
+    if not isinstance(band, dict):
+        errors.append("context_policy.working_band must be an object")
+        return
+
+    floor = band.get("floor_tokens")
+    ceiling = band.get("ceiling_tokens")
+    for label, value in (("floor_tokens", floor), ("ceiling_tokens", ceiling)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            errors.append(f"context_policy.working_band.{label} must be an integer")
+            return
+    if floor >= ceiling:
+        errors.append("context_policy.working_band.floor_tokens must be below ceiling_tokens")
+        return
+
+    if str(policy.get("on_ceiling", "")) not in ALLOWED_CEILING_ACTIONS:
+        errors.append(
+            f"context_policy.on_ceiling must be one of {sorted(ALLOWED_CEILING_ACTIONS)}"
+        )
+
+    expected_band = f"{format_tokens(floor)}-{format_tokens(ceiling)} tokens"
+
+    agents = payload / "AGENTS.md"
+    if agents.is_file():
+        text = agents.read_text(encoding="utf-8")
+        if "## Context budget" not in text:
+            errors.append("AGENTS.md is missing the Context budget section")
+        elif expected_band not in text:
+            errors.append(
+                f"AGENTS.md does not state the configured working band {expected_band!r}"
+            )
+
+    claude = payload / "CLAUDE.md"
+    if claude.is_file():
+        text = claude.read_text(encoding="utf-8")
+        if "## Context discipline" not in text:
+            errors.append("CLAUDE.md is missing the Context discipline section")
+        elif expected_band not in text:
+            errors.append(
+                f"CLAUDE.md does not state the configured working band {expected_band!r}"
+            )
 
 
 def main() -> None:
@@ -433,6 +495,8 @@ def main() -> None:
         helper = payload / "scripts/ai-harness/create-lane-worktree.sh"
         if helper.is_file() and not (helper.stat().st_mode & 0o111):
             warnings.append("fleet worktree helper is not executable")
+
+    check_context_policy(profile, payload, errors, warnings)
 
     for rel in ("AGENTS.md", "CLAUDE.md"):
         path = payload / rel

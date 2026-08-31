@@ -726,6 +726,87 @@ class RendererTests(unittest.TestCase):
             self.assertIn("unsafe Codex default token in executable block", result.stderr)
             self.assertIn("danger-full-access", result.stderr)
 
+    def test_context_policy_defaults_render_into_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            payload = self.render(temp_path, "standard") / "payload"
+
+            agents = (payload / "AGENTS.md").read_text()
+            self.assertIn("## Context budget", agents)
+            self.assertIn("150k-200k tokens", agents)
+            self.assertIn("checkpoint durable findings into", agents)
+            self.assertIn("Load reference material on demand", agents)
+
+            claude = (payload / "CLAUDE.md").read_text()
+            self.assertIn("## Context discipline", claude)
+            self.assertIn("150k-200k tokens", claude)
+            self.assertIn("Broad codebase search or repository mapping", claude)
+
+            stored = json.loads((payload / ".ai/harness/project-profile.json").read_text())
+            self.assertEqual(
+                stored["context_policy"]["working_band"],
+                {"floor_tokens": 150000, "ceiling_tokens": 200000},
+            )
+            self.assertEqual(stored["context_policy"]["on_ceiling"], "checkpoint-and-handoff")
+
+    def test_context_policy_custom_values_render(self) -> None:
+        data = profile("standard")
+        data["context_policy"] = {
+            "working_band": {"floor_tokens": 60000, "ceiling_tokens": 90000},
+            "on_ceiling": "stop-and-ask",
+            "isolate_when": ["Schema migration surveys"],
+            "always": ["Prefer a spec over a transcript."],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            config = temp_path / "custom-context.json"
+            output = temp_path / "generated"
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            run("python3", str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+
+            agents = (output / "payload" / "AGENTS.md").read_text()
+            self.assertIn("60k-90k tokens", agents)
+            self.assertIn("stop and ask the operator", agents)
+            self.assertIn("Prefer a spec over a transcript.", agents)
+            self.assertNotIn("150k-200k tokens", agents)
+
+            claude = (output / "payload" / "CLAUDE.md").read_text()
+            self.assertIn("Schema migration surveys", claude)
+            self.assertNotIn("Broad codebase search or repository mapping", claude)
+
+    def test_invalid_context_policy_is_rejected(self) -> None:
+        cases = [
+            (
+                {"working_band": {"floor_tokens": 200000, "ceiling_tokens": 150000}},
+                "less than ceiling_tokens",
+            ),
+            ({"working_band": {"floor_tokens": "150000"}}, "must be an integer"),
+            ({"working_band": {"floor_tokens": 10}}, "must be between"),
+            ({"on_ceiling": "ignore-it"}, "on_ceiling must be one of"),
+            ("not-an-object", "context_policy must be an object"),
+            ({"isolate_when": "not-a-list"}, "isolate_when must be an array"),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            for index, (policy, expected) in enumerate(cases):
+                data = profile("standard")
+                data["context_policy"] = policy
+                config = temp_path / f"bad-context-{index}.json"
+                config.write_text(json.dumps(data, indent=2) + "\n")
+                result = run(
+                    "python3",
+                    str(SCRIPTS / "render_harness.py"),
+                    "--config",
+                    str(config),
+                    "--output",
+                    str(temp_path / f"generated-{index}"),
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0, f"case {index} should fail")
+                self.assertIn(expected, result.stderr, f"case {index}")
+
     def test_invalid_profile_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             temp_path = Path(temp)

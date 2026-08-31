@@ -5,8 +5,13 @@
   "project_stage": "production",
   "harness_mode": "adopt",
   "harness_tier": "standard",
-  "languages": ["TypeScript"],
-  "frameworks": ["Next.js", "React"],
+  "languages": [
+    "TypeScript"
+  ],
+  "frameworks": [
+    "Next.js",
+    "React"
+  ],
   "package_manager": "npm",
   "repository_shape": "single-app",
   "important_paths": [
@@ -50,7 +55,10 @@
     {
       "name": "frontend-boundaries",
       "description": "Frontend architecture boundaries",
-      "paths": ["src/app/**", "src/components/**"],
+      "paths": [
+        "src/app/**",
+        "src/components/**"
+      ],
       "instructions": [
         "Keep server-only logic out of client components.",
         "Reuse the existing design-system primitives."
@@ -84,5 +92,20 @@
   ],
   "commit_ai_reports": true,
   "commit_ai_runs": false,
-  "generated_language": "English"
+  "generated_language": "English",
+  "context_policy": {
+    "working_band": {
+      "floor_tokens": 150000,
+      "ceiling_tokens": 200000
+    },
+    "on_ceiling": "checkpoint-and-handoff",
+    "isolate_when": [
+      "Broad codebase search or repository mapping",
+      "Log, build, or test output triage"
+    ],
+    "always": [
+      "Load reference material on demand; do not pre-load it.",
+      "Return conclusions and evidence, not raw file dumps."
+    ]
+  }
 }

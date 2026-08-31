@@ -31,6 +31,13 @@ Create one normalized JSON object from project evidence plus the user's confirme
   "build_command": "npm run build",
   "full_gate_command": "npm run lint && npm run typecheck && npm test && npm run build",
 
+  "context_policy": {
+    "working_band": { "floor_tokens": 150000, "ceiling_tokens": 200000 },
+    "on_ceiling": "checkpoint-and-handoff",
+    "isolate_when": ["Broad codebase search or repository mapping"],
+    "always": ["Return conclusions and evidence, not raw file dumps."]
+  },
+
   "main_orchestrator": "claude-code",
   "implementation_delegate": "codex-plugin",
   "research_model": "opus",
@@ -190,6 +197,37 @@ Additional Greenfield fields:
 - `deployment_target`: string; may be empty when unresolved.
 
 Greenfield commands are **approved plans**, not repository evidence. Generated files must say so. After the first scaffold exists and commands pass, run setup again in Upgrade mode and replace planned claims with verified repository facts.
+
+## Context policy
+
+`context_policy` is optional. When omitted, every field below is filled with a default, so an
+existing profile stays valid.
+
+It encodes a **working budget**, not the model's context limit. Reasoning quality degrades well
+before a window is full, so the ceiling is a trigger for action rather than a cliff to coast into.
+
+```json
+"context_policy": {
+  "working_band": { "floor_tokens": 150000, "ceiling_tokens": 200000 },
+  "on_ceiling": "checkpoint-and-handoff",
+  "isolate_when": ["Broad codebase search or repository mapping"],
+  "always": ["Return conclusions and evidence, not raw file dumps."]
+}
+```
+
+- `working_band.floor_tokens` / `working_band.ceiling_tokens`: integers between 1000 and 2000000.
+  The floor must be below the ceiling. Defaults are 150000 and 200000.
+- `on_ceiling`: `compact`, `checkpoint-and-handoff`, or `stop-and-ask`.
+  Defaults to `checkpoint-and-handoff`.
+- `isolate_when`: work that must leave the main session for an isolated agent.
+  Rendered into `CLAUDE.md`.
+- `always`: standing context rules. Rendered into `AGENTS.md`.
+
+`working_band` and `on_ceiling` render into the `## Context budget` section of `AGENTS.md`, which
+is the shared contract. `isolate_when` renders into the `## Context discipline` section of
+`CLAUDE.md`, which is Claude-specific routing. `validate_harness.py` rejects a package whose
+`AGENTS.md` or `CLAUDE.md` does not state the configured band, so the rendered contract cannot
+drift from the profile.
 
 ## Execution transport selection
 
