@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.1.0](https://img.shields.io/badge/Version-1.1.0-7C3AED?style=flat-square)
+![Version 1.1.1](https://img.shields.io/badge/Version-1.1.1-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)

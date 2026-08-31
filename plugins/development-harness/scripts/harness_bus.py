@@ -184,6 +184,15 @@ def build_envelope(
         )
 
     if kind not in ENVELOPE_KINDS:
+        if kind is None:
+            # `--kind` is optional only because a --body-file carrying a full
+            # envelope names its own. Saying "unknown kind None" left the caller
+            # guessing which of the two paths they were on.
+            raise BusError(
+                "no kind: pass --kind "
+                f"({', '.join(ENVELOPE_KINDS)}), or a --body-file whose envelope "
+                "already names one"
+            )
         raise BusError(
             f"unknown kind {kind!r}; expected one of {', '.join(ENVELOPE_KINDS)}"
         )
@@ -472,7 +481,11 @@ def main() -> None:
     post.add_argument("--root", default=".", help="Repository root (default: .)")
     post.add_argument("--session", required=True, help="Session UUID")
     post.add_argument("--from", dest="sender", required=True, help="Sending agent name")
-    post.add_argument("--kind", choices=list(ENVELOPE_KINDS))
+    post.add_argument(
+        "--kind",
+        choices=list(ENVELOPE_KINDS),
+        help="Required unless --body-file carries a full envelope, which names its own",
+    )
     post.add_argument("--summary", help="One-line summary")
     post.add_argument("--body", help="Body as an inline JSON object")
     post.add_argument("--body-file", help="Body as a JSON file")

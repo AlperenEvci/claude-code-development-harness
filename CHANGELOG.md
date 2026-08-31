@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.1.1 — 2026-08-31
+
+### Added — the command layer of the session runtime is now tested
+
+A stdlib line-coverage pass (`sys.monitoring`, injected through `sitecustomize`
+so subprocesses are visible — the suite runs the scripts as subprocesses, and a
+monitor in the parent alone measures almost nothing) put the runtime at 77%
+overall with `harness_session.py` at **37%**. The gap was not random: the pure
+logic was covered and the command layer was not. `registry`, `cmd_list`,
+`cmd_sweep`, `cmd_read`, and `cmd_validate` had never been executed by a test.
+
+That is the wrong half to leave untested. A sweep's entire job is to *not*
+silently report success, and a defect there is invisible by construction.
+
+Twelve tests now drive both CLIs the way an operator does, with a stub `claude`
+on PATH making the registry deterministic on Windows and POSIX alike:
+
+- a live background session is reported and the sweep refuses to call itself clean,
+- a stopped session is not an orphan (liveness is `pid`, never the `state` string),
+- the sweep never counts the session running it, by either identity variable,
+- a foreground session is not swept,
+- a missing `claude` is an error, not a confident "nothing is running",
+- a task carrying shell metacharacters is quoted before being printed for a shell,
+- the bus round-trips post → read → validate, and rejects a tampered envelope.
+
+Coverage is now 82% overall, and no script sits below 73%.
+
+### Fixed
+
+- `harness_bus.py post` failed with `unknown kind None` when `--kind` was
+  omitted, which left the caller guessing: the flag is optional *only* because a
+  `--body-file` carrying a schema-validated envelope names its own kind. The
+  message now says both ways to supply one, and `--help` says when it is required.
+  Found by writing the round-trip test, and briefly "fixed" the wrong way — by
+  making the flag mandatory, which broke the documented foreground path and was
+  caught by the existing test for it.
+
 ## 1.1.0 — 2026-08-31
 
 ### Fixed — the plugin could not run on Windows
