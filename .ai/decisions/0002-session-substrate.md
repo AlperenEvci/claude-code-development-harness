@@ -122,6 +122,20 @@ to route around. The bus is written by the orchestrator on behalf of foreground 
 `implementer` lanes for themselves. Any design that hands a reader a write path to the bus has
 broken the tier it was launched under.
 
+**`--restricted` is not an alternative to `--tools`.** The table above offers it as one —
+"`--permission-mode plan --tools Read,Grep,Glob,Bash` (or `--restricted`)". Measured, a session
+launched with `--restricted` and no `--tools` reports its tool set as **Read, Grep, Glob,
+Write**. It removes the code-running tools and WebFetch; it does not remove `Write`. A `verifier`
+launched that way could edit the code it was sent to judge.
+
+What `--restricted` does add is settings-file isolation: it ignores user, project, and local
+settings. That is worth having when the repository is untrusted, because a scanned project's
+`.claude/settings.json` is repository text, and repository text must never become tool
+permissions. So it is a complement to `--tools`, never a substitute. `harness_session.py launch
+--restricted` offers it for the read-only tiers and refuses the combination that would backfire:
+`implementer` passes no `--tools`, so restricted mode would strip the `Bash` it needs to run the
+gate before reporting.
+
 Two claims were confirmed and are worth keeping: `--tools` genuinely removes the tool rather than
 gating it, and the removal reaches subagents — *"Write is disabled for this session, in subagents
 as well as here"* — so a `reader` cannot escape its tier by delegating. And `cwd` in the registry

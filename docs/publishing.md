@@ -43,7 +43,7 @@ Recommended release steps:
 2. update `CHANGELOG.md`,
 3. bump the plugin version,
 4. validate locally,
-5. tag the Git commit, for example `v0.2.0`,
+5. tag the Git commit, for example `v1.0.0`,
 6. push the tag and release notes.
 
 ## 5. User updates

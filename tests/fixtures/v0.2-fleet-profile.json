@@ -1,0 +1,55 @@
+{
+  "project_name": "Example Monorepo",
+  "project_slug": "example-monorepo",
+  "project_summary": "A TypeScript monorepo with independently testable application and package surfaces that periodically require parallel migration or refactor lanes.",
+  "project_stage": "production",
+  "harness_mode": "adopt",
+  "harness_tier": "fleet",
+  "languages": ["TypeScript"],
+  "frameworks": ["Next.js", "Node.js"],
+  "package_manager": "pnpm",
+  "repository_shape": "monorepo",
+  "important_paths": [
+    "apps/web - customer application",
+    "apps/admin - internal application",
+    "packages/domain - shared business logic",
+    "packages/ui - shared design system"
+  ],
+  "install_command": "pnpm install --frozen-lockfile",
+  "dev_command": "pnpm dev",
+  "test_command": "pnpm test",
+  "typecheck_command": "pnpm typecheck",
+  "lint_command": "pnpm lint",
+  "build_command": "pnpm build",
+  "full_gate_command": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+  "main_orchestrator": "claude-code",
+  "implementation_delegate": "codex-cli",
+  "research_model": "opus",
+  "review_model": "inherit",
+  "codex_reasoning": "high",
+  "autonomy": "repository-write-with-approval",
+  "network_access": "deny-by-default",
+  "hooks_policy": "disabled",
+  "git_workflow": "feature-branches",
+  "agent_commit_policy": "no-commit",
+  "parallel_writes": true,
+  "risk_level": "high",
+  "sensitive_areas": [
+    "Cross-package schema and API contracts",
+    "Authentication and billing packages"
+  ],
+  "project_rules": [
+    "Each parallel lane must own an explicit file surface.",
+    "The orchestrator owns integration and the repository-wide gate."
+  ],
+  "do_not_rules": [
+    "Do not run parallel write lanes in a shared checkout.",
+    "Do not commit, push, deploy, or run production migrations."
+  ],
+  "scoped_rules": [],
+  "additional_skills": [],
+  "additional_agents": [],
+  "commit_ai_reports": true,
+  "commit_ai_runs": false,
+  "generated_language": "English"
+}

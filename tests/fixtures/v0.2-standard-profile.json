@@ -1,0 +1,88 @@
+{
+  "project_name": "Example SaaS",
+  "project_slug": "example-saas",
+  "project_summary": "A production-oriented SaaS application with a Next.js frontend, domain services, billing, and a growing automated test suite.",
+  "project_stage": "production",
+  "harness_mode": "adopt",
+  "harness_tier": "standard",
+  "languages": ["TypeScript"],
+  "frameworks": ["Next.js", "React"],
+  "package_manager": "npm",
+  "repository_shape": "single-app",
+  "important_paths": [
+    "src/app - application routes and server actions",
+    "src/components - UI components",
+    "src/lib - domain and integration logic",
+    "tests - automated verification"
+  ],
+  "install_command": "npm ci",
+  "dev_command": "npm run dev",
+  "test_command": "npm test",
+  "typecheck_command": "npm run typecheck",
+  "lint_command": "npm run lint",
+  "build_command": "npm run build",
+  "full_gate_command": "npm run lint && npm run typecheck && npm test && npm run build",
+  "main_orchestrator": "claude-code",
+  "implementation_delegate": "codex-plugin",
+  "research_model": "opus",
+  "review_model": "inherit",
+  "codex_reasoning": "high",
+  "autonomy": "repository-write-with-approval",
+  "network_access": "deny-by-default",
+  "hooks_policy": "disabled",
+  "git_workflow": "feature-branches",
+  "agent_commit_policy": "no-commit",
+  "parallel_writes": false,
+  "risk_level": "normal",
+  "sensitive_areas": [
+    "Billing and payment-provider integration",
+    "Authentication and authorization"
+  ],
+  "project_rules": [
+    "Keep business logic outside UI components.",
+    "Reuse established repository patterns before introducing abstractions."
+  ],
+  "do_not_rules": [
+    "Do not add dependencies without explicit justification.",
+    "Do not push, deploy, or run production migrations."
+  ],
+  "scoped_rules": [
+    {
+      "name": "frontend-boundaries",
+      "description": "Frontend architecture boundaries",
+      "paths": ["src/app/**", "src/components/**"],
+      "instructions": [
+        "Keep server-only logic out of client components.",
+        "Reuse the existing design-system primitives."
+      ]
+    }
+  ],
+  "additional_skills": [
+    {
+      "name": "release-readiness",
+      "description": "Run project release-readiness checks without publishing or deploying",
+      "manual_only": true,
+      "argument_hint": "[optional release context]",
+      "instructions": [
+        "Inspect the current diff and release checklist.",
+        "Run only verification commands already recorded by the project.",
+        "Report blockers and unverified claims; do not publish or deploy."
+      ]
+    }
+  ],
+  "additional_agents": [
+    {
+      "name": "billing-researcher",
+      "description": "Map billing behavior and risks without editing",
+      "model": "inherit",
+      "max_turns": 30,
+      "instructions": [
+        "Trace billing state, invoices, and payment-provider boundaries.",
+        "Return evidence with file paths and unresolved risks."
+      ]
+    }
+  ],
+  "commit_ai_reports": true,
+  "commit_ai_runs": false,
+  "generated_language": "English"
+}

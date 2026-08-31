@@ -15,8 +15,8 @@ This report is that smoke test. Claude Code 2.1.251, Windows 11, fixture:
 
 ## Current behavior
 
-The lifecycle works end to end, and the tier boundary holds. Three findings change Phase 4's
-design; one of them corrects the decision record.
+The lifecycle works end to end, and the tier boundary holds. Five findings change Phase 4's
+design; two of them correct the decision record.
 
 ### 1. `--bg` and `-p` are mutually exclusive. This is the important one.
 
@@ -114,12 +114,32 @@ Read `structured_output`, not `result` — `result` is the same data as a string
 an avoidable failure point. `permission_denials` is an audit channel: an empty array is positive
 evidence that a tier held during the run, not merely that the agent claims it complied.
 
+### 5. `--restricted` keeps `Write`, so it is not a read-only mode
+
+Asked to list its own tools, a session launched with `--restricted` and no `--tools`
+answered **Read, Grep, Glob, Write**. It strips the code-running tools and WebFetch; it
+does not strip `Write`. So `--restricted` alone cannot stand in for a read-only tier,
+and decision 0002's capability table offering it as an alternative to
+`--tools Read,Grep,Glob,Bash` is wrong.
+
+With `--restricted --permission-mode plan --tools Read,Grep,Glob,Bash` the session
+reported exactly those four: `--tools` re-admits `Bash` under restricted mode, as its
+help text says. The two flags compose.
+
+What `--restricted` contributes is that it ignores user, project, and local settings
+files. For a session pointed at an untrusted repository that is the relevant control:
+the project's own `.claude/settings.json` is repository text, and the engineering
+contract forbids repository text becoming tool permissions. It is not made a default,
+because a harness normally runs in a repository whose settings the operator wrote
+deliberately, and ignoring user settings would discard their intentional configuration.
+
 ## Relevant files
 
 - `plugins/development-harness/scripts/harness_capabilities.py`: the launch strings this test
   exercised. No change needed — they are correct.
 - `.ai/decisions/0002-session-substrate.md`: its capability table implies `--bg` composes with
-  `-p`. Corrected by finding 1.
+  `-p`, and offers `--restricted` as an alternative to `--tools`. Both are wrong. Corrected by
+  findings 1 and 5.
 
 ## Constraints and dependencies
 
@@ -140,7 +160,6 @@ evidence that a tier held during the run, not merely that the agent claims it co
 
 - `--max-budget-usd` is documented as `--print`-only, so it cannot bound a `--bg` session. Whether
   background lanes need a different ceiling is unresolved.
-- `--restricted` was not exercised.
 
 ## Recommended implementation surface
 

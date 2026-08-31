@@ -66,6 +66,32 @@ is the worktree and `--add-dir` — a filesystem boundary, not a tool one. A wri
 lane can still reach tools a read-only tier cannot. Bound it with the worktree and
 the contract, not with an assumption about its toolset.
 
+### `--restricted` is a complement to `--tools`, never a substitute
+
+Asked to list its own tools, a session launched with `--restricted` and no
+`--tools` answered **Read, Grep, Glob, Write**. It strips the code-running tools
+and WebFetch. It does not strip `Write`. A `verifier` launched that way could edit
+the code it was sent to judge, so `--restricted` alone cannot stand in for a
+read-only tier.
+
+What it adds is settings-file isolation: user, project, and local settings are
+ignored. That is the control that matters when the repository is untrusted,
+because a scanned project's `.claude/settings.json` is repository text, and
+repository text must never become tool permissions.
+
+It is not a default. A harness normally runs in a repository whose settings the
+operator wrote on purpose, and ignoring user settings would throw those away too.
+Add it deliberately:
+
+```bash
+python scripts/ai-harness/harness_session.py launch \
+  --capability reader --restricted --task "Map this third-party repository"
+```
+
+`launch` refuses `--restricted` for `implementer`, because that tier passes no
+`--tools` and restricted mode would silently take away the `Bash` it needs to run
+the gate before reporting.
+
 ## The bus
 
 `.ai/bus/<session-id>/NNNN-<kind>-<id>.json`, append-only. Nothing rewrites or

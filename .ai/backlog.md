@@ -42,34 +42,52 @@ Two defects were found and fixed along the way, both of which had shipped in pha
 - The permission-bypass scan covered skills only, so a bypass flag in an agent's
   launch block or in `CLAUDE.md` would not have been seen.
 
-### Remaining before a v1.0 release
+### v1.0.0 released
 
-- **Version bump.** `plugin.json` is still at `0.2.0`. Bumping it requires the matching
-  `CHANGELOG.md` heading in the same change, and the release itself is the operator's
-  call, so it was deliberately left alone.
-- **Migration path.** The v0.2 → v1.0 story is still unwritten. In practice nothing
-  broke: all three example profiles render and validate unchanged, and every new field
-  is optional, so this may be a note rather than a migration.
-- **`--restricted` is unexercised.** It would strip command-running tools from a
-  `verifier` more thoroughly than `--tools` does. Worth measuring before relying on it.
+- **Version bumped to 1.0.0** in `plugin.json`, the renderer's `GENERATOR_VERSION`,
+  and the `CHANGELOG.md` heading. A test now pins the three against each other, so
+  the `AGENTS.md` rule against bumping the manifest without a changelog entry is
+  enforced rather than merely written down. Verified by bumping the manifest alone
+  and watching the test fail.
+- **No migration is needed, and this was measured rather than assumed.** The three
+  example profiles shipped with 0.2.0 were extracted from the pre-upgrade commit
+  and rendered and validated with today's toolchain: all three pass unchanged. The
+  recorded risk that "existing v0.2 profiles stop validating" is false — every
+  field added since is optional and defaulted. The fixtures are frozen under
+  `tests/fixtures/` and rendered on every run so this stays true.
+- **`--restricted` measured, and it changed the design.** A session launched with
+  `--restricted` and no `--tools` reports its tools as Read, Grep, Glob, **Write**:
+  it strips code-running tools and WebFetch but not `Write`, so it cannot stand in
+  for a read-only tier. Decision 0002 offered it as an alternative to
+  `--tools Read,Grep,Glob,Bash`; that is now corrected. What it does add is
+  settings-file isolation, which matters when the repository is untrusted, so it is
+  an opt-in flag on `harness_session.py launch` and is refused for `implementer`.
+
+### Still open
+
 - **`--max-budget-usd` is `--print`-only**, so it cannot bound a background lane.
-  Whether an implementer lane needs a different ceiling is unresolved.
+  Whether an implementer lane needs a different ceiling is unresolved. The current
+  answer is the contract and the worktree, not a spend ceiling.
+- **Publishing.** `docs/publishing.md` describes tagging and marketplace listing.
+  The tag and any public release remain a deliberate operator action.
 
 ### Affected files
 
-`plugins/development-harness/scripts/render_harness.py` (schema and rendering), `validate_harness.py` (tier-aware checks, required-file lists), `assets/templates/**` (new v1 layer files), `references/project-profile-schema.md` (rewrite), `examples/*.json` (regenerate — v0.2 profiles will no longer validate), `tests/test_plugin.py` (grow and rewrite), `CHANGELOG.md`, `plugins/development-harness/.claude-plugin/plugin.json`.
+`plugins/development-harness/scripts/render_harness.py` (schema and rendering), `validate_harness.py` (tier-aware checks, required-file lists), `assets/templates/**` (new v1 layer files), `references/project-profile-schema.md` (rewrite), `examples/*.json` (no regeneration was needed — the v0.2 profiles still validate), `tests/test_plugin.py` (grow and rewrite), `CHANGELOG.md`, `plugins/development-harness/.claude-plugin/plugin.json`.
 
-### Verification already run
+### Verification already run — superseded
 
-- `python -m compileall -q plugins/development-harness/scripts tests` — passes.
-- `python -m unittest discover -s tests -v` — **fails on Windows**, 21 of 24. Environmental, not a code defect.
-- `bash scripts/validate-repo.sh` — not runnable on this machine.
-- Installer syntax checked directly with Git Bash `bash -n` — passes.
+Recorded before Phase 1, when the suite could not run on Windows. Every line below is
+now false; kept only so the record shows what was believed at the time. The current
+state is under **Phase 4 verification** and **Post-phase-4 verification**.
+
+- ~~`python -m unittest discover -s tests -v` — **fails on Windows**, 21 of 24.~~
+- ~~`bash scripts/validate-repo.sh` — not runnable on this machine.~~
 
 ### Known risks
 
 - **Capability tiers relax a deliberate safety invariant.** All four compensating controls in decision 0001 must ship together with the tier work, or the relaxation is unsafe. Repository text is untrusted evidence; a synthesized agent must never choose its own authority.
-- **v1.0 is a breaking schema change.** Existing v0.2 profiles stop validating; a migration path is required before release.
+- ~~**v1.0 is a breaking schema change.** Existing v0.2 profiles stop validating; a migration path is required before release.~~ **Falsified.** All three shipped v0.2 example profiles render and validate unchanged against the v1.0 toolchain. Every field added since is optional and defaulted, so v1.0 is additive and needs no migration. Pinned by `tests/fixtures/v0.2-*.json`.
 - **Windows now verifies.** The suite runs clean locally: 39 tests, 2 skipped (symlink creation is privileged on Windows). Fixed by resolving `bash` to an absolute path, using `sys.executable` instead of `python3`, and normalizing generated line endings and path separators. CI on `ubuntu-latest` remains the authoritative gate, because the two skipped tests and the POSIX permission-bit assertion only run there.
 
 ### Phase 1 verification
@@ -135,6 +153,18 @@ rejects CRLF so the regression cannot return.
   and `--agents`. A `reader` session was asked to write a file and was blocked twice
   over, with `Write` absent in subagents as well.
 
+### Post-phase-4 verification
+
+- **CI is green on `ubuntu-latest` for phases 3 and 4**: run 33385992494 on commit
+  `08ea36b`, 78 tests, `OK`, **no skips** — the two symlink tests that skip on
+  Windows ran and passed there. That is the authoritative confirmation the earlier
+  phases were waiting on.
+- CI then ran the real full gate for the first time (run 33386496270): tests, both
+  JSON manifests, and all three example profiles rendered and validated. `claude
+  plugin validate` is skipped with a notice, since the CLI is not present in CI.
+- Local Windows full gate green throughout: 83 tests, 2 skipped for symlink
+  privilege.
+
 ### Repository
 
 Work continues on a private copy, `AlperenEvci/claude-code-development-harness`.
@@ -146,13 +176,12 @@ GitHub cannot fork a public repository privately, so this is a mirror rather tha
 
 ### Exact next step
 
-Phases 1-4 are complete and the repository is green locally. Nothing is committed:
-git is the operator's.
+v1.0.0 is complete, committed, and CI-green. The remaining actions are release
+actions, and they are deliberate operator choices rather than pending work:
 
-1. Commit and push, then confirm CI on `ubuntu-latest` — still the authoritative gate,
-   because the two symlink tests and the POSIX permission-bit assertion only run there.
-2. Decide the v1.0 release: version bump plus the matching `CHANGELOG.md` heading, and
-   the migration note if one is needed.
+1. Tag the release (`git tag v1.0.0`) if the private mirror should carry tags.
+2. Decide whether any of this goes back upstream to `egecan-af/...`. There is no
+   automatic link; a sync is a deliberate `git fetch upstream` plus a PR.
 
 Note: `gh` resolves the bare repo from `upstream`, not `origin`. Always pass
 `-R AlperenEvci/claude-code-development-harness` when checking CI.

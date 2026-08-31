@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -184,7 +185,37 @@ class PluginStructureTests(unittest.TestCase):
         manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
         self.assertEqual(manifest["name"], "development-harness")
         self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
-        self.assertEqual(manifest["version"], "0.2.0")
+
+    def test_the_version_is_the_same_in_all_three_places(self) -> None:
+        """`AGENTS.md` forbids bumping the manifest without the CHANGELOG entry.
+
+        Nothing enforced that. Asserting a hardcoded literal here would not
+        either — it just makes the release edit one file longer. So this pins the
+        three against each other: the manifest a marketplace reads, the version
+        the renderer stamps into every generated package, and the CHANGELOG
+        section that says what changed. A release that forgets one now fails.
+        """
+        manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+        version = manifest["version"]
+
+        renderer = (SCRIPTS / "render_harness.py").read_text(encoding="utf-8")
+        match = re.search(r'^GENERATOR_VERSION = "([^"]+)"', renderer, re.MULTILINE)
+        self.assertIsNotNone(match, "render_harness.py has no GENERATOR_VERSION")
+        self.assertEqual(
+            match.group(1),
+            version,
+            "GENERATOR_VERSION and plugin.json disagree; generated packages would "
+            "be stamped with a version that was never released",
+        )
+
+        changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+        headings = re.findall(r"^## (.+)$", changelog, re.MULTILINE)
+        self.assertTrue(headings, "CHANGELOG.md has no sections")
+        self.assertTrue(
+            any(heading.split(" ")[0] == version for heading in headings),
+            f"CHANGELOG.md has no section for released version {version}; "
+            f"found {headings[:3]}",
+        )
 
     def test_plugin_skills_are_explicit_and_reference_existing_scripts(self) -> None:
         for skill_name in ("setup", "audit"):
@@ -363,6 +394,34 @@ class RendererTests(unittest.TestCase):
         )
         run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
         return output
+
+    def test_profiles_written_against_v0_2_still_render_and_validate(self) -> None:
+        """v1.0 is additive, and this is what keeps it that way.
+
+        `tests/fixtures/v0.2-*.json` are frozen copies of the shipped v0.2 example
+        profiles, taken from the commit before the upgrade began. They predate
+        `context_policy`, `graphs`, and `capability` entirely. The roadmap assumed
+        v1.0 would be a breaking schema change needing a migration path; it is not,
+        because every field added since is optional and defaulted. That is a
+        property worth holding rather than a coincidence worth noting, so these
+        render and validate on every run.
+        """
+        fixtures = sorted((REPO / "tests" / "fixtures").glob("v0.2-*.json"))
+        self.assertTrue(fixtures, "the v0.2 compatibility fixtures are missing")
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            for config in fixtures:
+                data = json.loads(config.read_text())
+                for added_since in ("context_policy", "graphs"):
+                    self.assertNotIn(
+                        added_since,
+                        data,
+                        f"{config.name} is no longer a v0.2-shaped profile",
+                    )
+                output = temp_path / config.stem
+                run(PYTHON, str(SCRIPTS / "render_harness.py"),
+                    "--config", str(config), "--output", str(output))
+                run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
 
     def test_documented_example_profiles_render_and_validate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1685,6 +1744,31 @@ class SessionLaunchTests(unittest.TestCase):
     def test_an_unknown_tier_is_refused(self) -> None:
         with self.assertRaises(SESSION.SessionError):
             SESSION.launch_argv("superuser", "task")
+
+    def test_restricted_is_offered_to_the_tiers_that_pass_tools(self) -> None:
+        """Settings-file isolation, for a session pointed at an untrusted repo."""
+        for capability in ("reader", "verifier"):
+            argv = SESSION.launch_argv(capability, "task", restricted=True)
+            self.assertIn("--restricted", argv)
+            # It never replaces --tools: measured, `--restricted` alone leaves
+            # Write available, so it cannot stand in for a read-only tier.
+            self.assertIn("--tools", argv)
+
+    def test_restricted_is_refused_where_it_would_strip_bash(self) -> None:
+        """`--restricted` drops code-running tools unless --tools names them.
+
+        The implementer tier passes no --tools, so restricted mode would take away
+        the Bash it needs to run the gate before reporting.
+        """
+        with self.assertRaises(SESSION.SessionError) as caught:
+            SESSION.launch_argv(
+                "implementer", "task", worktree="lane", scope=["src"], restricted=True
+            )
+        self.assertIn("Bash", str(caught.exception))
+
+    def test_restricted_is_never_a_default(self) -> None:
+        for capability in ("reader", "verifier"):
+            self.assertNotIn("--restricted", SESSION.launch_argv(capability, "task"))
 
     def test_liveness_is_a_pid_not_a_state_string(self) -> None:
         """A stopped session keeps its state string and loses its pid."""

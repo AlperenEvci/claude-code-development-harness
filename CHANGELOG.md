@@ -1,10 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-08-31
 
 The v1.0 harness upgrade, phases 1 through 4. See
 `.ai/decisions/0001-harness-v1-architecture.md` and
 `.ai/decisions/0002-session-substrate.md`.
+
+**Upgrading from 0.2.0 needs no migration.** The roadmap assumed v1.0 would be a
+breaking schema change. It is not: every field added since — `context_policy`,
+`graphs`, and an agent's `capability` — is optional and defaulted, and a profile
+that names none of them renders exactly what 0.2.0 rendered. The three shipped
+0.2.0 example profiles are frozen under `tests/fixtures/` and rendered and
+validated on every run, so this stays true rather than merely having been true
+on release day.
+
+Re-render an existing harness to pick up the new sections; nothing in an
+installed 0.2.0 harness stops working if you do not.
 
 ### Added — sessions, message bus, and agent synthesis (phase 4)
 
@@ -34,6 +45,31 @@ The v1.0 harness upgrade, phases 1 through 4. See
   teardown fails silently: nothing breaks, agents just accumulate.
 - `references/agent-sessions.md`, loaded on demand by both skills.
 - `.ai/reports/0001-session-substrate-smoke-test.md` records what was measured.
+- `harness_session.py launch --restricted` additionally ignores user, project, and
+  local settings files, for a session pointed at a repository you do not trust: a
+  scanned project's `.claude/settings.json` is repository text, and repository text
+  must never become tool permissions. It is not a default, and it is refused for
+  `implementer`, which passes no `--tools` and would silently lose `Bash`.
+
+### Added — release and compatibility guards
+
+- The version is now pinned across `plugin.json`, the renderer's
+  `GENERATOR_VERSION`, and the `CHANGELOG.md` heading. `AGENTS.md` has always
+  forbidden bumping the manifest without a changelog entry; nothing enforced it,
+  and a hardcoded version literal in the test would only have made the release
+  edit one file longer. A release that forgets one of the three now fails.
+- `tests/fixtures/v0.2-*.json` freeze the three shipped 0.2.0 example profiles.
+  They are rendered and validated on every run, so backward compatibility is a
+  guarantee rather than a claim.
+- CI runs `bash scripts/validate-repo.sh` — the command `AGENTS.md` names as the
+  full gate — instead of reimplementing a subset of it inline. The gate script had
+  gone unexercised and rotted: it invoked `python3`, which on Windows resolves to
+  the Microsoft Store alias stub, so the documented full gate could not run on the
+  primary development machine and nothing noticed.
+- `.gitattributes` makes the repository LF-only in the working copy as well as in
+  the object store. With `core.autocrlf=true` a Windows clone checked out
+  `scripts/validate-repo.sh` with CRLF, and a shell script whose lines end in `\r`
+  fails in a way that reads as a broken gate rather than a broken checkout.
 
 ### Fixed — a read-only agent could not have reported from where it was told to run
 

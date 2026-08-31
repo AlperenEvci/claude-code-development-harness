@@ -61,6 +61,7 @@ def launch_argv(
     background: bool = False,
     worktree: str | None = None,
     scope: list[str] | None = None,
+    restricted: bool = False,
 ) -> list[str]:
     """Build the command that launches a session under `capability`.
 
@@ -92,9 +93,21 @@ def launch_argv(
             "and let the orchestrator post the envelope."
         )
 
+    if restricted and "--tools" not in tier["launch_flags"]:
+        # Measured: `--restricted` removes the code-running tools and WebFetch
+        # *unless --tools names them*. A tier that does not pass `--tools` would
+        # silently lose Bash, so an implementer launched this way could not run
+        # the gate it is supposed to run before reporting.
+        raise SessionError(
+            f"--restricted cannot be combined with {capability}: this tier does "
+            "not pass --tools, so restricted mode would strip Bash from it."
+        )
+
     argv = ["claude"]
     if background:
         argv.append("--bg")
+    if restricted:
+        argv.append("--restricted")
     if session_id:
         argv += ["--session-id", session_id]
 
@@ -208,6 +221,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
             background=args.background,
             worktree=args.worktree,
             scope=args.scope,
+            restricted=args.restricted,
         )
     except SessionError as exc:
         fail(str(exc))
@@ -320,6 +334,15 @@ def main() -> None:
     launch.add_argument("--worktree", help="Worktree name for a writing tier")
     launch.add_argument(
         "--scope", action="append", default=[], help="Writable directory (repeatable)"
+    )
+    launch.add_argument(
+        "--restricted",
+        action="store_true",
+        help=(
+            "Also ignore user, project, and local settings files. Use when the "
+            "repository is untrusted: its .claude/settings.json is repository "
+            "text, and repository text must not become tool permissions."
+        ),
     )
     launch.add_argument("--json", action="store_true", help="Emit argv as JSON")
     launch.set_defaults(func=cmd_launch)
