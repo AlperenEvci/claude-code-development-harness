@@ -12,11 +12,12 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import shutil
 import sys
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 IGNORED_DIRS = {
@@ -44,6 +45,28 @@ IGNORED_DIRS = {
 }
 
 BENIGN_GREENFIELD_FILES = {".DS_Store", "Thumbs.db", ".gitkeep"}
+
+#: Path segments that mark a file as a test. Kept in one place so the shape
+#: signals and `test_markers` cannot drift into disagreeing about what a test is.
+TEST_MARKERS = ("test", "spec", "__tests__", "e2e")
+
+#: Shape thresholds. These are reported alongside every measurement rather than
+#: applied silently, because they are conventions rather than facts: a repository
+#: is entitled to disagree with them, and an auditor reading a signal needs to
+#: know which line it crossed.
+#:
+#: Depth is counted in directory segments below the scan root.
+#: `apps/web/src/features/billing/retry.ts` sits at depth 5, so 6 is already
+#: generous; past it, an agent is guessing its way to a path it cannot list.
+MAX_HEALTHY_DEPTH = 6
+
+#: Beyond this many files, a directory listing stops being readable at a glance
+#: and every grep into it returns a haystack instead of an answer.
+MAX_HEALTHY_FAN_OUT = 40
+
+#: A file this large must be read whole to be edited safely, which spends a
+#: sizable share of the context budget before any thinking starts.
+LARGE_FILE_BYTES = 100_000
 
 SECRET_FILENAMES = {
     ".env",
@@ -193,6 +216,114 @@ def safe_text(path: Path, max_bytes: int = 250_000) -> str:
         return ""
 
 
+def looks_like_test(relative_path: str) -> bool:
+    lower = relative_path.lower()
+    return any(marker in lower for marker in TEST_MARKERS)
+
+
+def shape_signals(
+    source_files: list[tuple[str, int | None]],
+    test_files: list[str],
+    capped: bool,
+) -> dict[str, Any]:
+    """Measure how hard this repository is to work in, from paths and sizes only.
+
+    Structure is the lever nothing else compensates for: a harness can describe a
+    codebase precisely and still be working against one where every edit starts
+    with guessing where the code lives. The inspector already walks the tree, so
+    the measurement is free - and it is a measurement, not a verdict. Repository
+    shape is evidence like every other thing found in a repository, and the
+    reading belongs to the auditor.
+
+    No file is opened. Depth, fan-out, and size come from paths and `stat`, and a
+    symlink contributes its path without its size, so nothing here follows a link
+    out of the scan root.
+    """
+    directories: Counter[str] = Counter()
+    depths: dict[str, int] = {}
+    for relative_path, _ in source_files:
+        parent = str(PurePosixPath(relative_path).parent)
+        parent = "" if parent == "." else parent
+        directories[parent] += 1
+        depths[parent] = len(parent.split("/")) if parent else 0
+
+    deep = sorted(
+        (
+            {"path": path or ".", "depth": depth}
+            for path, depth in depths.items()
+            if depth > MAX_HEALTHY_DEPTH
+        ),
+        key=lambda item: (-item["depth"], item["path"]),
+    )[:10]
+
+    crowded = sorted(
+        (
+            {"path": path or ".", "files": count}
+            for path, count in directories.items()
+            if count > MAX_HEALTHY_FAN_OUT
+        ),
+        key=lambda item: (-item["files"], item["path"]),
+    )[:10]
+
+    large = sorted(
+        (
+            {"path": path, "bytes": size}
+            for path, size in source_files
+            if size is not None and size > LARGE_FILE_BYTES
+        ),
+        key=lambda item: (-item["bytes"], item["path"]),
+    )[:10]
+
+    # Deliberately generous: a directory counts as named by a test if any test
+    # path anywhere mentions it. A hit therefore proves nothing about coverage,
+    # while a miss - no test in the entire repository so much as names this
+    # module - is a signal worth reporting.
+    named: set[str] = set()
+    for relative_path in test_files:
+        for segment in PurePosixPath(relative_path.lower()).parts:
+            for token in re.split(r"[^a-z0-9]+", segment):
+                if token:
+                    named.add(token)
+
+    unnamed = sorted(
+        path
+        for path in directories
+        if path and PurePosixPath(path).name.lower() not in named
+    )
+    total_directories = len([path for path in directories if path])
+    ratio = (
+        round((total_directories - len(unnamed)) / total_directories, 2)
+        if total_directories
+        else 0.0
+    )
+
+    return {
+        "capped": capped,
+        "source_file_count": len(source_files),
+        "source_directory_count": total_directories,
+        "max_directory_depth": max(depths.values(), default=0),
+        "deep_directories": deep,
+        "crowded_directories": crowded,
+        "large_files": large,
+        "test_file_count": len(test_files),
+        "directories_no_test_names": unnamed[:15],
+        "test_named_directory_ratio": ratio,
+        "thresholds": {
+            "max_healthy_depth": MAX_HEALTHY_DEPTH,
+            "max_healthy_fan_out": MAX_HEALTHY_FAN_OUT,
+            "large_file_bytes": LARGE_FILE_BYTES,
+        },
+        "notes": [
+            "Measured from paths and file sizes. No file contents were read.",
+            "A directory counts as named by a test when any test path mentions "
+            "its name, which is generous on purpose: a hit proves nothing about "
+            "coverage, a miss is a signal.",
+            "Thresholds are conventions reported alongside the measurement, not "
+            "a verdict about this repository.",
+        ],
+    }
+
+
 def file_meta(path: Path, root: Path) -> dict[str, Any]:
     """Return metadata only. Do not read the file body."""
     kind = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
@@ -212,7 +343,13 @@ def file_meta(path: Path, root: Path) -> dict[str, Any]:
     return item
 
 
-def iter_project_files(root: Path, limit: int = 12_000):
+#: The walk stops here. A repository larger than this is measured on a prefix,
+#: and every signal derived from the walk says so rather than implying it saw
+#: the whole tree.
+SCAN_FILE_LIMIT = 12_000
+
+
+def iter_project_files(root: Path, limit: int = SCAN_FILE_LIMIT):
     seen = 0
     for current, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS)
@@ -449,6 +586,8 @@ def main() -> None:
     manifests: list[str] = []
     secret_files: list[str] = []
     test_markers: list[str] = []
+    shape_sources: list[tuple[str, int | None]] = []
+    shape_tests: list[str] = []
     scanned_files = 0
 
     for path in iter_project_files(requested_root):
@@ -463,9 +602,23 @@ def main() -> None:
         lang = LANG_BY_EXT.get(path.suffix.lower())
         if lang:
             language_counts[lang] += 1
-        lower = rel.lower()
-        if any(marker in lower for marker in ("test", "spec", "__tests__", "e2e")) and len(test_markers) < 40:
+        is_test = looks_like_test(rel)
+        if is_test and len(test_markers) < 40:
             test_markers.append(rel)
+        if lang:
+            if is_test:
+                shape_tests.append(rel)
+            else:
+                size: int | None = None
+                if not path.is_symlink():
+                    # Size only, and never through a link: a symlinked path still
+                    # counts toward depth and fan-out, but stat would follow it
+                    # out of the scan root.
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        size = None
+                shape_sources.append((rel, size))
 
     frameworks: set[str] = set(detect_python_frameworks(requested_root))
     if package:
@@ -549,6 +702,9 @@ def main() -> None:
         "top_level": top_level,
         "existing_harness": existing_harness,
         "instruction_file_summary": instructions_summary,
+        "shape_signals": shape_signals(
+            shape_sources, shape_tests, scanned_files >= SCAN_FILE_LIMIT
+        ),
         "tests_detected": bool(test_markers),
         "test_markers": sorted(set(test_markers))[:40],
         "secret_bearing_files_exist": bool(secret_files),

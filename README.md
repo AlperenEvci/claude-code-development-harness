@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.5.0](https://img.shields.io/badge/Version-1.5.0-7C3AED?style=flat-square)
+![Version 1.6.0](https://img.shields.io/badge/Version-1.6.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -43,6 +43,8 @@ One guided command:
 **Version 1.4 added a progress ledger** — the same move applied to "is this finished": JSON state that only accepts a pass with the command and exit status that earned it.
 
 **Version 1.5 put a trace on the envelope** — a correlation id, a duration, and token counts — so the bus records not just what an agent claimed but what the run cost. The correlation id groups a unit of work across sessions, which is the shape an eval loop needs and a per-session mailbox cannot give it.
+
+**Version 1.6 made the audit look at the repository**, not only at the harness installed in it. Depth, directory fan-out, oversized files, and directories no test names are measured from paths and sizes during the scan that already happens. A harness describes a codebase; it cannot fix one, and it should at least be honest about the one it is installed into.
 
 ## Install
 
@@ -450,6 +452,17 @@ The read-only audit checks for:
 - hard-coded model assumptions,
 - unsafe Git, network, secret, or automation boundaries.
 
+It also measures the repository itself, because a harness describes a codebase and cannot
+fix one. During the scan it already performs, the inspector records directory depth,
+per-directory fan-out, oversized source files, and which source directories no test path
+anywhere in the repository so much as names — from paths and `stat` sizes, with nothing
+opened, and with the thresholds reported beside the measurements rather than applied
+silently.
+
+Test proximity is reported as proximity. A hit proves nothing — a directory called
+`utils` matches almost any repository — while a miss means an agent changing code there
+has nothing to run. It is never quoted as coverage.
+
 It reports findings without modifying the project.
 
 ## Safe by default
@@ -481,7 +494,7 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 154 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 172 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
 **Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds seven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 

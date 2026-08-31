@@ -74,6 +74,7 @@ Read:
 - `${CLAUDE_PLUGIN_ROOT}/references/harness-tiers.md`
 - `${CLAUDE_PLUGIN_ROOT}/references/output-contract.md`
 - `${CLAUDE_PLUGIN_ROOT}/references/agent-sessions.md` (when the harness installs session tooling)
+- `${CLAUDE_PLUGIN_ROOT}/references/repository-shape.md` (before reporting anything from `shape_signals`)
 
 ## Evaluate
 
@@ -87,6 +88,11 @@ Read:
 8. **Precedence** — generic names are not unintentionally shadowed.
 9. **Fleet readiness** — parallel writes require direct Codex CLI, independent ownership, worktrees, bounded concurrency, and a reliable integration gate in version 0.2.
 10. **Maintenance** — stale rules, duplication, dead artifacts, and oversized memory files are identified.
+11. **Repository shape** — the `shape_signals` block from the scan. Depth, directory
+    fan-out, oversized source files, and directories no test names change what a harness
+    can honestly promise, and the harness cannot fix any of them. Quote the measurement
+    and the threshold it crossed. `test_named_directory_ratio` is proximity, never
+    coverage. Do not propose a refactor the user did not ask for.
 
 ## Return
 
@@ -95,6 +101,9 @@ Read:
 - repository evidence versus inference,
 - confirmed findings ordered by severity,
 - context and duplication hotspots,
+- repository-shape signals that change what the harness should say or verify, with the
+  measured number beside the threshold, and `capped: true` stated plainly when the scan
+  saw only a prefix of the tree,
 - role/routing diagram,
 - missing or unreliable gates,
 - exact files to preserve, merge, split, rename, archive, or remove,

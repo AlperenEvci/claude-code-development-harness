@@ -13,7 +13,7 @@ Plugin resources are referenced through `${CLAUDE_PLUGIN_ROOT}`. Generated/stage
 
 The setup skill is a stateful guided workflow with two entry paths:
 
-1. `inspect_project.py` gathers read-only evidence, classifies the folder as empty, planning-only, existing, or harness-only, and writes `project-scan.json` outside the project.
+1. `inspect_project.py` gathers read-only evidence, classifies the folder as empty, planning-only, existing, or harness-only, measures repository shape from paths and file sizes, and writes `project-scan.json` outside the project.
 2. Claude selects Create/Greenfield, Adopt, or Upgrade.
 3. Greenfield mode runs product discovery before technical design; Existing mode inspects repository evidence before asking questions.
 4. Claude inspects available execution transports: official Codex plugin, direct Codex CLI, or Claude-only.
@@ -29,6 +29,24 @@ Standard and Fleet packages additionally carry the session runtime — `harness_
 Capability tiers are enforced at two levels. The frontmatter of an agent file declares its tier, and the launch flags recorded alongside it hand that tier to the process: `--tools` removes a tool rather than gating it, and the removal reaches subagents, so an agent cannot escape its tier by delegating. Dispatch mode follows from the tier, because `claude --bg` refuses `--print`: a writing tier can run detached and report by posting a bus envelope, while a read-only tier has no `Write` tool to post one with and must run in the foreground where its structured output can be read.
 
 Greenfield setup never installs dependencies, initializes Git, scaffolds application code, or invokes an implementation delegate. `context-only` produces durable briefs; `ready-to-build` additionally produces a first reviewed contract for a later explicit execution turn.
+
+## Repository shape
+
+The audit reads a `shape_signals` block the inspector fills in during the walk it already
+performs: directory depth, per-directory fan-out, oversized source files, and which source
+directories no test path names. Nothing is opened to produce it - paths and `stat` sizes
+only, and a symlinked path contributes its position without its size, so the measurement
+cannot follow a link out of the scan root.
+
+The block ships its own thresholds rather than applying them silently, because they are
+conventions a repository is entitled to disagree with, and an auditor quoting a finding
+needs the line that was crossed. Test proximity is reported as proximity: a directory
+counts as named by a test when any test path mentions its name, which makes a hit
+meaningless and a miss - nothing in the repository names this module - worth reporting.
+
+Shape is evidence, like every other thing found in a repository. The inspector measures;
+the reading belongs to the audit, and `references/repository-shape.md` is what it reads
+first.
 
 ## Generated project layer
 

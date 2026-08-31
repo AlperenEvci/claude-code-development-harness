@@ -146,7 +146,16 @@ five gaps. They are ordered by whether they change what the product *is*.
    **Trace fields on the bus envelope** — correlation id, duration, tokens. The hard
    part (typed, append-only, capped, schema'd) is done; these three turn a mailbox into
    an evidence base the eval loop can consume.
-5. **A repository-shape audit.** Pocock's claim is that codebase structure is the
+5. ~~**A repository-shape audit.**~~ **Closed in 1.6.0.** `inspect_project.py` emits
+   `shape_signals` - directory depth, per-directory fan-out, oversized source files, and
+   which source directories no test path names - measured from paths and `stat` sizes
+   during the walk it already performs, with its thresholds shipped alongside the
+   measurements. The audit skill reads `references/repository-shape.md` before reporting
+   any of it. What remains: the signals inform the audit and nothing else. Setup does not
+   use shape to argue for a tier, and no signal is checked over time, so drift in a
+   repository's structure is invisible between audits. The original diagnosis follows.
+
+   **A repository-shape audit.** Pocock's claim is that codebase structure is the
    single biggest lever on agent output quality. `audit` checks the harness, not
    whether the repository is shaped for agents. The inspector already has the reach.
 

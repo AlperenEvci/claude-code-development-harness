@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.6.0 - 2026-08-31
+
+### Added - repository shape in the scan
+
+`audit` checked the harness. It never checked the repository the harness was installed
+into, which leaves out the one thing nothing downstream compensates for: if every edit
+starts with guessing where the code lives, a more precise contract makes that guessing
+better-informed and no cheaper.
+
+`inspect_project.py` now emits a `shape_signals` block, measured during the walk it
+already performs:
+
+- **Directory depth.** `apps/web/src/features/billing/retry.ts` sits at depth 5, so the
+  default threshold of 6 is already generous. Past it an agent is reconstructing a path it
+  cannot cheaply list.
+- **Directory fan-out.** Beyond about forty files a listing stops being readable at a
+  glance and a grep into the directory returns a haystack rather than an answer.
+- **Oversized source files.** A 100 KB file must be read whole to be edited safely, which
+  spends a sizable share of the context budget before any thinking starts.
+- **Test proximity.** Which source directories no test path anywhere in the repository so
+  much as names.
+
+The thresholds ship inside the block alongside the measurements rather than being applied
+silently. They are conventions, a repository is entitled to disagree with them, and an
+auditor quoting a finding needs the line that was crossed rather than the word "too".
+
+### Proximity is not coverage, and the asymmetry is the point
+
+A directory counts as named by a test when any test path mentions its name, so
+`tests/billing/test_retry.py`, `src/billing/__tests__/retry.ts`, and
+`src/billing/retry.test.ts` all name `billing`. That is generous on purpose, which makes
+the two directions unequal: a hit proves nothing, because a directory called `utils`
+matches almost any repository, while a miss is a real signal - whatever else is true, an
+agent changing code there has nothing to run.
+
+`test_named_directory_ratio` is therefore reported as proximity and the audit skill is
+told, in those words, never to quote it as coverage.
+
+### Nothing is opened to measure it
+
+Paths and `stat` sizes only. A symlinked path contributes its position in the tree without
+its size, because `stat` would follow it out of the scan root; secret-bearing files leave
+the walk before anything classifies them, and a test plants a `.env.test` - whose name
+matches a test marker - to prove the skip is a boundary rather than a convenience.
+
+### Changed
+
+- The 12,000-file walk limit becomes `SCAN_FILE_LIMIT`, and `shape_signals.capped` says
+  when the tree was measured on a prefix rather than implying the walk saw all of it. A
+  test asserts the iterator's default and the flag read the same constant, because two
+  numbers would drift and `capped` would then be quietly wrong.
+- `references/repository-shape.md` is new: what each field means, why these three
+  thresholds, and how to report shape without proposing a refactor nobody asked for.
+
+### Tests
+
+Eighteen new tests, 154 to 172. Thirteen planted defects - an off-by-one in depth, a
+fan-out boundary drifting to `>=`, an unreadable size counted as large, a heuristic that
+stops splitting on separators, a capped walk claiming it saw everything - are each caught.
+
 ## 1.5.0 - 2026-08-31
 
 ### Added - a trace on the bus envelope

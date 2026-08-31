@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import inspect
+import io
 import json
 import os
 import re
@@ -70,6 +73,7 @@ AGENTGEN = load_script("harness_agentgen.py", "harness_agentgen_under_test")
 CHECKPOINT = load_script("harness_checkpoint.py", "harness_checkpoint_under_test")
 RENDERER = load_script("render_harness.py", "render_harness_under_test")
 PROGRESS = load_script("harness_progress.py", "harness_progress_under_test")
+INSPECTOR = load_script("inspect_project.py", "inspect_project_under_test")
 BASH = VALIDATOR.find_bash()
 
 
@@ -3227,3 +3231,205 @@ class TraceDocumentationTests(unittest.TestCase):
                 any("launcher-reported" in error for error in errors),
                 f"the validator did not flag the missing provenance: {errors}",
             )
+
+
+class ShapeSignalTests(unittest.TestCase):
+    """Structure is the lever a harness describes and cannot fix."""
+
+    def signals(self, sources, tests=(), capped=False):
+        return INSPECTOR.shape_signals(list(sources), list(tests), capped)
+
+    def test_a_flat_small_tree_trips_nothing(self) -> None:
+        result = self.signals(
+            [("src/index.ts", 900), ("src/retry.ts", 1200)],
+            ["src/retry.test.ts"],
+        )
+        self.assertEqual(result["deep_directories"], [])
+        self.assertEqual(result["crowded_directories"], [])
+        self.assertEqual(result["large_files"], [])
+        self.assertEqual(result["source_file_count"], 2)
+        self.assertEqual(result["source_directory_count"], 1)
+
+    def test_depth_is_counted_in_segments_below_the_root(self) -> None:
+        deep = "a/b/c/d/e/f/g/deep.py"
+        result = self.signals([("shallow.py", 10), (deep, 10)])
+        self.assertEqual(result["max_directory_depth"], 7)
+        self.assertEqual(
+            result["deep_directories"], [{"path": "a/b/c/d/e/f/g", "depth": 7}]
+        )
+        # A file at the root has depth 0 and is not a finding.
+        self.assertNotIn(".", [item["path"] for item in result["deep_directories"]])
+
+    def test_a_crowded_directory_is_reported_with_its_count(self) -> None:
+        crowded = [(f"src/widgets/w{index}.ts", 10) for index in range(60)]
+        result = self.signals(crowded + [("src/index.ts", 10)])
+        self.assertEqual(
+            result["crowded_directories"], [{"path": "src/widgets", "files": 60}]
+        )
+
+    def test_the_fan_out_threshold_is_a_boundary_not_a_range(self) -> None:
+        limit = INSPECTOR.MAX_HEALTHY_FAN_OUT
+        at = [(f"src/a/f{index}.ts", 10) for index in range(limit)]
+        self.assertEqual(self.signals(at)["crowded_directories"], [])
+        over = at + [("src/a/one-more.ts", 10)]
+        self.assertEqual(len(self.signals(over)["crowded_directories"]), 1)
+
+    def test_large_files_are_listed_biggest_first(self) -> None:
+        big = INSPECTOR.LARGE_FILE_BYTES
+        result = self.signals(
+            [("src/small.ts", 10), ("src/big.ts", big + 1), ("src/huge.ts", big * 3)]
+        )
+        self.assertEqual(
+            [item["path"] for item in result["large_files"]],
+            ["src/huge.ts", "src/big.ts"],
+        )
+
+    def test_a_file_with_no_readable_size_is_not_called_large(self) -> None:
+        """A symlink contributes its path without its size, and None is not big."""
+        result = self.signals([("src/linked.ts", None)])
+        self.assertEqual(result["large_files"], [])
+        self.assertEqual(result["source_file_count"], 1)
+
+    def test_a_directory_no_test_names_is_reported(self) -> None:
+        result = self.signals(
+            [("src/billing/retry.ts", 10), ("src/telemetry/emit.ts", 10)],
+            ["tests/billing/test_retry.py"],
+        )
+        self.assertEqual(result["directories_no_test_names"], ["src/telemetry"])
+        self.assertEqual(result["test_named_directory_ratio"], 0.5)
+
+    def test_the_test_naming_heuristic_is_deliberately_generous(self) -> None:
+        """A hit proves nothing; only the miss is a signal, so hits stay cheap."""
+        for path in (
+            "tests/billing/test_retry.py",
+            "src/billing/__tests__/retry.ts",
+            "src/billing/retry.test.ts",
+            "e2e/billing-checkout.spec.ts",
+        ):
+            with self.subTest(path=path):
+                result = self.signals([("src/billing/retry.ts", 10)], [path])
+                self.assertEqual(result["directories_no_test_names"], [])
+
+    def test_a_repository_with_no_tests_names_no_directory(self) -> None:
+        result = self.signals([("src/billing/retry.ts", 10)], [])
+        self.assertEqual(result["directories_no_test_names"], ["src/billing"])
+        self.assertEqual(result["test_named_directory_ratio"], 0.0)
+
+    def test_an_empty_tree_does_not_divide_by_zero(self) -> None:
+        result = self.signals([])
+        self.assertEqual(result["source_directory_count"], 0)
+        self.assertEqual(result["test_named_directory_ratio"], 0.0)
+        self.assertEqual(result["max_directory_depth"], 0)
+
+    def test_the_thresholds_ship_with_the_measurement(self) -> None:
+        """A number without the line it crossed is not a finding an auditor can quote."""
+        thresholds = self.signals([])["thresholds"]
+        self.assertEqual(thresholds["max_healthy_depth"], INSPECTOR.MAX_HEALTHY_DEPTH)
+        self.assertEqual(thresholds["max_healthy_fan_out"], INSPECTOR.MAX_HEALTHY_FAN_OUT)
+        self.assertEqual(thresholds["large_file_bytes"], INSPECTOR.LARGE_FILE_BYTES)
+
+    def test_a_capped_walk_says_so(self) -> None:
+        self.assertFalse(self.signals([])["capped"])
+        self.assertTrue(self.signals([], capped=True)["capped"])
+
+
+class ShapeScanTests(unittest.TestCase):
+    """The signals as the audit skill actually receives them."""
+
+    def scan(self, project: Path, data: Path) -> dict:
+        result = run(
+            PYTHON, str(SCRIPTS / "inspect_project.py"),
+            "--root", str(project), "--data-root", str(data),
+        )
+        return json.loads(result.stdout)
+
+    def test_the_scan_carries_shape_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            project = temp_path / "project"
+            (project / "src" / "billing").mkdir(parents=True)
+            (project / "tests").mkdir()
+            write_lf(project / "src" / "billing" / "retry.ts", "export const a = 1;")
+            write_lf(project / "src" / "billing" / "big.ts",
+                     "// " + "x" * (INSPECTOR.LARGE_FILE_BYTES + 10))
+            write_lf(project / "tests" / "retry.test.ts", "// test")
+
+            signals = self.scan(project, temp_path / "data")["shape_signals"]
+            self.assertEqual(signals["source_file_count"], 2)
+            self.assertEqual(signals["test_file_count"], 1)
+            self.assertEqual(
+                [item["path"] for item in signals["large_files"]],
+                ["src/billing/big.ts"],
+            )
+            self.assertFalse(signals["capped"])
+
+    def test_a_secret_file_leaves_the_walk_before_anything_classifies_it(self) -> None:
+        """The skip is a boundary, not a convenience.
+
+        `.env.test` is the case that proves it: its name matches a test marker, so
+        a walk that keeps going past a secret would file a secret-bearing path
+        under `test_markers` as well. Both fields are name-only, but a boundary
+        that holds in one place and not the other is not a boundary.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            project = temp_path / "project"
+            (project / "config").mkdir(parents=True)
+            marker = "SHAPE_MUST_NOT_SEE_THIS"
+            write_lf(project / "config" / ".env.test", f"TOKEN={marker}")
+            write_lf(project / "config" / "app.py", "value = 1")
+
+            result = run(
+                PYTHON, str(SCRIPTS / "inspect_project.py"),
+                "--root", str(project), "--data-root", str(temp_path / "data"),
+            )
+            self.assertNotIn(marker, result.stdout)
+            scan = json.loads(result.stdout)
+            self.assertIn("config/.env.test", scan["secret_file_names_only"])
+            self.assertEqual(scan["test_markers"], [])
+            self.assertFalse(scan["tests_detected"])
+            self.assertEqual(scan["shape_signals"]["source_file_count"], 1)
+
+    def test_the_walk_stops_at_its_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for index in range(5):
+                write_lf(project / f"f{index}.py", "value = 1")
+            self.assertEqual(len(list(INSPECTOR.iter_project_files(project, limit=2))), 2)
+
+    def test_the_iterator_and_the_capped_flag_share_one_limit(self) -> None:
+        """Two numbers would drift, and `capped` would then be quietly wrong."""
+        default = inspect.signature(INSPECTOR.iter_project_files).parameters["limit"]
+        self.assertEqual(default.default, INSPECTOR.SCAN_FILE_LIMIT)
+
+    def test_a_walk_that_reaches_the_limit_reports_capped(self) -> None:
+        """The unit test can pass `capped` in; only this proves what sets it."""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            project = temp_path / "project"
+            project.mkdir()
+            for index in range(3):
+                write_lf(project / f"f{index}.py", "value = 1")
+
+            argv = [
+                "inspect_project.py", "--root", str(project),
+                "--data-root", str(temp_path / "data"),
+            ]
+            buffer = io.StringIO()
+            with mock.patch.object(INSPECTOR, "SCAN_FILE_LIMIT", 2), \
+                    mock.patch.object(sys, "argv", argv), \
+                    contextlib.redirect_stdout(buffer):
+                INSPECTOR.main()
+            self.assertTrue(json.loads(buffer.getvalue())["shape_signals"]["capped"])
+
+    def test_the_audit_skill_tells_the_reader_how_to_read_the_signals(self) -> None:
+        """A block of numbers with no reading instruction gets read as a verdict."""
+        skill = (PLUGIN / "skills/audit/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("shape_signals", skill)
+        self.assertIn("references/repository-shape.md", skill)
+        # Proximity read as coverage is the one misreading that would matter.
+        self.assertIn("never", skill.lower().split("test_named_directory_ratio")[1][:120])
+
+        reference = (PLUGIN / "references/repository-shape.md").read_text(encoding="utf-8")
+        self.assertIn("No file is opened", reference)
+        self.assertIn("not coverage", reference.lower())
