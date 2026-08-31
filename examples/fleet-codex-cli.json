@@ -48,7 +48,22 @@
   ],
   "scoped_rules": [],
   "additional_skills": [],
-  "additional_agents": [],
+  "additional_agents": [
+    {
+      "name": "ui-package-implementer",
+      "capability": "implementer",
+      "approved_by_operator": true,
+      "writable_paths": ["packages/ui/src/**", "packages/ui/test/**"],
+      "description": "Implement an accepted contract inside the shared design system package",
+      "model": "inherit",
+      "max_turns": 40,
+      "instructions": [
+        "Work only from the accepted spec in .ai/specs/current-task.md.",
+        "Stay inside packages/ui. A change needed elsewhere is a finding, not a task.",
+        "Run the package's own checks before reporting completion."
+      ]
+    }
+  ],
   "graphs": [
     {
       "name": "cross-package-change",

@@ -19,13 +19,34 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
+    CAPABILITY_TIERS,
+    EDIT_ACCEPTING_MODES,
+)
+
+#: Kept in step with render_harness.SESSION_TOOL_SCRIPTS by a test, rather than
+#: imported: the validator must not depend on the renderer it validates.
+SESSION_TOOL_SCRIPTS = (
+    "harness_capabilities.py",
+    "harness_bus.py",
+    "harness_session.py",
+    "harness_agentgen.py",
+)
+
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 FENCED_BLOCK = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
 GENERATION_MARKER = ".development-harness-generated.json"
 ALLOWED_CEILING_ACTIONS = {"compact", "checkpoint-and-handoff", "stop-and-ask"}
+# Flags that hand an agent authority nothing else in the harness can take back.
+# Ordered longest first so an occurrence is reported as the specific flag it is:
+# `--dangerously-skip-permissions` is a substring of the `--allow-` form, and
+# matching the short one first would report the wrong flag.
 FORBIDDEN_CODEX_DEFAULTS = (
     "--dangerously-bypass-approvals-and-sandbox",
+    "--allow-dangerously-skip-permissions",
     "--dangerously-skip-permissions",
     "--skip-git-repo-check",
     "danger-full-access",
@@ -196,6 +217,216 @@ def find_bash() -> str | None:
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+def frontmatter_list(text: str, key: str) -> list[str] | None:
+    """Return a YAML block-sequence frontmatter value, or None when absent."""
+    match = re.search(
+        rf"^{re.escape(key)}:[ \t]*\n((?:[ \t]*-[ \t]*\S+[ \t]*\n)+)",
+        text,
+        re.MULTILINE,
+    )
+    if match is None:
+        return None
+    return [line.strip().lstrip("-").strip() for line in match.group(1).splitlines()]
+
+
+def check_declared_tier(rel: str, text: str, errors: list[str]) -> str | None:
+    """Verify an agent file grants exactly what the tier it names allows.
+
+    Applies to every agent in the payload, not only the ones the profile
+    declares, so the core harness agents and any hand-added file are held to the
+    same boundary. Returns the capability it found, or None.
+    """
+    match = re.search(r"^capability:[ \t]*(\S+)[ \t]*$", text, re.MULTILINE)
+    if match is None:
+        return None
+
+    capability = match.group(1).strip().strip("\"'")
+    tier = CAPABILITY_TIERS.get(capability)
+    if tier is None:
+        errors.append(f"agent declares unknown capability {capability!r}: {rel}")
+        return None
+
+    # Compare the whole list, not a prefix: a substring match would accept an
+    # agent that kept the tier's tools and appended Write to them.
+    if frontmatter_list(text, "tools") != tier["tools"]:
+        errors.append(f"agent tools do not match its {capability} tier: {rel}")
+
+    if (frontmatter_list(text, "disallowedTools") or []) != tier["disallowed"]:
+        errors.append(
+            f"agent does not deny the tools its {capability} tier forbids: {rel}"
+        )
+
+    if f"permissionMode: {tier['permission_mode']}" not in text:
+        errors.append(
+            f"agent permission mode does not match its {capability} tier: {rel}"
+        )
+
+    if not tier["writes"]:
+        # A non-writing tier that somehow acquired an edit-accepting mode is the
+        # exact escalation this check exists for.
+        for mode in EDIT_ACCEPTING_MODES:
+            if f"permissionMode: {mode}" in text:
+                errors.append(f"{capability} agent uses permission mode {mode}: {rel}")
+
+    return capability
+
+
+def check_permission_bypass(payload: Path, errors: list[str]) -> None:
+    """No generated file may put a permission-bypass flag in a runnable block.
+
+    This used to run only over skills. The harness now generates runnable blocks
+    in CLAUDE.md and in every agent file, so a bypass flag in a session launch
+    line would have shipped unexamined. Prose is still exempt: a documented
+    prohibition is not an unsafe default, which is why only executable fences
+    are read.
+    """
+    for path in sorted(payload.rglob("*.md")):
+        rel = path.relative_to(payload).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        executable_text = "\n".join(executable_code_blocks(text))
+        for token in FORBIDDEN_CODEX_DEFAULTS:
+            if token in executable_text:
+                errors.append(
+                    f"unsafe Codex default token in executable block {rel}: {token}"
+                )
+                break
+
+
+def check_session_tools(
+    profile: dict[str, Any], payload: Path, errors: list[str]
+) -> None:
+    """The session tooling must be installed, unmodified, and documented.
+
+    Byte-identity matters more than presence. These scripts are copied rather
+    than templated precisely so the installed copy is the one the plugin's suite
+    tested; a drifted copy would be an untested variant enforcing capability
+    tiers in someone else's repository.
+    """
+    tier = str(profile.get("harness_tier", ""))
+    expected = tier in {"standard", "fleet"}
+    tool_dir = payload / "scripts" / "ai-harness"
+    source_dir = Path(__file__).resolve().parent
+
+    if not expected:
+        for name in SESSION_TOOL_SCRIPTS:
+            if (tool_dir / name).exists():
+                errors.append(
+                    f"{tier} installs no session tooling but "
+                    f"scripts/ai-harness/{name} is present"
+                )
+        return
+
+    for name in SESSION_TOOL_SCRIPTS:
+        target = tool_dir / name
+        if not target.is_file():
+            errors.append(f"session tooling missing: scripts/ai-harness/{name}")
+            continue
+        source = source_dir / name
+        if source.is_file() and sha256(source) != sha256(target):
+            errors.append(
+                f"scripts/ai-harness/{name} differs from the plugin script it is "
+                "copied from"
+            )
+
+    claude_md = payload / "CLAUDE.md"
+    if claude_md.is_file():
+        text = claude_md.read_text(encoding="utf-8")
+        if "## Agent sessions" not in text:
+            errors.append("CLAUDE.md is missing the `## Agent sessions` section")
+        if "harness_session.py sweep" not in text:
+            # A background session outlives its invoker. A harness that never
+            # states the teardown step leaves orphans by default.
+            errors.append("CLAUDE.md does not document the session teardown sweep")
+
+
+def check_read_only_agents_are_not_detached(payload: Path, errors: list[str]) -> None:
+    """A read-only agent must never be documented as a background session.
+
+    `--bg` refuses `--print`, so a detached session has no structured result and
+    can only report by writing a bus envelope - which a tier without `Write`
+    cannot do. Telling a reader to launch detached documents a session whose
+    output is unreachable.
+    """
+    agents_dir = payload / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return
+    for path in sorted(agents_dir.rglob("*.md")):
+        rel = path.relative_to(payload).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        capability = None
+        match = re.search(r"^capability:\s*(\S+)\s*$", text, re.MULTILINE)
+        if match:
+            capability = match.group(1).strip()
+        if capability not in CAPABILITY_TIERS:
+            continue
+        if CAPABILITY_TIERS[capability]["writes"]:
+            continue
+        if "claude --bg" in text:
+            errors.append(
+                f"{rel} is a {capability} and cannot report from a background "
+                "session, but documents `claude --bg`"
+            )
+
+
+def check_agent_capabilities(
+    profile: dict[str, Any], payload: Path, errors: list[str]
+) -> None:
+    """Re-derive each generated agent's authority from its rendered file.
+
+    Compensating control 3 from decision 0001. This replaces the v0.2 blanket
+    "every generated agent is read-only" check: the tier is now what is asserted,
+    so a staging package cannot be edited to widen an agent past its declared
+    tier, and it cannot silently drop to a weaker one either.
+    """
+    for item in profile.get("additional_agents", []):
+        if not isinstance(item, dict):
+            continue
+        name = component_name(item.get("name"))
+        rel = f".claude/agents/{name}.md"
+        path = payload / rel
+        if not path.is_file():
+            continue
+
+        capability = str(item.get("capability", "reader")).strip().lower() or "reader"
+        tier = CAPABILITY_TIERS.get(capability)
+        if tier is None:
+            errors.append(f"unknown capability tier {capability!r}: {rel}")
+            continue
+
+        text = path.read_text(encoding="utf-8")
+
+        # What the tier grants is checked for every agent file as it is walked
+        # above. What remains here is profile-specific: the file must name the
+        # tier the profile assigned it, and an implementer must carry its scope.
+        declared = re.search(r"^capability:[ \t]*(\S+)[ \t]*$", text, re.MULTILINE)
+        if declared is None or declared.group(1).strip().strip("\"'") != capability:
+            errors.append(
+                f"agent frontmatter does not record capability {capability!r}: {rel}"
+            )
+
+        if not tier["writes"]:
+            continue
+
+        scope = item.get("writable_paths") or []
+        if not scope:
+            errors.append(f"implementer agent declares no writable scope: {rel}")
+        for entry in scope:
+            if f"`{entry}`" not in text:
+                errors.append(
+                    f"implementer agent omits declared writable path {entry!r}: {rel}"
+                )
+        if item.get("approved_by_operator") is not True:
+            errors.append(
+                f"implementer agent lacks recorded operator approval: {rel}"
+            )
 
 
 def check_line_endings(package: Path, errors: list[str]) -> None:
@@ -588,10 +819,6 @@ def main() -> None:
                 errors.append(f"duplicate Claude component name {name!r}: {component_names[name]} and {rel}")
             elif name:
                 component_names[name] = rel
-            executable_text = "\n".join(executable_code_blocks(text))
-            for token in FORBIDDEN_CODEX_DEFAULTS:
-                if token in executable_text:
-                    errors.append(f"unsafe Codex default token in executable block {rel}: {token}")
 
         if rel.startswith(".claude/agents/") and rel.endswith(".md"):
             fm = frontmatter(text)
@@ -611,6 +838,7 @@ def main() -> None:
                 component_names[name] = rel
             if fm.get("permissionMode") == "bypassPermissions":
                 errors.append(f"agent defaults to bypassPermissions: {rel}")
+            check_declared_tier(rel, text, errors)
 
         if rel.startswith(".claude/rules/") and rel.endswith(".md"):
             fm = frontmatter(text)
@@ -634,22 +862,7 @@ def main() -> None:
         if item.get("manual_only", True) and fm.get("disable-model-invocation") is not True:
             errors.append(f"manual generated project skill is model-invocable: {rel}")
 
-    for item in profile.get("additional_agents", []):
-        if not isinstance(item, dict):
-            continue
-        name = component_name(item.get("name"))
-        rel = f".claude/agents/{name}.md"
-        path = payload / rel
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8")
-        required_fragments = (
-            "tools:\n  - Read\n  - Grep\n  - Glob",
-            "disallowedTools:\n  - Write\n  - Edit\n  - Bash",
-            "permissionMode: plan",
-        )
-        if any(fragment not in text for fragment in required_fragments):
-            errors.append(f"generated domain agent is not read-only: {rel}")
+    check_agent_capabilities(profile, payload, errors)
 
     codex_rel = ".claude/skills/harness-codex-delegate/SKILL.md"
     codex_path = payload / codex_rel
@@ -690,6 +903,9 @@ def main() -> None:
 
     check_context_policy(profile, payload, errors, warnings)
     check_workflows(profile, payload, errors, warnings)
+    check_permission_bypass(payload, errors)
+    check_session_tools(profile, payload, errors)
+    check_read_only_agents_are_not_detached(payload, errors)
 
     for rel in ("AGENTS.md", "CLAUDE.md"):
         path = payload / rel

@@ -50,6 +50,7 @@ Read:
 - `${CLAUDE_PLUGIN_ROOT}/references/design-principles.md`
 - `${CLAUDE_PLUGIN_ROOT}/references/harness-tiers.md`
 - `${CLAUDE_PLUGIN_ROOT}/references/output-contract.md`
+- `${CLAUDE_PLUGIN_ROOT}/references/agent-sessions.md` (when the harness installs session tooling)
 
 ## Evaluate
 

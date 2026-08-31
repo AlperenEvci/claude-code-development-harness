@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -32,17 +33,27 @@ def run(*args: str, cwd: Path | None = None, check: bool = True) -> subprocess.C
     )
 
 
-def load_validator():
-    """Import validate_harness.py directly so tests can call its helpers."""
-    spec = importlib.util.spec_from_file_location(
-        "validate_harness_under_test", SCRIPTS / "validate_harness.py"
-    )
+def load_script(name: str, alias: str):
+    """Import a plugin script directly so tests can call its helpers."""
+    spec = importlib.util.spec_from_file_location(alias, SCRIPTS / name)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
+def load_validator():
+    return load_script("validate_harness.py", "validate_harness_under_test")
+
+
 VALIDATOR = load_validator()
+
+# Asserting against the shared tier table rather than a copy of its strings. A
+# test that hardcodes the flags passes just as happily when the table and the
+# renderer drift apart, which is the failure the table exists to prevent.
+CAPABILITIES = load_script("harness_capabilities.py", "harness_capabilities_under_test")
+BUS = load_script("harness_bus.py", "harness_bus_under_test")
+SESSION = load_script("harness_session.py", "harness_session_under_test")
+AGENTGEN = load_script("harness_agentgen.py", "harness_agentgen_under_test")
 BASH = VALIDATOR.find_bash()
 
 
@@ -660,9 +671,11 @@ class RendererTests(unittest.TestCase):
             agent = payload / ".claude/agents/harness-billing-researcher.md"
             self.assertTrue(agent.is_file())
             agent_text = agent.read_text()
+            # An agent that names no tier is a reader, exactly as before 1.0.
+            self.assertIn("capability: reader", agent_text)
             self.assertIn("permissionMode: plan", agent_text)
             self.assertIn('model: "inherit"', agent_text)
-            self.assertIn("  - Bash", agent_text)
+            self.assertIn("disallowedTools:\n  - Write\n  - Edit\n  - Bash", agent_text)
             skill_text = (payload / ".claude/skills/harness-release-readiness/SKILL.md").read_text()
             self.assertIn("disable-model-invocation: true", skill_text)
             self.assertNotIn("allowed-tools:", skill_text)
@@ -671,6 +684,14 @@ class RendererTests(unittest.TestCase):
             self.assertNotIn("$(cat", delegate)
 
     def test_custom_components_cannot_preapprove_tools_or_override_agent_security(self) -> None:
+        """Authority comes from a declared tier, never from a raw frontmatter override.
+
+        Capability tiers replaced the blanket read-only rule, so this no longer
+        asserts that agents can never write. It asserts the narrower and still
+        essential property: a profile cannot hand itself tools, a permission
+        mode, or an isolation setting directly, and it cannot reach the writing
+        tier without a declared scope and a recorded operator approval.
+        """
         with tempfile.TemporaryDirectory() as temp:
             temp_path = Path(temp)
             cases = []
@@ -686,16 +707,52 @@ class RendererTests(unittest.TestCase):
             ]
             cases.append((skill_profile, "may not pre-approve tools"))
 
-            agent_profile = profile("standard")
-            agent_profile["additional_agents"] = [
-                {
-                    "name": "unsafe-agent",
-                    "description": "Unsafe test",
-                    "tools": ["Read", "Bash"],
-                    "instructions": ["Investigate."],
-                }
-            ]
-            cases.append((agent_profile, "may not override security fields"))
+            def agent_case(agent: dict) -> dict:
+                data = profile("standard")
+                data["additional_agents"] = [
+                    {"description": "Unsafe test", "instructions": ["Investigate."], **agent}
+                ]
+                return data
+
+            cases.append((
+                agent_case({"name": "raw-tools", "tools": ["Read", "Bash"]}),
+                "may not override security fields",
+            ))
+            cases.append((
+                agent_case({"name": "raw-mode", "permission_mode": "acceptEdits"}),
+                "may not override security fields",
+            ))
+            cases.append((
+                agent_case({"name": "raw-isolation", "isolation": "worktree"}),
+                "may not override security fields",
+            ))
+            cases.append((
+                agent_case({"name": "made-up-tier", "capability": "admin"}),
+                "capability must be one of",
+            ))
+            # An implementer with no declared scope would inherit the repository.
+            cases.append((
+                agent_case({
+                    "name": "unscoped-writer",
+                    "capability": "implementer",
+                    "approved_by_operator": True,
+                }),
+                "must declare a non-empty writable_paths scope",
+            ))
+            # Write authority is an operator decision, not a profile default.
+            cases.append((
+                agent_case({
+                    "name": "unapproved-writer",
+                    "capability": "implementer",
+                    "writable_paths": ["src/**"],
+                }),
+                "requires approved_by_operator: true",
+            ))
+            # A reader that declares a writable scope is a contradiction.
+            cases.append((
+                agent_case({"name": "confused-reader", "writable_paths": ["src/**"]}),
+                "only valid for an implementer",
+            ))
 
             for index, (case, expected) in enumerate(cases):
                 config = temp_path / f"unsafe-{index}.json"
@@ -1125,6 +1182,198 @@ class GraphTests(unittest.TestCase):
             self.assertIn("has no generated workflow script", result.stderr)
 
 
+TIER_AGENTS = [
+    {
+        "name": "billing-researcher",
+        "description": "Map billing behavior without editing",
+        "instructions": ["Return evidence and unresolved billing risks."],
+    },
+    {
+        "name": "gate-runner",
+        "capability": "verifier",
+        "description": "Run the configured gates and report findings",
+        "instructions": ["Run the full gate and report every failure with output."],
+    },
+    {
+        "name": "migration-writer",
+        "capability": "implementer",
+        "approved_by_operator": True,
+        "writable_paths": ["src/db/migrations/**", "src/db/schema.ts"],
+        "description": "Write database migrations against an accepted spec",
+        "instructions": ["Implement the migration exactly as the spec describes."],
+    },
+]
+
+
+class CapabilityTierTests(unittest.TestCase):
+    """A tier is what the file declares, what it grants, and what launches it."""
+
+    def render_tiers(self, temp_path: Path) -> Path:
+        data = profile("standard")
+        data["additional_agents"] = TIER_AGENTS
+        config = temp_path / "tiers.json"
+        output = temp_path / "tiers-output"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output
+
+    def agent_text(self, output: Path, name: str) -> str:
+        return (output / "payload/.claude/agents" / f"harness-{name}.md").read_text()
+
+    def test_each_tier_renders_its_own_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_tiers(Path(temp))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+
+            reader = self.agent_text(output, "billing-researcher")
+            self.assertIn("capability: reader", reader)
+            self.assertIn("tools:\n  - Read\n  - Grep\n  - Glob\n", reader)
+            self.assertIn("disallowedTools:\n  - Write\n  - Edit\n  - Bash", reader)
+            self.assertIn("permissionMode: plan", reader)
+
+            verifier = self.agent_text(output, "gate-runner")
+            self.assertIn("capability: verifier", verifier)
+            # A verifier runs gates, so it gets Bash but still never writes.
+            self.assertIn("tools:\n  - Read\n  - Grep\n  - Glob\n  - Bash", verifier)
+            self.assertIn("disallowedTools:\n  - Write\n  - Edit", verifier)
+            self.assertIn("permissionMode: plan", verifier)
+
+            implementer = self.agent_text(output, "migration-writer")
+            self.assertIn("capability: implementer", implementer)
+            self.assertIn("  - Write", implementer)
+            self.assertIn("permissionMode: acceptEdits", implementer)
+            self.assertIn("## Writable scope", implementer)
+            self.assertIn("`src/db/migrations/**`", implementer)
+            self.assertIn("`src/db/schema.ts`", implementer)
+
+    def test_every_agent_records_its_launch_flags(self) -> None:
+        """Decision 0002: the tier must be enforceable by the process, not just declared."""
+        expected = {
+            "billing-researcher": "reader",
+            "gate-runner": "verifier",
+            "migration-writer": "implementer",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_tiers(Path(temp))
+            for name, capability in expected.items():
+                text = self.agent_text(output, name)
+                self.assertIn("## Session launch", text)
+                # The whole command, not just the flags: the dispatch mode is part
+                # of the boundary, and it comes from the same shared table.
+                self.assertIn(CAPABILITIES.launch_command(capability), text)
+
+            # A read-only tier told to launch with `--bg` produces a session whose
+            # output is unreachable: `--bg` refuses `--print`, so there is no
+            # structured result, and the tier has no Write tool to post a bus
+            # envelope with. Measured, not assumed — see
+            # .ai/reports/0001-session-substrate-smoke-test.md.
+            for name in ("billing-researcher", "gate-runner", "codebase-researcher"):
+                text = self.agent_text(output, name)
+                self.assertNotIn(
+                    "claude --bg",
+                    text,
+                    f"{name} is read-only and must not be launched detached",
+                )
+
+            # The core agents carry a tier too, so an audit can read the catalog.
+            researcher = self.agent_text(output, "codebase-researcher")
+            reviewer = self.agent_text(output, "code-reviewer")
+            self.assertIn("capability: reader", researcher)
+            self.assertIn("capability: verifier", reviewer)
+            self.assertIn("## Session launch (verifier)", reviewer)
+
+    def test_validator_catches_an_agent_edited_past_its_tier(self) -> None:
+        """A staging package must not be editable into a wider authority."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_tiers(Path(temp))
+            reader = output / "payload/.claude/agents/harness-billing-researcher.md"
+            original = reader.read_text()
+
+            cases = [
+                (original.replace("permissionMode: plan", "permissionMode: acceptEdits"),
+                 "permission mode acceptEdits"),
+                (original.replace("tools:\n  - Read\n  - Grep\n  - Glob\n",
+                                  "tools:\n  - Read\n  - Grep\n  - Glob\n  - Write\n"),
+                 "tools do not match its reader tier"),
+                (original.replace("capability: reader\n", ""),
+                 "does not record capability 'reader'"),
+                (original.replace("disallowedTools:\n  - Write\n  - Edit\n  - Bash",
+                                  "disallowedTools:\n  - Write"),
+                 "does not deny the tools its reader tier forbids"),
+            ]
+            for text, expected in cases:
+                write_lf(reader, text)
+                result = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output),
+                             check=False)
+                self.assertNotEqual(result.returncode, 0, expected)
+                self.assertIn(expected, result.stderr)
+
+            write_lf(reader, original)
+
+    def test_installed_checker_rejects_a_read_only_tier_that_accepts_edits(self) -> None:
+        """The installed copy is the one that runs, and it can be edited afterwards."""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            output = self.render_tiers(temp_path)
+            target = temp_path / "target"
+            target.mkdir()
+            run_installer(
+                output / "install-harness.sh", "--target", str(target), "--apply-new-only"
+            )
+
+            agent = target / ".claude/agents/harness-billing-researcher.md"
+            write_lf(
+                agent,
+                agent.read_text().replace(
+                    "permissionMode: plan", "permissionMode: bypassPermissions"
+                ),
+            )
+            check = run(PYTHON, str(SCRIPTS / "check_installed.py"), "--root", str(target),
+                        check=False)
+            self.assertNotEqual(check.returncode, 0)
+            self.assertIn(
+                "reader agent carries permission mode bypassPermissions",
+                check.stdout + check.stderr,
+            )
+
+    def test_tier_check_covers_agents_the_profile_never_declared(self) -> None:
+        """Core and hand-added agents are held to the tier they name, too."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_tiers(Path(temp))
+            smuggled = output / "payload/.claude/agents/harness-smuggled.md"
+            write_lf(
+                smuggled,
+                "---\n"
+                "name: harness-smuggled\n"
+                "description: Claims to read, asks to write\n"
+                "capability: reader\n"
+                "tools:\n  - Read\n  - Grep\n  - Glob\n  - Write\n"
+                "disallowedTools:\n  - Write\n  - Edit\n  - Bash\n"
+                "permissionMode: plan\n"
+                "---\n\nBody.\n",
+            )
+            result = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output),
+                         check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "agent tools do not match its reader tier: .claude/agents/harness-smuggled.md",
+                result.stderr,
+            )
+
+    def test_implementer_requires_standard_or_fleet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            data = profile("lite")
+            data["additional_agents"] = [TIER_AGENTS[2]]
+            config = temp_path / "lite-implementer.json"
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            result = run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                         "--output", str(temp_path / "out"), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("additional_agents require standard or fleet tier", result.stderr)
+
+
 class PlatformIndependenceTests(unittest.TestCase):
     """Rendering and validation must not change with the operator's platform."""
 
@@ -1260,6 +1509,454 @@ class PlatformIndependenceTests(unittest.TestCase):
 
             self.assertEqual(errors, [])
             self.assertTrue(any("bash not found" in item for item in warnings), warnings)
+
+
+class BusTests(unittest.TestCase):
+    """A background session's only return channel has to be trustworthy."""
+
+    SESSION = "d9f54dcd-35af-4e3f-9cfa-5d332d7ff504"
+
+    def post(self, root, **kwargs):
+        defaults = {
+            "session_id": self.SESSION,
+            "sender": "harness-codebase-researcher",
+            "kind": "finding",
+            "summary": "Retry path swallows provider errors",
+            "body": {"where": "src/billing/retry.ts"},
+        }
+        defaults.update(kwargs)
+        envelope = BUS.build_envelope(**defaults)
+        return BUS.write_envelope(root, envelope)
+
+    def test_envelope_round_trips_and_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.post(root, capability="reader", evidence=["src/billing/retry.ts:88"])
+            found = BUS.read_envelopes(root)
+            self.assertEqual(len(found), 1)
+            path, data = found[0]
+            self.assertEqual(data["kind"], "finding")
+            self.assertEqual(data["capability"], "reader")
+            self.assertEqual(BUS.validate_envelope(data, path.name), [])
+
+    def test_a_session_id_that_is_not_a_uuid_is_refused(self) -> None:
+        """The id becomes a directory name, so it is validated, never sanitized."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for bad in ("../../etc", "not-a-uuid", "", "..", "a/b"):
+                with self.assertRaises(BUS.BusError):
+                    BUS.session_dir(root, bad)
+
+    def test_oversized_envelopes_are_refused(self) -> None:
+        """An envelope the orchestrator cannot afford to read is a failed handoff."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaises(BUS.BusError):
+                self.post(root, summary="x" * (BUS.MAX_SUMMARY_CHARS + 1))
+            with self.assertRaises(BUS.BusError):
+                self.post(root, body={"blob": "x" * (BUS.MAX_BODY_BYTES + 1)})
+            with self.assertRaises(BUS.BusError):
+                self.post(root, evidence=[f"f{i}.ts" for i in range(BUS.MAX_EVIDENCE_ITEMS + 1)])
+
+    def test_a_multiline_summary_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(BUS.BusError):
+                self.post(Path(temp), summary="first line" + chr(10) + "second line")
+
+    def test_posts_append_and_never_overwrite(self) -> None:
+        """The record of what an agent claimed outlives a tidy directory."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = self.post(root)
+            second = self.post(root, kind="result", summary="Gate green")
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.name.startswith("0001-"))
+            self.assertTrue(second.name.startswith("0002-"))
+            self.assertTrue(first.is_file())
+            self.assertEqual(len(BUS.read_envelopes(root)), 2)
+
+    def test_an_unknown_key_on_disk_is_rejected(self) -> None:
+        """An unrecognized field is how a directive would ride along unread."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = self.post(root)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["permissionMode"] = "bypassPermissions"
+            write_lf(path, json.dumps(data, indent=2))
+            errors = BUS.validate_envelope(data, path.name)
+            self.assertTrue(
+                any("unknown envelope keys" in item for item in errors), errors
+            )
+
+    def test_an_unknown_capability_claim_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(BUS.BusError):
+                self.post(Path(temp), capability="superuser")
+
+    def test_the_schema_describes_the_payload_the_cli_accepts(self) -> None:
+        """`--json-schema` output must be postable without reshaping."""
+        schema = BUS.envelope_schema()
+        self.assertEqual(schema["additionalProperties"], False)
+        self.assertEqual(sorted(schema["required"]), ["body", "kind", "summary"])
+        self.assertEqual(
+            sorted(schema["properties"]["kind"]["enum"]), sorted(BUS.ENVELOPE_KINDS)
+        )
+
+    def test_cli_posts_a_structured_output_payload_verbatim(self) -> None:
+        """The measured foreground path: schema output goes straight to the bus."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload = root / "payload.json"
+            write_lf(
+                payload,
+                json.dumps(
+                    {
+                        "kind": "result",
+                        "summary": "Gate green after the fix",
+                        "body": {"gate": "npm test", "status": "pass"},
+                        "evidence": ["package.json:12"],
+                    }
+                ),
+            )
+            result = run(
+                PYTHON,
+                str(SCRIPTS / "harness_bus.py"),
+                "post",
+                "--root", str(root),
+                "--session", self.SESSION,
+                "--from", "harness-code-reviewer",
+                "--capability", "verifier",
+                "--body-file", str(payload),
+            )
+            written = root / result.stdout.strip()
+            self.assertTrue(written.is_file())
+            data = json.loads(written.read_text(encoding="utf-8"))
+            self.assertEqual(data["kind"], "result")
+            self.assertEqual(data["summary"], "Gate green after the fix")
+            self.assertEqual(data["body"], {"gate": "npm test", "status": "pass"})
+
+
+class SessionLaunchTests(unittest.TestCase):
+    """A tier is only a boundary if the launch command carries it."""
+
+    def test_each_tier_launches_with_its_own_flags(self) -> None:
+        argv = SESSION.launch_argv("reader", "Map the retry path")
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
+        self.assertEqual(argv[-1], "Map the retry path")
+
+        argv = SESSION.launch_argv("verifier", "Run the gate")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Bash")
+
+    def test_a_read_only_tier_cannot_be_backgrounded(self) -> None:
+        """`--bg` refuses `--print`, and a reader has no Write to post an envelope."""
+        for capability in ("reader", "verifier"):
+            with self.assertRaises(SESSION.SessionError) as caught:
+                SESSION.launch_argv(capability, "task", background=True)
+            self.assertIn("background", str(caught.exception))
+
+    def test_an_implementer_needs_a_worktree_and_a_scope(self) -> None:
+        with self.assertRaises(SESSION.SessionError):
+            SESSION.launch_argv("implementer", "task", scope=["src"])
+        with self.assertRaises(SESSION.SessionError):
+            SESSION.launch_argv("implementer", "task", worktree="lane")
+
+        argv = SESSION.launch_argv(
+            "implementer",
+            "task",
+            worktree="ui-lane",
+            scope=["packages/ui/src", "packages/ui/test"],
+            background=True,
+        )
+        self.assertIn("--bg", argv)
+        self.assertEqual(argv[argv.index("--worktree") + 1], "ui-lane")
+        # --add-dir is repeatable; the tier table can only name it once.
+        self.assertEqual(argv.count("--add-dir"), 2)
+
+    def test_no_placeholder_survives_into_a_command(self) -> None:
+        """A command containing `<scope>` would be run as a literal directory."""
+        argv = SESSION.launch_argv(
+            "implementer", "task", worktree="lane", scope=["src"]
+        )
+        for placeholder in CAPABILITIES.LAUNCH_PLACEHOLDERS:
+            self.assertNotIn(placeholder, argv)
+
+    def test_an_unknown_tier_is_refused(self) -> None:
+        with self.assertRaises(SESSION.SessionError):
+            SESSION.launch_argv("superuser", "task")
+
+    def test_liveness_is_a_pid_not_a_state_string(self) -> None:
+        """A stopped session keeps its state string and loses its pid."""
+        self.assertTrue(SESSION.is_live({"pid": 1234, "state": "working"}))
+        self.assertFalse(SESSION.is_live({"state": "done"}))
+
+    def test_a_sweep_never_counts_the_session_running_it(self) -> None:
+        """Otherwise teardown stops itself first and abandons its siblings."""
+        entry = {"sessionId": "ABC-123", "pid": 4242}
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_CODE_SESSION_ID": "abc-123", "CLAUDE_PID": ""}
+        ):
+            self.assertTrue(SESSION.is_self(entry))
+            self.assertFalse(SESSION.is_self({"sessionId": "other", "pid": 1}))
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_CODE_SESSION_ID": "", "CLAUDE_PID": "4242"}
+        ):
+            self.assertTrue(SESSION.is_self(entry))
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_CODE_SESSION_ID": "", "CLAUDE_PID": ""}
+        ):
+            self.assertFalse(SESSION.is_self(entry))
+
+
+class AgentSynthesisTests(unittest.TestCase):
+    """A synthesized agent must never choose its own authority."""
+
+    NEED = {
+        "name": "retry-path-researcher",
+        "need": "Map how billing retries interact with the payment provider",
+        "duties": ["Trace the retry state machine"],
+    }
+
+    def test_tools_come_from_the_tier_not_from_the_need(self) -> None:
+        spec = AGENTGEN.normalize_need(dict(self.NEED))
+        definition = AGENTGEN.build_definition(spec)["retry-path-researcher"]
+        self.assertEqual(definition["tools"], ["Read", "Grep", "Glob"])
+
+    def test_a_need_may_not_name_its_own_authority(self) -> None:
+        for key, value in (
+            ("tools", ["Write"]),
+            ("permissionMode", "bypassPermissions"),
+            ("permission_mode", "acceptEdits"),
+            ("allowedTools", ["Bash"]),
+            ("disallowedTools", []),
+            ("isolation", "none"),
+        ):
+            need = dict(self.NEED)
+            need[key] = value
+            with self.assertRaises(AGENTGEN.AgentGenError) as caught:
+                AGENTGEN.normalize_need(need)
+            message = str(caught.exception)
+            self.assertIn(key, message)
+            # Not merely rejected as an unknown key. These are refused *because*
+            # they grant authority, and the message has to say so - otherwise the
+            # named refusal could be deleted and this test would not notice.
+            self.assertIn("Authority comes from the capability tier", message)
+
+    def test_an_unknown_key_is_refused_rather_than_ignored(self) -> None:
+        """Silently dropping a key is how a smuggled field goes unnoticed."""
+        need = dict(self.NEED)
+        need["escalate"] = True
+        with self.assertRaises(AGENTGEN.AgentGenError):
+            AGENTGEN.normalize_need(need)
+
+    def test_a_synthesized_implementer_passes_the_same_gate_as_a_declared_one(self) -> None:
+        base = dict(self.NEED)
+        base["capability"] = "implementer"
+
+        without_scope = dict(base, approved_by_operator=True)
+        with self.assertRaises(AGENTGEN.AgentGenError) as caught:
+            AGENTGEN.normalize_need(without_scope)
+        self.assertIn("writable_paths", str(caught.exception))
+
+        without_approval = dict(base, writable_paths=["packages/ui/src/**"])
+        with self.assertRaises(AGENTGEN.AgentGenError) as caught:
+            AGENTGEN.normalize_need(without_approval)
+        self.assertIn("approved_by_operator", str(caught.exception))
+
+        allowed = dict(
+            base, writable_paths=["packages/ui/src/**"], approved_by_operator=True
+        )
+        spec = AGENTGEN.normalize_need(allowed)
+        self.assertEqual(spec["capability"], "implementer")
+
+    def test_a_reader_may_not_declare_a_writable_scope(self) -> None:
+        need = dict(self.NEED, writable_paths=["src/**"])
+        with self.assertRaises(AGENTGEN.AgentGenError):
+            AGENTGEN.normalize_need(need)
+
+    def test_emit_writes_nothing_into_the_repository(self) -> None:
+        """Synthesis is ephemeral by default; promotion is a separate act."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = run(
+                PYTHON,
+                str(SCRIPTS / "harness_agentgen.py"),
+                "emit",
+                "--need-json", json.dumps(self.NEED),
+                cwd=root,
+            )
+            definition = json.loads(result.stdout)
+            self.assertIn("retry-path-researcher", definition)
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_promotion_is_dry_run_and_never_overwrites(self) -> None:
+        need = json.dumps(
+            dict(
+                self.NEED,
+                capability="implementer",
+                writable_paths=["packages/ui/src/**"],
+                approved_by_operator=True,
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / ".claude/agents/retry-path-researcher.md"
+
+            result = run(
+                PYTHON, str(SCRIPTS / "harness_agentgen.py"), "promote",
+                "--root", str(root), "--need-json", need,
+            )
+            self.assertIn("DRY RUN", result.stdout)
+            self.assertFalse(target.exists())
+
+            run(
+                PYTHON, str(SCRIPTS / "harness_agentgen.py"), "promote",
+                "--root", str(root), "--need-json", need, "--write",
+            )
+            self.assertTrue(target.is_file())
+
+            refused = run(
+                PYTHON, str(SCRIPTS / "harness_agentgen.py"), "promote",
+                "--root", str(root), "--need-json", need, "--write",
+                check=False,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("already exists", refused.stderr)
+
+    def test_a_promoted_agent_satisfies_the_validator_tier_check(self) -> None:
+        """A promoted agent is checked by the same rules as a generated one."""
+        spec = AGENTGEN.normalize_need(dict(self.NEED))
+        text = AGENTGEN.build_markdown(spec)
+        errors: list[str] = []
+        declared = VALIDATOR.check_declared_tier(
+            ".claude/agents/retry-path-researcher.md", text, errors
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(declared, "reader")
+
+
+class SessionToolingRenderTests(unittest.TestCase):
+    """The tooling must reach the repository intact, and only where it belongs."""
+
+    def render(self, temp_path: Path, tier: str) -> Path:
+        config = temp_path / "profile.json"
+        output = temp_path / f"generated-{tier}"
+        write_lf(config, json.dumps(profile(tier), indent=2) + chr(10))
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output
+
+    def test_standard_installs_the_tooling_byte_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            for name in VALIDATOR.SESSION_TOOL_SCRIPTS:
+                installed = output / "payload/scripts/ai-harness" / name
+                self.assertTrue(installed.is_file(), name)
+                self.assertEqual(
+                    installed.read_bytes(),
+                    (SCRIPTS / name).read_bytes(),
+                    f"{name} drifted from the plugin script it is copied from",
+                )
+
+    def test_lite_installs_no_session_tooling(self) -> None:
+        """Lite has no agents, so it gets nothing to manage them with."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "lite")
+            self.assertFalse((output / "payload/scripts/ai-harness").exists())
+
+    def test_claude_md_states_the_dispatch_split_and_the_teardown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            text = (output / "payload/CLAUDE.md").read_text(encoding="utf-8")
+            self.assertIn("## Agent sessions", text)
+            self.assertIn("harness_session.py sweep", text)
+            self.assertIn("claude agents --json --cwd .", text)
+            self.assertIn("--allow-dangerously-skip-permissions", text)
+
+    def test_the_validator_and_the_renderer_agree_on_the_tool_list(self) -> None:
+        """The validator deliberately keeps its own list; a test keeps them equal."""
+        renderer = load_script("render_harness.py", "render_harness_tool_list")
+        self.assertEqual(
+            tuple(renderer.SESSION_TOOL_SCRIPTS), tuple(VALIDATOR.SESSION_TOOL_SCRIPTS)
+        )
+
+    def test_tampered_tooling_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            payload = output / "payload"
+            write_lf(payload / "scripts/ai-harness/harness_session.py", "# tampered")
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(profile("standard"), payload, errors)
+            self.assertTrue(
+                any("differs from the plugin script" in item for item in errors), errors
+            )
+
+    def test_missing_tooling_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            payload = output / "payload"
+            (payload / "scripts/ai-harness/harness_bus.py").unlink()
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(profile("standard"), payload, errors)
+            self.assertTrue(
+                any("session tooling missing" in item for item in errors), errors
+            )
+
+    def test_a_lost_teardown_step_is_caught(self) -> None:
+        """Nothing fails when teardown is missing; agents just accumulate."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            payload = output / "payload"
+            claude_md = payload / "CLAUDE.md"
+            write_lf(
+                claude_md,
+                claude_md.read_text(encoding="utf-8").replace(
+                    "harness_session.py sweep", "harness_session.py list"
+                ),
+            )
+            errors: list[str] = []
+            VALIDATOR.check_session_tools(profile("standard"), payload, errors)
+            self.assertTrue(
+                any("teardown sweep" in item for item in errors), errors
+            )
+
+    def test_a_detached_read_only_agent_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            payload = output / "payload"
+            agent = payload / ".claude/agents/harness-codebase-researcher.md"
+            write_lf(
+                agent,
+                agent.read_text(encoding="utf-8").replace(
+                    "claude -p --permission-mode plan", "claude --bg --permission-mode plan"
+                ),
+            )
+            errors: list[str] = []
+            VALIDATOR.check_read_only_agents_are_not_detached(payload, errors)
+            self.assertTrue(
+                any("background session" in item for item in errors), errors
+            )
+
+    def test_a_bypass_flag_outside_a_skill_is_caught(self) -> None:
+        """The scan used to cover skills only, so agent launch blocks went unread."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), "standard")
+            payload = output / "payload"
+            agent = payload / ".claude/agents/harness-code-reviewer.md"
+            write_lf(
+                agent,
+                agent.read_text(encoding="utf-8").replace(
+                    "claude -p --permission-mode plan",
+                    "claude -p --allow-dangerously-skip-permissions --permission-mode plan",
+                ),
+            )
+            errors: list[str] = []
+            VALIDATOR.check_permission_bypass(payload, errors)
+            self.assertTrue(
+                any("--allow-dangerously-skip-permissions" in item for item in errors),
+                errors,
+            )
 
 
 if __name__ == "__main__":

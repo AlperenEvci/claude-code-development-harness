@@ -22,7 +22,7 @@ Repository shape: `single-project`
 - plugins/development-harness/.claude-plugin/plugin.json - installable plugin manifest and version
 - plugins/development-harness/skills/setup - the guided Create/Adopt/Upgrade setup workflow
 - plugins/development-harness/skills/audit - the read-only harness audit workflow
-- plugins/development-harness/scripts - stdlib-only inspector, renderer, validator, and installed-harness checker
+- plugins/development-harness/scripts - stdlib-only inspector, renderer, validator, and installed-harness checker, plus the shared capability-tier table and the session, bus, and agent-synthesis runtime copied into generated repositories
 - plugins/development-harness/assets/templates - layered common/lite/standard/fleet/greenfield template tree rendered into target repositories
 - plugins/development-harness/references - long-form guidance loaded on demand by the skills
 - tests/test_plugin.py - the single unittest suite covering inspection, rendering, validation, and installation
@@ -50,7 +50,7 @@ Repository shape: `single-project`
 - Generated project skills never pre-approve tools, and generated project domain agents stay read-only with permission mode plan. Widening either requires a separately reviewed change to render_harness.py plus a test.
 - Keep SKILL.md files short. Long-form material belongs in plugins/development-harness/references/ and is loaded on demand.
 - Local development is Windows-primary. Use `python`, not `python3`, when running commands yourself.
-- The test suite is currently not green on Windows. Treat CI on ubuntu-latest as the authoritative gate, and confirm any test result against that expectation before calling work verified.
+- The full gate runs green on Windows, including `bash scripts/validate-repo.sh`. CI on ubuntu-latest is still the authoritative gate: two symlink tests skip on Windows and the POSIX permission-bit assertion only runs there, so confirm any result against CI before calling work verified.
 
 ## Do not
 

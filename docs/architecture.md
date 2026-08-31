@@ -19,10 +19,14 @@ The setup skill is a stateful guided workflow with two entry paths:
 4. Claude inspects available execution transports: official Codex plugin, direct Codex CLI, or Claude-only.
 5. Claude writes a normalized `project-profile.json`. Create mode includes a required `greenfield_context` object.
 6. `render_harness.py` deterministically renders a versioned package from layered templates, and `harness_graph.py` validates any declared work graphs and emits their Workflow scripts.
-7. `validate_harness.py` verifies required files, hashes, transport coherence, Greenfield semantics, generated workflow scripts, and unresolved placeholders.
+7. `validate_harness.py` verifies required files, hashes, transport coherence, Greenfield semantics, generated workflow scripts, session tooling integrity, and unresolved placeholders.
 8. `install-harness.sh` classifies target files as NEW, IDENTICAL, CONFLICT, or BLOCKED.
 9. New files are copied; conflicting files are merged by Claude or explicitly replaced with backups.
 10. `check_installed.py` checks the installed harness structure and safety posture.
+
+Standard and Fleet packages additionally carry the session runtime — `harness_session.py`, `harness_bus.py`, `harness_agentgen.py`, and the shared `harness_capabilities.py` — copied verbatim into `scripts/ai-harness/`. They are copies rather than templates so the installed code is the code the plugin's own suite tested; the validator rejects one that has drifted from its original.
+
+Capability tiers are enforced at two levels. The frontmatter of an agent file declares its tier, and the launch flags recorded alongside it hand that tier to the process: `--tools` removes a tool rather than gating it, and the removal reaches subagents, so an agent cannot escape its tier by delegating. Dispatch mode follows from the tier, because `claude --bg` refuses `--print`: a writing tier can run detached and report by posting a bus envelope, while a read-only tier has no `Write` tool to post one with and must run in the foreground where its structured output can be read.
 
 Greenfield setup never installs dependencies, initializes Git, scaffolds application code, or invokes an implementation delegate. `context-only` produces durable briefs; `ready-to-build` additionally produces a first reviewed contract for a later explicit execution turn.
 
@@ -49,7 +53,7 @@ Beyond the tier core, the normalized profile can generate three project-specific
 
 Declared work graphs render to Workflow scripts under `.claude/workflows/`. Each node awaits only its own dependencies, so independent branches run concurrently, and every loop carries both an explicit termination condition and a hard iteration cap.
 
-Generated workflow skills never pre-approve tools. Generated domain researchers have fixed read-only tools and plan-mode permissions, so repository-controlled text cannot silently expand their authority.
+Generated workflow skills never pre-approve tools. Generated agents declare a capability tier - `reader`, `verifier`, or `implementer` - and the tier alone decides their tools and permission mode. A profile can never set them directly, so repository-controlled text cannot silently expand an agent's authority. `reader` is the default; `implementer` is the only tier that writes and requires both a declared writable scope and a recorded operator approval. Each agent records the session launch flags for its tier, so the boundary can be enforced by the process rather than only declared.
 
 ## Implementation transports
 

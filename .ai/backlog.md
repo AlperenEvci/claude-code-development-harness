@@ -21,16 +21,39 @@
 
 **Phase 2 — Graph and loop engineering. DONE.** Optional `graphs` array in the profile; `scripts/harness_graph.py` validates the DAG and emits the Workflow script; generated scripts land under `.claude/workflows/`. Cycles, unknown dependencies, and duplicate node or graph names are rejected by name. Loop safety is structural: `repeat_until` and `max_iterations` are only valid together, the cap is bounded to 2-20, and a generated loop breaks on `done` and `log()`s when it stops at the cap. Nodes await only their own dependencies, so independent branches run concurrently. Node prompts are escaped into the emitted template literal. `validate_harness.py` catches missing or orphaned scripts, a missing meta block, a lost cap, and invalid JavaScript. Six tests added.
 
-**Phase 3 — Agent catalog and capability tiers.** Redesign the agent section of the schema around archetypes and skill pools. Implement `reader` / `implementer` / `verifier` tiers with tier-aware validation. Rewrite — do not delete — the tests that currently assert generated agents can never write. Per decision 0002, each tier records its **session launch flags** next to its frontmatter, so authority is enforced by the process (`--permission-mode`, `--tools`, `--restricted`, `--worktree`) rather than merely declared.
+**Phase 3 — Agent catalog and capability tiers. DONE.** Generated agents declare a `reader` / `verifier` / `implementer` tier, held in one shared table (`scripts/harness_capabilities.py`) imported by the renderer, validator, and installed-harness checker so authority and its enforcement cannot drift. `reader` is the default and reproduces the pre-1.0 agent exactly. All five compensating controls from decision 0001 shipped: an implementer must declare a non-empty `writable_paths` scope and carry `approved_by_operator: true`; validation is tier-aware and compares the whole tool list rather than a prefix, across every agent file in the payload rather than only profile-declared ones; the tier is recorded in frontmatter; and the read-only test was rewritten rather than deleted. Per decision 0002 each agent also carries its session launch flags, so the tier can be enforced by the process.
 
-**Phase 4 — Dynamic agent synthesis, sessions, and A2A bus.** Depends on phases 1-3.
+**Phase 4 — Dynamic agent synthesis, sessions, and A2A bus. DONE.** The session
+substrate was smoke-tested first, as decision 0002 required
+(`.ai/reports/0001-session-substrate-smoke-test.md`), and the measurement changed the
+design: `--bg` and `-p` are mutually exclusive, so a background session has no
+structured return channel and the message bus is its only way to report rather than a
+convenience. Three scripts shipped — `harness_session.py` (tier-derived launch commands,
+dry-run teardown sweep), `harness_bus.py` (append-only typed envelopes with write-time
+size caps), and `harness_agentgen.py` (need → spec → validate → emit `--agents` JSON,
+with `promote` as a separate dry-run step). Standard and Fleet install all four scripts
+under `scripts/ai-harness/`, and the validator rejects a copy that differs from the
+plugin original. Thirty-three tests added, each mutation-checked against its own source.
 
-- `scripts/harness_agentgen.py` — need → spec → validate → emit. Emits `--agents <json>` for ephemeral use; writing into `.claude/agents/` is a separate operator-promoted step, so a synthesized `implementer` never lands in the repository implicitly.
-- `scripts/harness_bus.py` — typed envelopes under `.ai/bus/<session-id>/`. Use `--json-schema` so session results arrive already validated against the envelope shape.
-- Session model per decision 0002: `claude --bg` to start, `claude agents --json` as the single source of liveness, `attach`/`logs`/`stop`/`rm` for lifecycle. No parallel process table.
-- Generate an explicit teardown step. Background sessions outlive their invoker; sweep with `claude agents --json --cwd <path>` and never leave orphans.
-- Add `--dangerously-skip-permissions` and `--allow-dangerously-skip-permissions` to the validator's forbidden-token list, beside the existing Codex checks.
-- **Smoke-test first.** The session flags were read from `claude --help`, not exercised. Verify `--bg`, `agents --json`, `logs`, and `stop` in a disposable fixture before treating the model as proven.
+Two defects were found and fixed along the way, both of which had shipped in phase 3:
+
+- Every generated agent file told its tier to launch with `claude --bg`, including
+  read-only tiers that cannot report from a background session at all.
+- The permission-bypass scan covered skills only, so a bypass flag in an agent's
+  launch block or in `CLAUDE.md` would not have been seen.
+
+### Remaining before a v1.0 release
+
+- **Version bump.** `plugin.json` is still at `0.2.0`. Bumping it requires the matching
+  `CHANGELOG.md` heading in the same change, and the release itself is the operator's
+  call, so it was deliberately left alone.
+- **Migration path.** The v0.2 → v1.0 story is still unwritten. In practice nothing
+  broke: all three example profiles render and validate unchanged, and every new field
+  is optional, so this may be a note rather than a migration.
+- **`--restricted` is unexercised.** It would strip command-running tools from a
+  `verifier` more thoroughly than `--tools` does. Worth measuring before relying on it.
+- **`--max-budget-usd` is `--print`-only**, so it cannot bound a background lane.
+  Whether an implementer lane needs a different ceiling is unresolved.
 
 ### Affected files
 
@@ -82,6 +105,36 @@ weakened validation rather than failing loudly:
 A package rendered on Windows is now byte-identical to one rendered on Linux, and the validator
 rejects CRLF so the regression cannot return.
 
+### Phase 3 verification
+
+- `python -m compileall -q plugins/development-harness/scripts tests` — passes.
+- Local Windows: 45 tests, 2 skipped (symlink privilege), no failures.
+- All three `examples/*.json` render and validate, including the fleet profile's scoped `implementer`.
+- Escalation cases verified by editing a rendered package: appending `Write` to a reader's tools,
+  flipping its permission mode, dropping the `capability` line, shortening `disallowedTools`, and
+  smuggling in an agent the profile never declared are each caught.
+- The tools check was substring-based in the first draft and accepted an appended `Write`. Caught
+  by its own test; it now compares the whole list.
+
+### Phase 4 verification
+
+- **`bash scripts/validate-repo.sh` now runs on Windows and passes end to end**: 78
+  tests (2 skipped for symlink privilege), both JSON manifests, all three example
+  profiles rendered and validated, and `claude plugin validate` green for the plugin
+  and the marketplace. The gate itself had the same `python3` defect the test suite
+  had — on Windows that name resolves to the Microsoft Store alias stub — so it now
+  resolves an interpreter by running it rather than by finding it on PATH.
+- The gate also renders and validates every `examples/*.json` now. Nothing checked
+  that before, so a profile could have broken without any local signal.
+- Each new guarantee was mutation-checked: the fix was reverted at its source and the
+  test that should care was run. One test pinned nothing — it accepted a rejection
+  from the generic unknown-key path — and was tightened to assert the specific
+  refusal. All eight now fail when their fix is removed.
+- Session lifecycle exercised against Claude Code 2.1.251 in a disposable fixture:
+  `--bg`, `agents --json --cwd`, `--all`, `logs`, `stop`, `rm`, `-p --json-schema`,
+  and `--agents`. A `reader` session was asked to write a file and was blocked twice
+  over, with `Write` absent in subagents as well.
+
 ### Repository
 
 Work continues on a private copy, `AlperenEvci/claude-code-development-harness`.
@@ -93,8 +146,13 @@ GitHub cannot fork a public repository privately, so this is a mirror rather tha
 
 ### Exact next step
 
-Start Phase 3 on a feature branch: agent catalog and capability tiers. Redesign the agent section of the schema around archetypes and skill pools, implement `reader` / `implementer` / `verifier` with tier-aware validation, and record each tier's session launch flags next to its frontmatter so authority is enforced by the process. Rewrite — do not delete — the tests that currently assert generated agents can never write, and ship all four compensating controls from decision 0001 in the same change.
+Phases 1-4 are complete and the repository is green locally. Nothing is committed:
+git is the operator's.
 
-Phase 2 is on `phase-2-graph-loop` and green on CI. Merge it into `main` before starting Phase 3.
+1. Commit and push, then confirm CI on `ubuntu-latest` — still the authoritative gate,
+   because the two symlink tests and the POSIX permission-bit assertion only run there.
+2. Decide the v1.0 release: version bump plus the matching `CHANGELOG.md` heading, and
+   the migration note if one is needed.
 
-Note: `gh` resolves the bare repo from `upstream`, not `origin`. Always pass `-R AlperenEvci/claude-code-development-harness` when checking CI.
+Note: `gh` resolves the bare repo from `upstream`, not `origin`. Always pass
+`-R AlperenEvci/claude-code-development-harness` when checking CI.

@@ -94,6 +94,7 @@ Read bundled guidance as needed:
 - `${CLAUDE_PLUGIN_ROOT}/references/harness-tiers.md`
 - `${CLAUDE_PLUGIN_ROOT}/references/project-profile-schema.md`
 - `${CLAUDE_PLUGIN_ROOT}/references/output-contract.md`
+- `${CLAUDE_PLUGIN_ROOT}/references/agent-sessions.md` (Standard and Fleet only)
 
 ## 2A. Greenfield interview
 

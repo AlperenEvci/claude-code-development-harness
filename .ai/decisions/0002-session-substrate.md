@@ -1,7 +1,7 @@
 # Decision 0002: Session substrate for harness-managed agents
 
 Date: 2026-08-31
-Status: accepted
+Status: accepted, with one correction — see **Correction (2026-08-31)** at the end
 
 Complements `0001-harness-v1-architecture.md`. Scopes the "agent sessions" capability listed there and settles a proposal to build a tmux layer.
 
@@ -96,4 +96,34 @@ budget                    ->  --max-budget-usd
 - `--tmux`: "Create a tmux session for the worktree (requires --worktree). Uses iTerm2 native panes when available; use --tmux=classic for traditional tmux."
 - `--restricted`: "removes the built-in tools that run commands or code (Bash, PowerShell, REPL and the other code-running tools) and WebFetch unless --tools names them, and ignores user, project and local settings files".
 - `tmux` is not installed on the development machine; `uname` reports `MINGW64_NT-10.0-26200 ... Msys`.
-- **Not yet exercised.** These flags were read from CLI help, not run. Phase 4 must smoke-test `--bg`, `agents --json`, `logs`, and `stop` in a disposable fixture before the session model is treated as proven.
+- ~~**Not yet exercised.** These flags were read from CLI help, not run. Phase 4 must smoke-test `--bg`, `agents --json`, `logs`, and `stop` in a disposable fixture before the session model is treated as proven.~~ Done: `.ai/reports/0001-session-substrate-smoke-test.md`.
+
+## Correction (2026-08-31)
+
+The smoke test this decision demanded was run before Phase 4 began. The substrate holds and the
+tier boundary is stronger than claimed, but **one row of the capability table above is wrong** and
+is left in place so the error stays legible:
+
+**`--bg` and `-p` are mutually exclusive.** The table lists "start a detached session" and
+"structured result" as if they compose. The CLI refuses the combination: `--print` never starts the
+attachable session that `claude agents` manages. A background session therefore has no structured
+return channel at all — only `claude logs`, which is raw ANSI terminal capture and is not
+parseable by anything the harness generates.
+
+This does not weaken the decision; it sharpens Phase 4. The message bus is not a convenience
+layered over a working return path — for a background session it *is* the return path, which is
+why envelopes are a Phase 4 deliverable rather than an optional extra. Dispatch splits in two:
+foreground bounded work uses `-p --output-format json --json-schema` and reads the already-parsed
+`structured_output` key; background long-running work writes its own envelope.
+
+That split has a consequence the decision did not anticipate: a `reader` or `verifier` session
+**cannot write an envelope**, because its tier denies `Write`. This is the tier working, not a gap
+to route around. The bus is written by the orchestrator on behalf of foreground sessions and by
+`implementer` lanes for themselves. Any design that hands a reader a write path to the bus has
+broken the tier it was launched under.
+
+Two claims were confirmed and are worth keeping: `--tools` genuinely removes the tool rather than
+gating it, and the removal reaches subagents — *"Write is disabled for this session, in subagents
+as well as here"* — so a `reader` cannot escape its tier by delegating. And `cwd` in the registry
+comes back with native separators, so the teardown sweep must normalize before comparing, or it
+will find nothing, report success, and leave orphans running.

@@ -1,6 +1,7 @@
 ---
 name: harness-code-reviewer
 description: Independently review a completed implementation against its spec, repository rules, actual diff, and verification commands. Use after a delegate claims completion or for high-risk code review. Do not edit.
+capability: verifier
 tools:
   - Read
   - Grep
@@ -15,6 +16,18 @@ maxTurns: 30
 ---
 
 You are an independent implementation reviewer.
+
+## Session launch (verifier)
+
+Launch this agent with the flags for its tier, so the boundary is enforced
+by the process rather than by this file alone:
+
+```bash
+claude -p --permission-mode plan --tools Read,Grep,Glob,Bash --output-format json
+```
+
+This tier cannot write, so it cannot post a bus envelope and must run in the
+foreground; the orchestrator reads its structured output.
 
 ## Boundaries
 

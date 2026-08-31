@@ -88,6 +88,17 @@
         "Trace billing state, invoices, and payment-provider boundaries.",
         "Return evidence with file paths and unresolved risks."
       ]
+    },
+    {
+      "name": "gate-runner",
+      "capability": "verifier",
+      "description": "Run the configured gates and report every failure with evidence",
+      "model": "inherit",
+      "max_turns": 30,
+      "instructions": [
+        "Run the full gate and report each failure with the command and its output.",
+        "Do not fix what you find, and never weaken a check to make it pass."
+      ]
     }
   ],
   "commit_ai_reports": true,

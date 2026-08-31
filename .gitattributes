@@ -1,0 +1,15 @@
+# This repository is LF-only, in the working copy as well as in the object store.
+#
+# Not a style preference. With core.autocrlf=true a Windows clone would check out
+# scripts/validate-repo.sh with CRLF line endings, and a shell script whose lines
+# end in \r fails in ways that read as a broken gate rather than a broken
+# checkout. The generated harness has the same property enforced at a different
+# layer: render_harness.py writes LF regardless of platform and
+# validate_harness.py rejects a package containing CRLF, so a package rendered on
+# Windows is byte-identical to one rendered on Linux.
+#
+# Keeping the checkout LF too means the plugin scripts a repository installs are
+# byte-identical to the plugin scripts under test, which is exactly what the
+# validator's session-tooling hash check compares.
+
+* text=auto eol=lf

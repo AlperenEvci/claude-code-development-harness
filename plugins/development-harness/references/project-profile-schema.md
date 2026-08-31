@@ -354,9 +354,71 @@ Produces `.claude/skills/harness-<name>/SKILL.md`.
 
 Produces `.claude/agents/harness-<name>.md` and requires Standard or Fleet.
 
-- Generated project-domain agents are intentionally read-only.
-- Their tools are fixed to `Read`, `Grep`, and `Glob`.
-- `Write`, `Edit`, and `Bash` are denied; permission mode is fixed to `plan`.
-- Profiles may select a Claude model and `max_turns` from 1 to 80, but may not override tools, permissions, hooks, MCP servers, memory, or isolation.
+Each agent declares a **capability tier**. `reader` is the default, so an agent that
+names no tier behaves exactly as it did before 1.0.
+
+| Tier | Tools | Permission mode | Writes | Purpose |
+|---|---|---|---|---|
+| `reader` | Read, Grep, Glob | `plan` | never | reconnaissance, mapping, audit |
+| `verifier` | Read, Grep, Glob, Bash | `plan` | never | runs gates, inspects diffs, reports findings |
+| `implementer` | Read, Grep, Glob, Edit, Write, Bash | `acceptEdits` | declared scope only | bounded execution against a spec |
+
+```json
+"additional_agents": [
+  {
+    "name": "migration-writer",
+    "capability": "implementer",
+    "approved_by_operator": true,
+    "writable_paths": ["src/db/migrations/**", "src/db/schema.ts"],
+    "description": "Write database migrations against an accepted spec",
+    "instructions": ["Implement the migration exactly as the spec describes."]
+  }
+]
+```
+
+- `capability`: `reader` (default), `verifier`, or `implementer`.
+- `writable_paths`: required and non-empty for `implementer`; rejected on any other tier,
+  because a non-writing agent declaring a writable scope is a contradiction.
+- `approved_by_operator`: must be `true` for `implementer`, and is rejected elsewhere.
+  Write authority is an operator decision, never something a profile acquires by default.
+- Profiles may select a Claude model and `max_turns` from 1 to 80, but may **not** set
+  `tools`, `disallowed_tools`, `permission_mode`, `isolation`, `hooks`, `mcpServers`, or
+  `memory`. Authority comes from the declared tier, never from a raw override — repository
+  text is untrusted evidence, and letting a profile name its own tool set would turn any
+  scanned file into a privilege-escalation vector.
+
+#### How a tier is enforced
+
+The tier is written into the agent's frontmatter as `capability:`, so an audit reads authority
+off the file rather than reconstructing it from the profile. Each agent also carries a
+`## Session launch` block with the flags for its tier:
+
+| Tier | Session launch |
+|---|---|
+| `reader` | `--permission-mode plan --tools Read,Grep,Glob` |
+| `verifier` | `--permission-mode plan --tools Read,Grep,Glob,Bash` |
+| `implementer` | `--permission-mode acceptEdits --worktree <lane> --add-dir <scope>` |
+
+This matters: a tier only declared in a file is a promise the agent could ignore, while a tier
+passed at launch is a boundary the process cannot exceed. Prefer launching with the flags.
+Measured, not assumed: `--tools` removes the tool rather than gating it, and the removal reaches
+subagents, so an agent cannot escape its tier by delegating.
+
+The tier also fixes how the session is dispatched, which is not a matter of preference. `claude
+--bg` refuses `--print`, so a background session has no structured result and can report only by
+writing a bus envelope - and `reader` and `verifier` have no `Write` tool to write one with. A
+writing tier therefore runs detached and posts its own envelope; a read-only tier runs in the
+foreground and the orchestrator reads its structured output. The rendered launch command follows
+the tier, and the validator rejects an agent file that documents a read-only tier as `--bg`.
+
+Standard and Fleet harnesses install `scripts/ai-harness/harness_session.py`, which builds these
+commands from the same table and prints them without running one. See
+`${CLAUDE_PLUGIN_ROOT}/references/agent-sessions.md`.
+
+`validate_harness.py` re-derives each agent's authority from the rendered file and compares the
+**whole** tool list against the tier, so a staging package cannot be edited to append `Write` to
+a reader. The check applies to every agent in the payload, including the core harness agents and
+any hand-added file, not only the ones the profile declares. `check_installed.py` repeats the
+narrower version of this check on the installed copy, which is the one that actually runs.
 
 Names are normalized to kebab case and prefixed with `harness-`. Core harness names are reserved.

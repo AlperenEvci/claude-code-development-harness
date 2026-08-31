@@ -11,6 +11,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
+    CAPABILITY_TIERS,
+    EDIT_ACCEPTING_MODES,
+)
+
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 FENCED_BLOCK = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
@@ -31,6 +38,13 @@ BASE_REQUIRED = [
 STANDARD_REQUIRED = [
     ".claude/agents/harness-codebase-researcher.md",
     ".claude/agents/harness-code-reviewer.md",
+    # The session tooling is what makes a capability tier enforceable at launch
+    # and what stops a background agent being orphaned. An installed harness
+    # missing it still has the agents but no way to run or retire them safely.
+    "scripts/ai-harness/harness_capabilities.py",
+    "scripts/ai-harness/harness_bus.py",
+    "scripts/ai-harness/harness_session.py",
+    "scripts/ai-harness/harness_agentgen.py",
 ]
 
 FLEET_REQUIRED = [
@@ -46,6 +60,36 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return ""
+
+
+def check_agent_authority(
+    rel: str, text: str, errors: list[str], warnings: list[str]
+) -> None:
+    """Read an installed agent's authority off its own frontmatter.
+
+    The installed harness is the copy that actually runs, and it can be edited
+    after installation. An agent declaring a read-only tier while carrying an
+    edit-accepting permission mode is an escalation regardless of how it got
+    there, so it is an error rather than a warning.
+    """
+    match = re.search(r"^capability:\s*(\S+)\s*$", text, re.MULTILINE)
+    if match is None:
+        warnings.append(f"agent does not declare a capability tier: {rel}")
+        return
+
+    capability = match.group(1).strip().strip("\"'")
+    tier = CAPABILITY_TIERS.get(capability)
+    if tier is None:
+        errors.append(f"agent declares unknown capability {capability!r}: {rel}")
+        return
+
+    if tier["writes"]:
+        return
+    for mode in EDIT_ACCEPTING_MODES:
+        if re.search(rf"^permissionMode:\s*{mode}\s*$", text, re.MULTILINE):
+            errors.append(
+                f"{capability} agent carries permission mode {mode}: {rel}"
+            )
 
 
 def frontmatter_keys(text: str) -> set[str]:
@@ -160,6 +204,19 @@ def main() -> None:
         target = warnings if args.allow_missing else errors
         target.extend(f"missing required file: {rel}" for rel in missing)
 
+    if tier in {"standard", "fleet"}:
+        claude_text = read_text(root / "CLAUDE.md")
+        if claude_text and "## Agent sessions" not in claude_text:
+            warnings.append(
+                "CLAUDE.md has no `## Agent sessions` section; this harness "
+                "predates session support, re-render to add it"
+            )
+        elif claude_text and "harness_session.py sweep" not in claude_text:
+            warnings.append(
+                "CLAUDE.md documents agent sessions but not the teardown sweep; "
+                "background agents can be left running"
+            )
+
     claude_path = root / "CLAUDE.md"
     agents_path = root / "AGENTS.md"
     claude_text = read_text(claude_path)
@@ -196,6 +253,7 @@ def main() -> None:
             for key in ("name", "description"):
                 if key not in keys:
                     errors.append(f"agent missing {key} frontmatter: {rel}")
+            check_agent_authority(rel, text, errors, warnings)
         if rel.startswith(".claude/rules/") and rel in dynamic:
             if "paths" not in frontmatter_keys(text):
                 errors.append(f"generated scoped rule missing paths frontmatter: {rel}")

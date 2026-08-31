@@ -2,7 +2,111 @@
 
 ## Unreleased
 
-Phases 1 and 2 of the v1.0 harness upgrade. See `.ai/decisions/0001-harness-v1-architecture.md`.
+The v1.0 harness upgrade, phases 1 through 4. See
+`.ai/decisions/0001-harness-v1-architecture.md` and
+`.ai/decisions/0002-session-substrate.md`.
+
+### Added — sessions, message bus, and agent synthesis (phase 4)
+
+- `scripts/harness_session.py`: turns a capability tier into the exact command
+  that enforces it, and sweeps background sessions the repository left running.
+  `launch` prints the command and never runs it. `sweep` is dry-run by default,
+  like the installer, and needs `--stop` to act.
+- `scripts/harness_bus.py`: typed, append-only envelopes under
+  `.ai/bus/<session-id>/`. Envelope kinds are `result`, `finding`, `question`,
+  `handoff`, and `status`. Summary, body, and evidence are capped at write time,
+  so the phase-1 context budget is enforced where agent output actually enters
+  the main session rather than merely recommended.
+- `scripts/harness_agentgen.py`: need → spec → validate → emit. Produces
+  `claude --agents` JSON so a synthesized agent is ephemeral by default; writing
+  one into `.claude/agents/` is a separate `promote` step that is dry-run and
+  never overwrites. A need may not name `tools`, `permissionMode`, `isolation`,
+  or any other authority key — those are refused by name, not ignored — and a
+  synthesized `implementer` passes the same scope-and-approval gate as a
+  declared one.
+- Standard and Fleet harnesses install all four scripts under
+  `scripts/ai-harness/`, copied verbatim. The validator rejects a copy that
+  differs from the plugin original, so an installed harness cannot enforce
+  capability tiers with code the test suite never saw.
+- `## Agent sessions` section in generated `CLAUDE.md`, stating the dispatch
+  rule per tier, the bus, synthesis, and the teardown sweep. The validator
+  rejects a package whose `CLAUDE.md` omits the teardown step, because a missing
+  teardown fails silently: nothing breaks, agents just accumulate.
+- `references/agent-sessions.md`, loaded on demand by both skills.
+- `.ai/reports/0001-session-substrate-smoke-test.md` records what was measured.
+
+### Fixed — a read-only agent could not have reported from where it was told to run
+
+- **Generated agent files told every tier to launch with `claude --bg`.** `--bg`
+  refuses `--print`, so a background session has no structured result and can
+  only report by writing a bus envelope — and `reader` and `verifier` have no
+  `Write` tool to write one with. A reader launched as documented produced a
+  session whose output was unreachable except as ANSI terminal capture. The
+  launch command now follows the tier: writing tiers run detached, read-only
+  tiers run in the foreground and the orchestrator reads their structured
+  output. `harness_session.py` refuses to build the impossible command and the
+  validator rejects an agent file that documents it.
+- **The permission-bypass scan covered skills only.** The harness now generates
+  runnable blocks in `CLAUDE.md` and in every agent file, so
+  `--dangerously-skip-permissions` in a session launch line would have shipped
+  unexamined. The scan now covers every generated markdown file. Prose is still
+  exempt — a documented prohibition is not an unsafe default.
+- `--allow-dangerously-skip-permissions` is named explicitly in the forbidden
+  token list. It was already caught as a substring of the shorter flag, which
+  reported the wrong flag name; the list is now ordered longest-first.
+
+### Changed
+
+- The launch flags for each tier are stored once as a list and the documented
+  launch string is derived from it, so a tier cannot be documented one way and
+  launched another. The rendered text is unchanged.
+- `capability_grant_errors` moved into `harness_capabilities.py`. The renderer is
+  no longer the only thing that hands out a tier — synthesis does too — and two
+  copies of that rule would be two places for the writing tier to become
+  reachable, only one of them reviewed.
+- `harness_session.py sweep` never counts the session running it. A sweep is
+  usually run by a background orchestrator, which `claude agents` lists like any
+  other background session; without this the first thing a teardown step does is
+  stop itself, abandoning the siblings it had not yet reached.
+
+### Corrected
+
+- `.ai/decisions/0002-session-substrate.md` listed `--bg` and
+  `-p --output-format json` in one capability table as though they compose. They
+  do not. The decision carries a dated correction rather than a silent edit.
+
+### Added — agent catalog and capability tiers (phase 3)
+
+- Generated project agents declare a **capability tier**: `reader` (default), `verifier`, or
+  `implementer`. `reader` reproduces the pre-1.0 read-only agent exactly, so a profile that
+  names no tier is unchanged.
+- `scripts/harness_capabilities.py`: one tier table, imported by the renderer, the validator,
+  and the installed-harness checker, so what writes authority and what checks it cannot drift.
+- `verifier` gains `Bash` to run gates and inspect diffs but still denies `Write` and `Edit` and
+  stays in `plan` mode.
+- `implementer` is the only tier that writes, and reaching it requires both a non-empty
+  `writable_paths` scope and `approved_by_operator: true`. Either one missing is a hard error.
+  A non-writing tier that declares a writable scope is rejected as a contradiction.
+- The tier is recorded in the agent's frontmatter as `capability:`, and every agent carries a
+  `## Session launch` block with the flags for its tier, so the boundary can be enforced by the
+  process rather than only declared in a file.
+- The core `harness-codebase-researcher` and `harness-code-reviewer` agents are labelled
+  `reader` and `verifier`, and the researcher now denies `Write`, `Edit`, and `Bash` explicitly.
+- Validation compares the **whole** tool list against the tier rather than matching a prefix, so
+  a staging package cannot be edited to append `Write` to a reader. The check covers every agent
+  file in the payload, including hand-added ones, not only those the profile declares.
+- `check_installed.py` rejects an installed agent whose declared read-only tier carries an
+  edit-accepting permission mode, since the installed copy is the one that runs.
+- `examples/standard-codex-plugin.json` gains a `verifier`; `examples/fleet-codex-cli.json`
+  gains a scoped `implementer`.
+
+### Changed
+
+- The test asserting generated agents can never write was **rewritten, not removed**, per the
+  compensating controls in `.ai/decisions/0001-harness-v1-architecture.md`. It now asserts the
+  narrower property that still holds: a profile cannot set `tools`, `permission_mode`, or
+  `isolation` directly, and cannot reach the writing tier without a declared scope and a
+  recorded operator approval.
 
 ### Fixed — platform-dependent rendering and validation
 
