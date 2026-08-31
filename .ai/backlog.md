@@ -77,6 +77,14 @@ Two defects were found and fixed along the way, both of which had shipped in pha
 published work from Anthropic, Google, OpenAI, LangChain, and Matt Pocock, and found
 five gaps. They are ordered by whether they change what the product *is*.
 
+All five are now closed, across 1.2.0 through 1.6.0. What each one left behind is
+recorded under its own entry, and none of it is a hole in the closure: the eval cases
+still have no scored run because the runner is gated, the checkpoint token count is
+caller-reported because no subprocess can observe its parent, the ledger deliberately
+does not execute its own verify string, nothing yet consumes the envelope trace, and the
+shape signals inform the audit and nothing else. That list is the honest successor to
+this one - not a claim that the review is finished with.
+
 1. ~~**No evals.**~~ **Started in 1.2.0, extended through 1.2.3.** Seven behavioral
    cases under `plugins/development-harness/evals/`, schema-checked on every push by
    `EvalCaseTests`, which now also refuses an absence grader that cannot fail and a
