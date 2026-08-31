@@ -99,6 +99,17 @@ def fail(message: str) -> NoReturn:
     raise SystemExit(2)
 
 
+def write_generated(target: Path, text: str) -> None:
+    """Write a generated file with LF endings on every platform.
+
+    A plain text-mode write translates to CRLF on Windows, which ships an
+    `install-harness.sh` whose shebang ends in a carriage return and will not
+    run on Linux or macOS. Rendering is meant to be deterministic, so the bytes
+    a package contains must not depend on the operator's platform.
+    """
+    target.write_text(text, encoding="utf-8", newline="\n")
+
+
 def slugify(value: str) -> str:
     value = value.strip().lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
@@ -979,7 +990,7 @@ def copy_templates(
             target = payload / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             text = source.read_text(encoding="utf-8")
-            target.write_text(render_text(text, context, source), encoding="utf-8")
+            write_generated(target, render_text(text, context, source))
             if target.suffix == ".sh":
                 target.chmod(target.stat().st_mode | 0o111)
             written.append(target)
@@ -1059,7 +1070,7 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
         body.extend(["---", "", f"# {description}", "", instructions, ""])
         target = payload / ".claude" / "rules" / f"{name}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("\n".join(body), encoding="utf-8")
+        write_generated(target, "\n".join(body))
         written.append(target)
 
     for index, skill in enumerate(additional_skills):
@@ -1093,7 +1104,7 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
         frontmatter.append("")
         target = payload / ".claude" / "skills" / name / "SKILL.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("\n".join(frontmatter), encoding="utf-8")
+        write_generated(target, "\n".join(frontmatter))
         written.append(target)
 
     for index, agent in enumerate(additional_agents):
@@ -1173,7 +1184,7 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
         ]
         target = payload / ".claude" / "agents" / f"{name}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("\n".join(frontmatter), encoding="utf-8")
+        write_generated(target, "\n".join(frontmatter))
         written.append(target)
 
     return written
@@ -1191,7 +1202,7 @@ def write_workflows(payload: Path, profile: dict[str, Any]) -> list[Path]:
     written: list[Path] = []
     for graph in graphs:
         target = target_dir / f"{graph['name']}.js"
-        target.write_text(render_workflow_script(graph), encoding="utf-8")
+        write_generated(target, render_workflow_script(graph))
         written.append(target)
     return written
 
@@ -1473,9 +1484,9 @@ def write_run_ignore(payload: Path, commit_runs: bool) -> Path:
     target = payload / ".ai" / "runs" / (".gitkeep" if commit_runs else ".gitignore")
     target.parent.mkdir(parents=True, exist_ok=True)
     if commit_runs:
-        target.write_text("", encoding="utf-8")
+        write_generated(target, "")
     else:
-        target.write_text("*\n!.gitignore\n", encoding="utf-8")
+        write_generated(target, "*\n!.gitignore\n")
     return target
 
 
@@ -1485,7 +1496,7 @@ def write_keep_files(payload: Path) -> list[Path]:
         p = payload / rel
         if not p.exists():
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("", encoding="utf-8")
+            write_generated(p, "")
         paths.append(p)
     return paths
 
@@ -1496,7 +1507,9 @@ def build_manifest(payload: Path, profile: dict[str, Any]) -> dict[str, Any]:
         if path.is_file():
             files.append(
                 {
-                    "path": str(path.relative_to(payload)),
+                    # POSIX separators keep the manifest identical on every
+                    # platform, and the validator matches on these keys.
+                    "path": path.relative_to(payload).as_posix(),
                     "sha256": sha256(path),
                     "bytes": path.stat().st_size,
                 }
@@ -1556,8 +1569,9 @@ def main() -> None:
         "generator_version": GENERATOR_VERSION,
         "purpose": "safe-to-replace generated staging package",
     }
-    (output / GENERATION_MARKER).write_text(
-        json.dumps(marker_payload, indent=2) + "\n", encoding="utf-8"
+    write_generated(
+        output / GENERATION_MARKER,
+        json.dumps(marker_payload, indent=2) + "\n",
     )
 
     payload = output / "payload"
@@ -1590,22 +1604,22 @@ def main() -> None:
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))
 
     profile_json = json.dumps(profile, indent=2, ensure_ascii=False) + "\n"
-    (output / "project-profile.json").write_text(profile_json, encoding="utf-8")
+    write_generated(output / "project-profile.json", profile_json)
 
     installed_profile = payload / ".ai" / "harness" / "project-profile.json"
     installed_profile.parent.mkdir(parents=True, exist_ok=True)
-    installed_profile.write_text(profile_json, encoding="utf-8")
-    (output / "install-harness.sh").write_text(INSTALL_SCRIPT, encoding="utf-8")
+    write_generated(installed_profile, profile_json)
+    write_generated(output / "install-harness.sh", INSTALL_SCRIPT)
     (output / "install-harness.sh").chmod(0o755)
-    (output / "README.md").write_text(
+    write_generated(
+        output / "README.md",
         render_text(PACKAGE_README, context, Path("<generated README>")),
-        encoding="utf-8",
     )
 
     manifest = build_manifest(payload, profile)
-    (output / "harness-manifest.json").write_text(
+    write_generated(
+        output / "harness-manifest.json",
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
     )
 
     print(f"Generated {len(manifest['files'])} payload files in {output}")

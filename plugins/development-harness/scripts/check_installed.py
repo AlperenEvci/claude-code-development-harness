@@ -175,7 +175,10 @@ def main() -> None:
     inspect_paths = set(required)
     for base in (root / ".claude/skills", root / ".claude/agents", root / ".claude/rules"):
         if base.exists():
-            inspect_paths.update(str(path.relative_to(root)) for path in base.rglob("*.md"))
+            # POSIX separators: the prefix matches below are written with '/'.
+            inspect_paths.update(
+                path.relative_to(root).as_posix() for path in base.rglob("*.md")
+            )
 
     for rel in sorted(inspect_paths):
         path = root / rel

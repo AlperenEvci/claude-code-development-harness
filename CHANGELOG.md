@@ -4,6 +4,26 @@
 
 Phases 1 and 2 of the v1.0 harness upgrade. See `.ai/decisions/0001-harness-v1-architecture.md`.
 
+### Fixed — platform-dependent rendering and validation
+
+- **Generated packages were CRLF when rendered on Windows.** Every write went through
+  text-mode translation, so `install-harness.sh` carried a carriage return into its shebang and
+  would not run on Linux or macOS. All generated writes now force LF, and the validator rejects a
+  package containing CRLF so the regression cannot ship again.
+- **The manifest recorded native path separators.** A package rendered on Windows listed
+  `.claude\skills\...`, and the validator's skill and agent scans match a `.claude/skills/`
+  prefix — so frontmatter checks and the unsafe-Codex-default token scan were silently skipped,
+  and the package still reported `OK`. Manifest paths are now POSIX on every platform.
+- `check_installed.py` skipped hand-written agents and rules on Windows for the same reason, and
+  `inspect_project.py` emitted native separators into `project-scan.json`. Both normalized.
+- `validate_harness.py` resolves `bash` to an absolute path instead of passing the bare name.
+  Windows resolves a bare command through System32 first, which reaches the WSL launcher; on a
+  machine whose only distribution lacks `/bin/bash` that surfaced as a false installer syntax
+  error. When no bash is available the check downgrades to a warning, as the `node` check does.
+- The test suite invokes `sys.executable` rather than `python3`, which does not exist on Windows
+  outside the Microsoft Store alias stub, and skips the two symlink tests where creating a
+  symlink is privileged. The suite now runs clean on Windows as well as CI.
+
 ### Added — graph and loop engineering (phase 2)
 
 - Optional `graphs` array in the project profile. Each entry declares one recurring multi-agent

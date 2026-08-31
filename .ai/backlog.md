@@ -47,7 +47,7 @@
 
 - **Capability tiers relax a deliberate safety invariant.** All four compensating controls in decision 0001 must ship together with the tier work, or the relaxation is unsafe. Repository text is untrusted evidence; a synthesized agent must never choose its own authority.
 - **v1.0 is a breaking schema change.** Existing v0.2 profiles stop validating; a migration path is required before release.
-- **Windows cannot verify.** `tests/test_plugin.py` calls `python3` in 26 places (Microsoft Store alias stub), and symlink, chmod, and bash-installer tests need POSIX. `subprocess` cannot reach Git Bash either, because Windows `CreateProcess` searches System32 before PATH. Treat CI on `ubuntu-latest` as authoritative and never report a phase verified from a local run alone.
+- **Windows now verifies.** The suite runs clean locally: 39 tests, 2 skipped (symlink creation is privileged on Windows). Fixed by resolving `bash` to an absolute path, using `sys.executable` instead of `python3`, and normalizing generated line endings and path separators. CI on `ubuntu-latest` remains the authoritative gate, because the two skipped tests and the POSIX permission-bit assertion only run there.
 
 ### Phase 1 verification
 
@@ -65,6 +65,22 @@
 - Validator drift cases verified locally: removed cap, invalid JavaScript, orphan script, and missing script are each caught.
 - Full suite on Windows: 33 tests, 16 failing — the same environmental set as Phase 1 plus one new test that reaches `validate_harness.py`. See Known risks.
 - **CI green on ubuntu-latest: 33 tests, `OK`.** Run 33374527893 on commit `0ccced4`, branch `phase-2-graph-loop`. All six new graph tests pass, including the `node --check` test, so the JavaScript check ran rather than being skipped.
+
+### Platform-independence fix
+
+Found while making the Windows suite runnable, and worth recording because two of these silently
+weakened validation rather than failing loudly:
+
+- Rendering on Windows produced CRLF, so `install-harness.sh` would not run on Linux or macOS.
+- The manifest recorded native separators, so the validator's `.claude/skills/` and
+  `.claude/agents/` prefix matches never fired. Frontmatter checks and the unsafe-Codex-default
+  token scan were skipped and the package still reported `OK`.
+- `check_installed.py` skipped hand-written agents and rules for the same reason.
+- `validate_harness.py` passed the bare name `bash`, which Windows resolves through System32 to
+  the WSL launcher.
+
+A package rendered on Windows is now byte-identical to one rendered on Linux, and the validator
+rejects CRLF so the regression cannot return.
 
 ### Repository
 

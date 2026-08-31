@@ -151,6 +151,102 @@ def format_tokens(value: int) -> str:
     return str(value)
 
 
+SHADOW_STUB_DIRS = {"system32", "windowsapps"}
+
+
+def is_shadow_stub(path: str) -> bool:
+    """True for a Windows shim that shadows the real tool.
+
+    `System32\\bash.exe` is the WSL launcher and `WindowsApps\\python3.exe` is a
+    Microsoft Store alias. Windows resolves a bare command name through System32
+    before PATH, so these win even when the real tool sits earlier on PATH. The
+    separator is matched on both slashes so the classification is testable from
+    any host.
+    """
+    parts = re.split(r"[\\/]", str(path).lower())
+    return bool(SHADOW_STUB_DIRS.intersection(parts))
+
+
+def find_bash() -> str | None:
+    """Resolve a real bash, or None.
+
+    Returns an absolute path, because passing the bare name `bash` to
+    subprocess reaches the WSL launcher on Windows. A machine whose only WSL
+    distribution lacks /bin/bash then fails in a way that reads like a shell
+    syntax error in the file being checked.
+    """
+    found = shutil.which("bash")
+    if found is not None and not is_shadow_stub(found):
+        return found
+    if sys.platform != "win32":
+        return None
+
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git is not None:
+        # <root>/cmd/git.exe and <root>/mingw64/bin/git.exe both sit two levels
+        # below a Git for Windows root that carries bin/bash.exe.
+        root = Path(git).resolve().parent.parent
+        candidates += [root / "bin" / "bash.exe", root.parent / "bin" / "bash.exe"]
+    candidates += [
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def check_line_endings(package: Path, errors: list[str]) -> None:
+    """Generated files must be LF on every platform.
+
+    A CRLF package is not cosmetic: `install-harness.sh` carries a carriage
+    return into its shebang and will not run on Linux or macOS. Rendering on
+    Windows produced exactly that until the renderer forced LF, so this is a
+    regression gate rather than a style preference.
+    """
+    for path in sorted(package.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"\r\n" in raw:
+            errors.append(
+                "CRLF line endings in generated file: "
+                f"{path.relative_to(package).as_posix()}"
+            )
+
+
+def check_installer_syntax(
+    package: Path, errors: list[str], warnings: list[str]
+) -> None:
+    """Parse the generated installer with a real bash before it is ever run."""
+    install = package / "install-harness.sh"
+    if not (install.stat().st_mode & 0o111):
+        warnings.append("install-harness.sh is not executable")
+
+    bash_binary = find_bash()
+    if bash_binary is None:
+        warnings.append(
+            "bash not found; install-harness.sh was not syntax-checked. "
+            "This check is enforced on CI."
+        )
+        return
+
+    shell_check = subprocess.run(
+        [bash_binary, "-n", str(install)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if shell_check.returncode != 0:
+        errors.append(f"install-harness.sh syntax error: {shell_check.stderr.strip()}")
+
+
 def workflow_syntax_error(node_binary: str, text: str) -> str:
     """Syntax-check a workflow script by wrapping it as the async body it really is.
 
@@ -423,15 +519,18 @@ def main() -> None:
             if path.is_file() and required_fragment not in path.read_text(encoding="utf-8"):
                 errors.append(
                     f"greenfield context file missing required section {required_fragment!r}: "
-                    f"{path.relative_to(payload)}"
+                    f"{path.relative_to(payload).as_posix()}"
                 )
 
     symlinks = [path for path in package.rglob("*") if path.is_symlink()]
     for path in symlinks:
-        errors.append(f"generated package may not contain symlinks: {path.relative_to(package)}")
+        errors.append(
+            "generated package may not contain symlinks: "
+            f"{path.relative_to(package).as_posix()}"
+        )
 
     actual_files = {
-        str(path.relative_to(payload)): path
+        path.relative_to(payload).as_posix(): path
         for path in payload.rglob("*")
         if path.is_file() and not path.is_symlink()
     }
@@ -581,18 +680,8 @@ def main() -> None:
         if "$(cat" in codex_text:
             errors.append("Codex CLI delegate must pass the spec through stdin, not shell substitution")
 
-    install = package / "install-harness.sh"
-    if not (install.stat().st_mode & 0o111):
-        warnings.append("install-harness.sh is not executable")
-    shell_check = subprocess.run(
-        ["bash", "-n", str(install)],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if shell_check.returncode != 0:
-        errors.append(f"install-harness.sh syntax error: {shell_check.stderr.strip()}")
+    check_line_endings(package, errors)
+    check_installer_syntax(package, errors, warnings)
 
     if tier == "fleet":
         helper = payload / "scripts/ai-harness/create-lane-worktree.sh"

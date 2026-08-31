@@ -197,7 +197,7 @@ def file_meta(path: Path, root: Path) -> dict[str, Any]:
     """Return metadata only. Do not read the file body."""
     kind = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
     item: dict[str, Any] = {
-        "path": str(path.relative_to(root)),
+        "path": path.relative_to(root).as_posix(),
         "kind": kind,
     }
     try:
@@ -453,7 +453,7 @@ def main() -> None:
 
     for path in iter_project_files(requested_root):
         scanned_files += 1
-        rel = str(path.relative_to(requested_root))
+        rel = path.relative_to(requested_root).as_posix()
         if path.name in MANIFEST_NAMES and len(manifests) < 100:
             manifests.append(rel)
         if path.name in SECRET_FILENAMES or path.name.startswith(".env"):

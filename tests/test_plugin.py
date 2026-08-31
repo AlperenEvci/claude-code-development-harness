@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "development-harness"
 SCRIPTS = PLUGIN / "scripts"
+
+# The plugin scripts are invoked as subprocesses. Use this interpreter rather
+# than the bare name "python3": Windows has no python3.exe outside the
+# Microsoft Store alias stub, which exits non-zero without running anything.
+PYTHON = sys.executable
 
 
 def run(*args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -23,6 +30,57 @@ def run(*args: str, cwd: Path | None = None, check: bool = True) -> subprocess.C
         stderr=subprocess.PIPE,
         check=check,
     )
+
+
+def load_validator():
+    """Import validate_harness.py directly so tests can call its helpers."""
+    spec = importlib.util.spec_from_file_location(
+        "validate_harness_under_test", SCRIPTS / "validate_harness.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+VALIDATOR = load_validator()
+BASH = VALIDATOR.find_bash()
+
+
+def symlinks_available() -> bool:
+    """Windows needs SeCreateSymbolicLinkPrivilege, which a normal shell lacks."""
+    if os.name != "nt":
+        return True
+    with tempfile.TemporaryDirectory() as temp:
+        target = Path(temp) / "target"
+        target.mkdir()
+        try:
+            os.symlink(target, Path(temp) / "link")
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
+SYMLINKS = symlinks_available()
+
+
+def write_lf(path: Path, text: str) -> None:
+    """Write into a rendered package without translating LF to CRLF."""
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def run_installer(
+    installer: Path, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Run the generated installer.
+
+    Windows cannot exec a .sh through its shebang, so route it through the same
+    real bash the validator resolves.
+    """
+    if os.name == "nt":
+        if BASH is None:
+            raise unittest.SkipTest("no bash available to run the generated installer")
+        return run(BASH, str(installer), *args, check=check)
+    return run(str(installer), *args, check=check)
 
 
 def profile(tier: str) -> dict[str, object]:
@@ -181,7 +239,7 @@ class InspectorTests(unittest.TestCase):
             run("git", "init", cwd=project)
 
             result = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "inspect_project.py"),
                 "--root",
                 str(project),
@@ -196,10 +254,13 @@ class InspectorTests(unittest.TestCase):
             self.assertTrue(scan["secret_bearing_files_exist"])
             self.assertIn(".env.local", scan["secret_file_names_only"])
             self.assertTrue(Path(scan["scan_path"]).is_file())
-            self.assertTrue(str(Path(scan["scan_path"])).startswith(str(data)))
+            self.assertTrue(
+                Path(scan["scan_path"]).resolve().is_relative_to(data.resolve())
+            )
             self.assertEqual(scan["project_state"]["classification"], "existing")
             self.assertEqual(scan["project_state"]["suggested_harness_mode"], "adopt")
 
+    @unittest.skipUnless(SYMLINKS, "symlink creation requires privilege here")
     def test_inspector_does_not_follow_repository_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             temp_path = Path(temp)
@@ -220,7 +281,7 @@ class InspectorTests(unittest.TestCase):
             os.symlink(outside, project / "package.json")
 
             result = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "inspect_project.py"),
                 "--root",
                 str(project),
@@ -241,7 +302,7 @@ class InspectorTests(unittest.TestCase):
             data = temp_path / "data"
             project.mkdir()
             result = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "inspect_project.py"),
                 "--root",
                 str(project),
@@ -263,7 +324,7 @@ class InspectorTests(unittest.TestCase):
             project.mkdir()
             (project / "README.md").write_text("# Product idea\n")
             result = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "inspect_project.py"),
                 "--root",
                 str(project),
@@ -282,14 +343,14 @@ class RendererTests(unittest.TestCase):
         output = temp_path / f"generated-{tier}"
         config.write_text(json.dumps(profile(tier), indent=2) + "\n")
         run(
-            "python3",
+            PYTHON,
             str(SCRIPTS / "render_harness.py"),
             "--config",
             str(config),
             "--output",
             str(output),
         )
-        run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+        run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
         return output
 
     def test_documented_example_profiles_render_and_validate(self) -> None:
@@ -298,14 +359,14 @@ class RendererTests(unittest.TestCase):
             for config in sorted((REPO / "examples").glob("*.json")):
                 output = temp_path / config.stem
                 run(
-                    "python3",
+                    PYTHON,
                     str(SCRIPTS / "render_harness.py"),
                     "--config",
                     str(config),
                     "--output",
                     str(output),
                 )
-                run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+                run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
 
     def test_all_tiers_render_and_validate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -329,7 +390,8 @@ class RendererTests(unittest.TestCase):
                 if tier == "fleet":
                     helper = payload / "scripts/ai-harness/create-lane-worktree.sh"
                     self.assertTrue(helper.is_file())
-                    self.assertTrue(helper.stat().st_mode & stat.S_IXUSR)
+                    if os.name != "nt":
+                        self.assertTrue(helper.stat().st_mode & stat.S_IXUSR)
                     self.assertTrue((payload / ".claude/skills/harness-codex-fleet/SKILL.md").is_file())
 
     def test_greenfield_ready_to_build_renders_context_and_bootstrap_spec(self) -> None:
@@ -340,14 +402,14 @@ class RendererTests(unittest.TestCase):
             output = temp_path / "greenfield-output"
             config.write_text(json.dumps(configured, indent=2) + "\n")
             run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
                 "--output",
                 str(output),
             )
-            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
             payload = output / "payload"
             for rel in (
                 "README.md",
@@ -374,14 +436,14 @@ class RendererTests(unittest.TestCase):
             output = temp_path / "greenfield-context-only-output"
             config.write_text(json.dumps(configured, indent=2) + "\n")
             run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
                 "--output",
                 str(output),
             )
-            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
             payload = output / "payload"
             self.assertFalse((payload / "README.md").exists())
             self.assertFalse((payload / ".ai/specs/current-task.md").exists())
@@ -408,7 +470,7 @@ class RendererTests(unittest.TestCase):
                 config = temp_path / f"greenfield-invalid-{index}.json"
                 config.write_text(json.dumps(configured, indent=2) + "\n")
                 result = run(
-                    "python3",
+                    PYTHON,
                     str(SCRIPTS / "render_harness.py"),
                     "--config",
                     str(config),
@@ -428,14 +490,14 @@ class RendererTests(unittest.TestCase):
             output = temp_path / "plugin-output"
             config.write_text(json.dumps(configured, indent=2) + "\n")
             run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
                 "--output",
                 str(output),
             )
-            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
             skill = (
                 output
                 / "payload/.claude/skills/harness-codex-delegate/SKILL.md"
@@ -454,14 +516,14 @@ class RendererTests(unittest.TestCase):
             output = temp_path / "claude-only-output"
             config.write_text(json.dumps(configured, indent=2) + "\n")
             run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
                 "--output",
                 str(output),
             )
-            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
             payload = output / "payload"
             self.assertFalse(
                 (payload / ".claude/skills/harness-codex-delegate/SKILL.md").exists()
@@ -482,7 +544,7 @@ class RendererTests(unittest.TestCase):
                 config = temp_path / f"fleet-{delegate}.json"
                 config.write_text(json.dumps(configured, indent=2) + "\n")
                 result = run(
-                    "python3",
+                    PYTHON,
                     str(SCRIPTS / "render_harness.py"),
                     "--config",
                     str(config),
@@ -503,18 +565,25 @@ class RendererTests(unittest.TestCase):
             original = "# Existing human contract\n"
             (target / "AGENTS.md").write_text(original)
 
-            dry = run(str(output / "install-harness.sh"), "--target", str(target), "--dry-run")
+            dry = run_installer(
+                output / "install-harness.sh", "--target", str(target), "--dry-run"
+            )
             self.assertIn("CONFLICT  AGENTS.md", dry.stdout)
             self.assertIn("Dry run only", dry.stdout)
             self.assertFalse((target / "CLAUDE.md").exists())
 
-            apply = run(str(output / "install-harness.sh"), "--target", str(target), "--apply-new-only")
+            apply = run_installer(
+                output / "install-harness.sh",
+                "--target",
+                str(target),
+                "--apply-new-only",
+            )
             self.assertIn("SKIPPED   AGENTS.md (conflict)", apply.stdout)
             self.assertEqual((target / "AGENTS.md").read_text(), original)
             self.assertTrue((target / "CLAUDE.md").is_file())
 
             check = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "check_installed.py"),
                 "--root",
                 str(target),
@@ -532,7 +601,12 @@ class RendererTests(unittest.TestCase):
             original = "# Existing contract\n"
             (target / "AGENTS.md").write_text(original)
 
-            run(str(output / "install-harness.sh"), "--target", str(target), "--backup-and-overwrite")
+            run_installer(
+                output / "install-harness.sh",
+                "--target",
+                str(target),
+                "--backup-and-overwrite",
+            )
             self.assertNotEqual((target / "AGENTS.md").read_text(), original)
             backups = list((target / ".harness-backups").rglob("AGENTS.md"))
             self.assertEqual(len(backups), 1)
@@ -572,14 +646,14 @@ class RendererTests(unittest.TestCase):
             output = temp_path / "custom-output"
             config.write_text(json.dumps(custom, indent=2) + "\n")
             run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
                 "--output",
                 str(output),
             )
-            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
             payload = output / "payload"
             self.assertTrue((payload / ".claude/rules/harness-frontend-boundaries.md").is_file())
             self.assertTrue((payload / ".claude/skills/harness-release-readiness/SKILL.md").is_file())
@@ -627,7 +701,7 @@ class RendererTests(unittest.TestCase):
                 config = temp_path / f"unsafe-{index}.json"
                 config.write_text(json.dumps(case, indent=2) + "\n")
                 result = run(
-                    "python3",
+                    PYTHON,
                     str(SCRIPTS / "render_harness.py"),
                     "--config",
                     str(config),
@@ -648,7 +722,7 @@ class RendererTests(unittest.TestCase):
             sentinel = output / "human-file.txt"
             sentinel.write_text("preserve me\n")
             result = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
@@ -668,7 +742,7 @@ class RendererTests(unittest.TestCase):
             config.write_text(json.dumps(profile("lite"), indent=2) + "\n")
             output = temp_path / "generated"
             command = (
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
@@ -683,6 +757,7 @@ class RendererTests(unittest.TestCase):
             self.assertFalse((output / "stale.txt").exists())
             self.assertTrue(marker.is_file())
 
+    @unittest.skipUnless(SYMLINKS, "symlink creation requires privilege here")
     def test_installer_refuses_symlinked_destination_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             temp_path = Path(temp)
@@ -693,12 +768,14 @@ class RendererTests(unittest.TestCase):
             outside.mkdir()
             os.symlink(outside, target / ".claude")
 
-            dry = run(str(output / "install-harness.sh"), "--target", str(target), "--dry-run")
+            dry = run_installer(
+                output / "install-harness.sh", "--target", str(target), "--dry-run"
+            )
             self.assertIn("BLOCKED", dry.stdout)
             self.assertIn("symlink path component", dry.stdout)
 
-            apply = run(
-                str(output / "install-harness.sh"),
+            apply = run_installer(
+                output / "install-harness.sh",
                 "--target",
                 str(target),
                 "--apply-new-only",
@@ -715,10 +792,10 @@ class RendererTests(unittest.TestCase):
             delegate = output / "payload/.claude/skills/harness-codex-delegate/SKILL.md"
             text = delegate.read_text()
             text = text.replace("--sandbox workspace-write", "--sandbox danger-full-access", 1)
-            delegate.write_text(text)
+            write_lf(delegate, text)
 
             result = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "validate_harness.py"),
                 str(output),
                 check=False,
@@ -763,9 +840,9 @@ class RendererTests(unittest.TestCase):
             config = temp_path / "custom-context.json"
             output = temp_path / "generated"
             config.write_text(json.dumps(data, indent=2) + "\n")
-            run("python3", str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
                 "--output", str(output))
-            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
 
             agents = (output / "payload" / "AGENTS.md").read_text()
             self.assertIn("60k-90k tokens", agents)
@@ -797,7 +874,7 @@ class RendererTests(unittest.TestCase):
                 config = temp_path / f"bad-context-{index}.json"
                 config.write_text(json.dumps(data, indent=2) + "\n")
                 result = run(
-                    "python3",
+                    PYTHON,
                     str(SCRIPTS / "render_harness.py"),
                     "--config",
                     str(config),
@@ -816,7 +893,7 @@ class RendererTests(unittest.TestCase):
             config = temp_path / "bad.json"
             config.write_text(json.dumps(bad))
             result = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "render_harness.py"),
                 "--config",
                 str(config),
@@ -870,7 +947,7 @@ class GraphTests(unittest.TestCase):
         output = temp_path / "generated-graphs"
         config.write_text(json.dumps(data, indent=2) + "\n")
         run(
-            "python3",
+            PYTHON,
             str(SCRIPTS / "render_harness.py"),
             "--config",
             str(config),
@@ -884,12 +961,12 @@ class GraphTests(unittest.TestCase):
             graph_file = Path(temp) / "graph.json"
             graph_file.write_text(json.dumps(GRAPH))
 
-            result = run("python3", str(SCRIPTS / "harness_graph.py"), "--graph", str(graph_file))
+            result = run(PYTHON, str(SCRIPTS / "harness_graph.py"), "--graph", str(graph_file))
             self.assertIn("4 nodes", result.stdout)
             self.assertIn("1 looping", result.stdout)
 
             planned = run(
-                "python3",
+                PYTHON,
                 str(SCRIPTS / "harness_graph.py"),
                 "--graph",
                 str(graph_file),
@@ -904,7 +981,7 @@ class GraphTests(unittest.TestCase):
     def test_graphs_render_workflow_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output = self.render_with_graphs(Path(temp), [GRAPH])
-            run("python3", str(SCRIPTS / "validate_harness.py"), str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
 
             script = output / "payload" / ".claude" / "workflows" / "review-changes.js"
             self.assertTrue(script.is_file())
@@ -1009,7 +1086,7 @@ class GraphTests(unittest.TestCase):
                 config = temp_path / f"bad-graph-{index}.json"
                 config.write_text(json.dumps(data, indent=2) + "\n")
                 result = run(
-                    "python3",
+                    PYTHON,
                     str(SCRIPTS / "render_harness.py"),
                     "--config",
                     str(config),
@@ -1027,23 +1104,162 @@ class GraphTests(unittest.TestCase):
             script = workflows / "review-changes.js"
             original = script.read_text()
 
-            script.write_text(original.replace("while (attempt < 3)", "while (true)"))
-            result = run("python3", str(SCRIPTS / "validate_harness.py"), str(output), check=False)
+            write_lf(
+                script, original.replace("while (attempt < 3)", "while (true)")
+            )
+            result = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output), check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("lost the iteration cap", result.stderr)
 
-            script.write_text(original)
+            write_lf(script, original)
             orphan = workflows / "unlisted.js"
-            orphan.write_text("export const meta = {}\n")
-            result = run("python3", str(SCRIPTS / "validate_harness.py"), str(output), check=False)
+            write_lf(orphan, "export const meta = {}\n")
+            result = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output), check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not correspond to a declared graph", result.stderr)
 
             orphan.unlink()
             script.unlink()
-            result = run("python3", str(SCRIPTS / "validate_harness.py"), str(output), check=False)
+            result = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output), check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("has no generated workflow script", result.stderr)
+
+
+class PlatformIndependenceTests(unittest.TestCase):
+    """Rendering and validation must not change with the operator's platform."""
+
+    def test_shadow_stubs_are_classified(self) -> None:
+        validator = load_validator()
+        for stub in (
+            r"C:\Windows\System32\bash.exe",
+            "C:/Windows/System32/bash.exe",
+            r"C:\Users\dev\AppData\Local\Microsoft\WindowsApps\python3.exe",
+        ):
+            self.assertTrue(validator.is_shadow_stub(stub), stub)
+        for real in (
+            r"C:\Program Files\Git\bin\bash.exe",
+            "/usr/bin/bash",
+            "/bin/bash",
+        ):
+            self.assertFalse(validator.is_shadow_stub(real), real)
+
+    def test_find_bash_never_returns_a_stub(self) -> None:
+        validator = load_validator()
+        found = validator.find_bash()
+        if found is None:
+            self.skipTest("no bash available on this machine")
+        self.assertTrue(Path(found).is_absolute())
+        self.assertFalse(validator.is_shadow_stub(found))
+
+    def test_rendered_package_is_lf_on_every_platform(self) -> None:
+        """A CRLF package breaks the installer and disables the fenced-block scan."""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            output = temp_path / "generated-standard"
+            config = temp_path / "profile.json"
+            config.write_text(json.dumps(profile("standard"), indent=2) + "\n")
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+
+            crlf = [
+                str(path.relative_to(output))
+                for path in output.rglob("*")
+                if path.is_file() and b"\r\n" in path.read_bytes()
+            ]
+            self.assertEqual(crlf, [])
+
+            # And the validator must reject a package that regresses.
+            installer = output / "install-harness.sh"
+            installer.write_bytes(installer.read_bytes().replace(b"\n", b"\r\n"))
+            result = run(
+                PYTHON, str(SCRIPTS / "validate_harness.py"), str(output), check=False
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("CRLF line endings", result.stderr)
+
+    def test_manifest_paths_are_platform_independent(self) -> None:
+        """Backslash keys would skip every skill and agent check on Windows.
+
+        The skill and agent scans match on a `.claude/skills/` prefix, so a
+        manifest rendered with native separators silently disabled them.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            output = temp_path / "generated-standard"
+            config = temp_path / "profile.json"
+            config.write_text(json.dumps(profile("standard"), indent=2) + "\n")
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+
+            manifest = json.loads((output / "harness-manifest.json").read_text())
+            paths = [item["path"] for item in manifest["files"]]
+            self.assertTrue(paths)
+            self.assertFalse([item for item in paths if "\\" in item], paths)
+            self.assertIn(".claude/skills/harness-codex-delegate/SKILL.md", paths)
+
+    def test_installed_checker_scans_hand_added_agents_on_every_platform(self) -> None:
+        """Files the harness did not generate reach the scan only via rglob.
+
+        Generated components are already listed with POSIX keys, so a native
+        separator there went unnoticed. A hand-written agent is discovered by
+        walking `.claude/agents`, and its `.claude/agents/` prefix match was
+        skipped on Windows.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            output = temp_path / "generated-standard"
+            config = temp_path / "profile.json"
+            config.write_text(json.dumps(profile("standard"), indent=2) + "\n")
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+
+            target = temp_path / "target"
+            target.mkdir()
+            run_installer(
+                output / "install-harness.sh",
+                "--target",
+                str(target),
+                "--apply-new-only",
+            )
+
+            agents_dir = target / ".claude" / "agents"
+            self.assertTrue(agents_dir.is_dir())
+            write_lf(
+                agents_dir / "hand-written.md",
+                "---\nname: hand-written\n---\n\nA locally authored agent.\n",
+            )
+
+            check = run(
+                PYTHON, str(SCRIPTS / "check_installed.py"), "--root", str(target),
+                check=False,
+            )
+            self.assertNotEqual(check.returncode, 0)
+            self.assertIn(
+                "agent missing description frontmatter: .claude/agents/hand-written.md",
+                check.stdout + check.stderr,
+            )
+
+    def test_missing_bash_downgrades_the_installer_check(self) -> None:
+        """A machine with no bash gets a warning, not a false syntax error."""
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "generated-standard"
+            config = Path(temp) / "profile.json"
+            config.write_text(json.dumps(profile("standard"), indent=2) + "\n")
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+
+            original = validator.find_bash
+            validator.find_bash = lambda: None
+            try:
+                errors: list[str] = []
+                warnings: list[str] = []
+                validator.check_installer_syntax(output, errors, warnings)
+            finally:
+                validator.find_bash = original
+
+            self.assertEqual(errors, [])
+            self.assertTrue(any("bash not found" in item for item in warnings), warnings)
 
 
 if __name__ == "__main__":
