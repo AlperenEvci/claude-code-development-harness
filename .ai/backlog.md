@@ -19,7 +19,7 @@
 
 **Phase 1 — Context and prompt policy. DONE.** `context_policy` added to the profile (working band, `on_ceiling` action, `isolate_when`, `always`), rendered into a `## Context budget` section in `AGENTS.md` and a `## Context discipline` section in `CLAUDE.md`, with a validator check that rejects drift between the profile and the rendered contract. Optional and defaulted, so v0.2 profiles stay valid. Three tests added.
 
-**Phase 2 — Graph and loop engineering.** Add graph and loop specs to the profile. Generate Workflow tool scripts under `.claude/workflows/`. Add `scripts/harness_graph.py` to validate a DAG, reject cycles, and emit a topological order. Loops need an explicit termination condition and an iteration cap.
+**Phase 2 — Graph and loop engineering. DONE.** Optional `graphs` array in the profile; `scripts/harness_graph.py` validates the DAG and emits the Workflow script; generated scripts land under `.claude/workflows/`. Cycles, unknown dependencies, and duplicate node or graph names are rejected by name. Loop safety is structural: `repeat_until` and `max_iterations` are only valid together, the cap is bounded to 2-20, and a generated loop breaks on `done` and `log()`s when it stops at the cap. Nodes await only their own dependencies, so independent branches run concurrently. Node prompts are escaped into the emitted template literal. `validate_harness.py` catches missing or orphaned scripts, a missing meta block, a lost cap, and invalid JavaScript. Six tests added.
 
 **Phase 3 — Agent catalog and capability tiers.** Redesign the agent section of the schema around archetypes and skill pools. Implement `reader` / `implementer` / `verifier` tiers with tier-aware validation. Rewrite — do not delete — the tests that currently assert generated agents can never write. Per decision 0002, each tier records its **session launch flags** next to its frontmatter, so authority is enforced by the process (`--permission-mode`, `--tools`, `--restricted`, `--worktree`) rather than merely declared.
 
@@ -58,6 +58,14 @@
 - Full suite on Windows: 27 tests, 15 failing — all environmental, see Known risks.
 - **CI green on ubuntu-latest: 27 tests, `OK`.** Run 33372597743 on commit `1afce62`. All three new context-policy tests pass. Phase 1 is verified against the authoritative gate.
 
+### Phase 2 verification
+
+- `python -m compileall -q plugins/development-harness/scripts tests` — passes.
+- All three `examples/*.json` still render, including the two with no `graphs` — backward compatibility holds.
+- Validator drift cases verified locally: removed cap, invalid JavaScript, orphan script, and missing script are each caught.
+- Full suite on Windows: 33 tests, 16 failing — the same environmental set as Phase 1 plus one new test that reaches `validate_harness.py`. See Known risks.
+- **CI green on ubuntu-latest: 33 tests, `OK`.** Run 33374527893 on commit `0ccced4`, branch `phase-2-graph-loop`. All six new graph tests pass, including the `node --check` test, so the JavaScript check ran rather than being skipped.
+
 ### Repository
 
 Work continues on a private copy, `AlperenEvci/claude-code-development-harness`.
@@ -69,6 +77,8 @@ GitHub cannot fork a public repository privately, so this is a mirror rather tha
 
 ### Exact next step
 
-Start Phase 2 on a feature branch: graph and loop engineering. Graph and loop specs in the profile, generated Workflow scripts under `.claude/workflows/`, and `scripts/harness_graph.py` for DAG validation with cycle rejection and topological ordering. Loops need an explicit termination condition and an iteration cap.
+Start Phase 3 on a feature branch: agent catalog and capability tiers. Redesign the agent section of the schema around archetypes and skill pools, implement `reader` / `implementer` / `verifier` with tier-aware validation, and record each tier's session launch flags next to its frontmatter so authority is enforced by the process. Rewrite — do not delete — the tests that currently assert generated agents can never write, and ship all four compensating controls from decision 0001 in the same change.
 
-The two baseline commits went to `main` to establish the private repository. From Phase 2 onward, follow the repository's own `feature-branches` policy.
+Phase 2 is on `phase-2-graph-loop` and green on CI. Merge it into `main` before starting Phase 3.
+
+Note: `gh` resolves the bare repo from `upstream`, not `origin`. Always pass `-R AlperenEvci/claude-code-development-harness` when checking CI.
