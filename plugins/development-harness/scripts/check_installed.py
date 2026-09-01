@@ -352,6 +352,27 @@ def main() -> None:
             else:
                 info.append("Codex CLI found on PATH")
 
+    surface = str(profile.get("session_surface", "inproc")).lower()
+    if surface == "orca":
+        claude_md = read_text(root / "CLAUDE.md")
+        if claude_md and "### Watching a session in Orca" not in claude_md:
+            errors.append(
+                "profile configures session_surface=orca but the installed "
+                "CLAUDE.md does not document the Orca surface"
+            )
+        # Absence is not an error. The surface is an operator convenience: the
+        # harness works unchanged without it, and a teammate who does not run
+        # Orca should get a note rather than a failing check.
+        if shutil.which("orca") is None:
+            warnings.append(
+                "session_surface=orca but no orca command is on PATH; "
+                "--surface orca cannot run here"
+            )
+        else:
+            info.append("Orca session surface configured and orca found on PATH")
+    elif surface != "inproc":
+        errors.append(f"unknown session_surface: {surface}")
+
     if (root / ".claude/settings.json").exists():
         text = read_text(root / ".claude/settings.json")
         if "bypassPermissions" in text or "dangerously" in text:

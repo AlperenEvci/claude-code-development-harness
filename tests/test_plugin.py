@@ -1947,6 +1947,273 @@ class SessionLaunchTests(unittest.TestCase):
             self.assertFalse(SESSION.is_self(entry))
 
 
+class OrcaSurfaceTests(unittest.TestCase):
+    """The launch surface may change where a session is watched, never its authority."""
+
+    def launch(self, *args: str, check: bool = False):
+        return run(
+            PYTHON, str(SCRIPTS / "harness_session.py"), "launch", *args, check=check
+        )
+
+    def plan(self, capability: str, *args: str) -> dict:
+        proc = self.launch(
+            "--capability", capability, "--task", "Do the thing",
+            "--surface", "orca", "--json", *args, check=True,
+        )
+        return json.loads(proc.stdout)
+
+    def test_orca_never_uses_orcas_own_agent_launcher(self) -> None:
+        """The defect this whole design exists to avoid.
+
+        `orca worktree create --agent claude` starts Orca's known-agent
+        launcher, which accepts no `--permission-mode` and no `--tools`. Using
+        it would produce a session whose tier had silently vanished - a
+        `reader` holding `Write`. The lane is therefore created empty and the
+        tier-enforced command is started in it as a separate step.
+        """
+        plan = self.plan("implementer", "--lane", "auth", "--scope", "src")
+        create = [s for s in plan["steps"] if s["kind"] == "worktree-create"]
+        self.assertEqual(len(create), 1)
+        self.assertNotIn("--agent", create[0]["argv"])
+        for step in plan["steps"]:
+            self.assertNotIn("--prompt", step["argv"])
+
+    def test_orca_keeps_every_flag_that_grants_authority(self) -> None:
+        plan = self.plan("implementer", "--lane", "auth", "--scope", "src")
+        command = next(
+            s["argv"][s["argv"].index("--command") + 1]
+            for s in plan["steps"]
+            if s["kind"] == "terminal-create"
+        )
+        self.assertIn("--permission-mode acceptEdits", command)
+        self.assertIn("--add-dir src", command)
+        # Isolation, and only isolation, moved to Orca.
+        self.assertNotIn("--worktree", command)
+
+    def test_a_lane_replaces_claude_isolation_rather_than_nesting_inside_it(self) -> None:
+        argv = SESSION.launch_argv(
+            "implementer", "task", scope=["src"], external_isolation=True
+        )
+        self.assertNotIn("--worktree", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(argv[argv.index("--add-dir") + 1], "src")
+
+    def test_a_tier_that_does_not_isolate_cannot_be_handed_a_lane(self) -> None:
+        with self.assertRaises(SESSION.SessionError):
+            SESSION.launch_argv("reader", "task", external_isolation=True)
+
+    def test_a_writing_tier_on_orca_requires_a_lane(self) -> None:
+        """Orca replaces the in-process gate; it does not remove it.
+
+        `--exec` refuses a writing tier in-process because starting something
+        that changes the repository is the operator's action. On Orca the
+        session is visible *and* confined to its own checkout, and the lane is
+        what makes the second half true.
+        """
+        proc = self.launch(
+            "--capability", "implementer", "--task", "t",
+            "--surface", "orca", "--scope", "src",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("requires --lane", proc.stderr)
+
+    def test_orca_and_background_are_mutually_exclusive(self) -> None:
+        proc = self.launch(
+            "--capability", "implementer", "--task", "t", "--surface", "orca",
+            "--lane", "l", "--scope", "src", "--background",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("cannot be combined with --background", proc.stderr)
+
+    def test_a_lane_without_the_orca_surface_is_refused(self) -> None:
+        proc = self.launch(
+            "--capability", "implementer", "--task", "t", "--lane", "l",
+            "--scope", "src",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("needs --surface orca", proc.stderr)
+
+    def test_the_prompt_is_terminal_input_not_a_shell_argument(self) -> None:
+        """A prompt is arbitrary operator text and the command string is
+        re-parsed by pwsh or a POSIX shell, which disagree about quoting."""
+        proc = run(
+            PYTHON, str(SCRIPTS / "harness_session.py"), "launch",
+            "--capability", "reader", "--task", "it's \"quoted\" & odd",
+            "--surface", "orca", "--json", check=True,
+        )
+        plan = json.loads(proc.stdout)
+        command = next(
+            s["argv"][s["argv"].index("--command") + 1]
+            for s in plan["steps"]
+            if s["kind"] == "terminal-create"
+        )
+        self.assertNotIn("odd", command)
+        send = next(s for s in plan["steps"] if s["kind"] == "send-prompt")
+        self.assertIn("it's \"quoted\" & odd", send["argv"])
+
+    def test_the_prompt_waits_for_the_tui_before_it_is_sent(self) -> None:
+        """Input written before the TUI is listening is lost."""
+        plan = self.plan("reader")
+        kinds = [step["kind"] for step in plan["steps"]]
+        self.assertLess(kinds.index("wait-idle"), kinds.index("send-prompt"))
+
+    def test_the_inproc_surface_is_unchanged(self) -> None:
+        """Every profile written before this option means inproc."""
+        argv = SESSION.launch_argv("implementer", "task", worktree="lane", scope=["src"])
+        self.assertEqual(argv[argv.index("--worktree") + 1], "lane")
+        self.assertEqual(argv[-1], "task")
+
+
+class OrcaTeardownTests(unittest.TestCase):
+    """Everything here was found by running the surface, not by reading it."""
+
+    def test_orca_output_is_decoded_as_utf8_not_the_locale_code_page(self) -> None:
+        """`text=True` alone decodes with the locale codec.
+
+        Orca's terminal payloads embed a preview of the tab, so they carry box
+        drawing and ANSI. On a default Windows install that is cp1252, and the
+        sweep died with UnicodeDecodeError against a live tab.
+        """
+        self.assertEqual(
+            SESSION.ORCA_TEXT, {"text": True, "encoding": "utf-8", "errors": "replace"}
+        )
+        source = (SCRIPTS / "harness_session.py").read_text(encoding="utf-8")
+        orca_calls = source.count("ORCA_TEXT")
+        # One definition, one use per Orca subprocess call.
+        self.assertGreaterEqual(orca_calls, 3)
+        self.assertNotIn("text=True,\n            timeout=180", source)
+
+    def test_a_title_the_console_cannot_encode_does_not_kill_the_sweep(self) -> None:
+        """Measured: a tab titled with a status glyph raised UnicodeEncodeError
+        on a cp1254 console, mid-listing."""
+        for hostile in ("\u2733 Orca_surface_live", "\udc90 tab", "gelistirme"):
+            self.assertIsInstance(SESSION.printable(hostile), str)
+        cleaned = SESSION.printable("\udc90 x")
+        cleaned.encode(sys.stdout.encoding or "utf-8")  # must not raise
+
+    def test_tabs_are_identified_by_orcas_field_not_by_the_title(self) -> None:
+        """Claude Code rewrites its own terminal title from the conversation.
+
+        A tab created as `harness:reader:1bcf4ec4` was found again as
+        `Orca_surface_live`, so a title prefix cannot identify a harness tab.
+        `agentIdentity` belongs to Orca and is not rewritten.
+        """
+        payload = {
+            "ok": True,
+            "result": {
+                "terminals": [
+                    {"handle": "a", "title": "harness:reader:1", "agentIdentity": "claude"},
+                    {"handle": "b", "title": "Orca_surface_live", "agentIdentity": "claude"},
+                    {"handle": "c", "title": "harness:reader:2", "agentIdentity": None},
+                ]
+            },
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with mock.patch.object(SESSION, "find_orca", return_value="orca"), \
+                mock.patch.object(SESSION.subprocess, "run", return_value=completed):
+            tabs = SESSION.orca_tabs(Path("."))
+        self.assertEqual([tab["handle"] for tab in tabs], ["a", "b"])
+
+    def test_the_sweep_never_closes_an_orca_tab(self) -> None:
+        """The title is not a reliable owner mark and Orca exposes no session id,
+        so nothing can tell a harness tab from the one running the sweep.
+        Closing on that basis would be the `is_self` bug with a worse blast
+        radius."""
+        source = (SCRIPTS / "harness_session.py").read_text(encoding="utf-8")
+        self.assertNotIn("terminal\", \"close", source)
+        self.assertNotIn("def close_orca_tab", source)
+
+    def test_orca_absence_is_never_an_error(self) -> None:
+        with mock.patch.object(SESSION, "find_orca", return_value=None):
+            self.assertEqual(SESSION.orca_tabs(Path(".")), [])
+
+
+class OrcaSurfaceRenderTests(unittest.TestCase):
+    """The configured surface and the rendered contract must agree."""
+
+    def render(self, temp_path: Path, surface: str | None) -> Path:
+        data = profile("standard")
+        if surface is not None:
+            data["session_surface"] = surface
+        config = temp_path / "profile.json"
+        output = temp_path / "generated"
+        write_lf(config, json.dumps(data, indent=2) + chr(10))
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output / "payload"
+
+    def test_the_section_renders_only_when_the_surface_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), "orca")
+            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertIn("### Watching a session in Orca", text)
+            self.assertIn("--surface orca", text)
+
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), None)
+            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertNotIn("Orca", text)
+
+    def test_the_validator_rejects_a_harness_that_lost_the_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), "orca")
+            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            write_lf(
+                payload / "CLAUDE.md",
+                text.replace("### Watching a session in Orca", "### Watching"),
+            )
+            data = profile("standard")
+            data["session_surface"] = "orca"
+            errors: list[str] = []
+            VALIDATOR.check_session_surface(data, payload, errors, [])
+            self.assertTrue(any("no '### Watching" in item for item in errors), errors)
+
+    def test_the_validator_rejects_guidance_the_profile_never_asked_for(self) -> None:
+        """Drift in the other direction points operators at an unchosen tool."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), "orca")
+            errors: list[str] = []
+            VALIDATOR.check_session_surface(profile("standard"), payload, errors, [])
+            self.assertTrue(any("but session_surface is" in item for item in errors), errors)
+
+    def test_the_validator_requires_the_rules_the_launcher_enforces(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), "orca")
+            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            write_lf(payload / "CLAUDE.md", text.replace("never parsed", "summarized"))
+            data = profile("standard")
+            data["session_surface"] = "orca"
+            errors: list[str] = []
+            VALIDATOR.check_session_surface(data, payload, errors, [])
+            self.assertTrue(any("never parsed" in item for item in errors), errors)
+
+    def test_lite_cannot_configure_a_surface_it_has_no_tooling_for(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            data = profile("lite")
+            data["session_surface"] = "orca"
+            config = Path(temp) / "profile.json"
+            write_lf(config, json.dumps(data, indent=2) + chr(10))
+            proc = run(
+                PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(Path(temp) / "out"), check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("session_surface=orca requires", proc.stderr)
+
+    def test_an_unknown_surface_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            data = profile("standard")
+            data["session_surface"] = "tmux"
+            config = Path(temp) / "profile.json"
+            write_lf(config, json.dumps(data, indent=2) + chr(10))
+            proc = run(
+                PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(Path(temp) / "out"), check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("session_surface must be one of", proc.stderr)
+
+
 class AgentSynthesisTests(unittest.TestCase):
     """A synthesized agent must never choose its own authority."""
 

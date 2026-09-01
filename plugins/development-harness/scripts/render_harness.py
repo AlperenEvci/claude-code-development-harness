@@ -35,6 +35,12 @@ ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
 ALLOWED_MODES = {"create", "adopt", "upgrade"}
 ALLOWED_DELEGATES = {"codex-plugin", "codex-cli", "claude-only"}
 ALLOWED_ORCHESTRATORS = {"claude-code"}
+#: Where `harness_session.py launch` puts a session. `inproc` is the default and
+#: is what every profile written before this field existed means. `orca` adds the
+#: Orca ADE as a launch surface: the same tier-enforced command, placed in a
+#: terminal tab the operator can watch. It changes where a session is seen, never
+#: what it is allowed to do.
+ALLOWED_SESSION_SURFACES = {"inproc", "orca"}
 ALLOWED_AUTONOMY = {
     "read-only",
     "approval-required",
@@ -84,7 +90,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.9.0"
+GENERATOR_VERSION = "1.10.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -355,6 +361,19 @@ def load_profile(path: Path) -> dict[str, Any]:
     if reasoning not in ALLOWED_REASONING:
         fail(f"codex_reasoning must be one of {sorted(ALLOWED_REASONING)}")
     data["codex_reasoning"] = reasoning
+
+    surface = str(data.get("session_surface", "inproc")).lower()
+    if surface not in ALLOWED_SESSION_SURFACES:
+        fail(f"session_surface must be one of {sorted(ALLOWED_SESSION_SURFACES)}")
+    if surface == "orca" and tier == "lite":
+        # The Orca surface is a way to drive `harness_session.py`, and Lite does
+        # not install it. Accepting the field here would render a harness that
+        # documents a workflow none of its files can perform.
+        fail(
+            "session_surface=orca requires a tier that installs session tooling; "
+            "use standard or fleet, or leave the surface at inproc"
+        )
+    data["session_surface"] = surface
 
     network_access = str(data.get("network_access", "deny-by-default")).lower()
     if network_access not in ALLOWED_NETWORK_ACCESS:
@@ -761,6 +780,64 @@ def format_tokens(value: int) -> str:
     return str(value)
 
 
+def orca_surface_section(profile: dict[str, Any]) -> list[str]:
+    """Guidance for the Orca launch surface, rendered only when it is configured.
+
+    Kept out of the default harness on purpose. A project whose operators do not
+    run Orca gains nothing from instructions for a tool they do not have, and an
+    unconditional section would be one more thing every reader has to skip.
+    """
+    if str(profile.get("session_surface", "inproc")) != "orca":
+        return []
+
+    return [
+        "### Watching a session in Orca",
+        "",
+        "This project configures `session_surface: orca`. Adding `--surface orca` "
+        "places the same command in a visible Orca terminal tab instead of running "
+        "it here, and delivers the prompt as terminal input once the TUI is "
+        "listening:",
+        "",
+        "```bash",
+        f"python {SESSION_TOOL_DIR}/harness_session.py launch \\",
+        "  --capability reader --task \"Map the retry path\" --surface orca",
+        "```",
+        "",
+        "It prints the Orca commands; `--exec` runs them and threads the ids "
+        "between steps. Four rules make this safe to use rather than merely "
+        "convenient:",
+        "",
+        "1. **The tier still comes from the tier table.** The surface decides "
+        "where a session is watched, never what it may do. `--permission-mode`, "
+        "`--tools`, and `--add-dir` are unchanged.",
+        "2. **A writing tier requires `--lane`.** Orca creates that checkout and "
+        "the session is confined to it, so an automatically started implementer "
+        "cannot rewrite the tree you are working in. `claude --worktree` is "
+        "dropped in that case, because Orca already provided the isolation and a "
+        "second nested worktree would help nobody. The substitution is printed.",
+        "3. **Never `orca worktree create --agent claude`.** Orca's own launcher "
+        "takes no `--permission-mode` or `--tools`, so it would start an agent "
+        "with the tier silently missing. The lane is created empty and the "
+        "tier-enforced command is started in it as a separate step.",
+        "4. **Terminal output is never parsed.** `orca terminal read` returns raw "
+        "capture with redraw artefacts mid-word, exactly like `claude logs`. It is "
+        "a human surface. A session still reports through a bus envelope or "
+        "structured output, and `claude agents --json` is still the only answer to "
+        "what is running.",
+        "",
+        "`--surface orca` and `--background` are mutually exclusive: a detached "
+        "session exits immediately and would leave an empty tab.",
+        "",
+        "The sweep below also lists the Claude agent tabs Orca reports for this "
+        "repository, because a foreground session in a tab is reported as active "
+        "and the background sweep would never look at it. It lists them and stops "
+        "there: Claude Code rewrites its own tab title, so nothing can tell a "
+        "harness tab from the one you are working in. When Orca is not installed "
+        "the surface is simply unavailable; nothing else about the harness changes.",
+        "",
+    ]
+
+
 def context_policy_of(profile: dict[str, Any]) -> dict[str, Any]:
     policy = profile.get("context_policy")
     return policy if isinstance(policy, dict) else {}
@@ -915,14 +992,16 @@ def agent_sessions_section(profile: dict[str, Any]) -> str:
     if has_session_tools(profile):
         lines += [
             f"`{SESSION_TOOL_DIR}/harness_session.py` builds the launch command from "
-            "the tier table and prints it. It never starts a session: read the "
-            "command, then run it.",
+            "the tier table and prints it. Read the command, then run it.",
             "",
             "```bash",
             f"python {SESSION_TOOL_DIR}/harness_session.py launch \\",
             "  --capability reader --task \"Map the retry path\"",
             "```",
             "",
+        ]
+        lines += orca_surface_section(profile)
+        lines += [
             "### Handoff",
             "",
             f"`{SESSION_TOOL_DIR}/harness_bus.py` writes typed envelopes under "

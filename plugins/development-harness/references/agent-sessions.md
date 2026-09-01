@@ -180,6 +180,61 @@ running — `claude agents --json --cwd .` remains the only answer to that.
 Post with `--correlation` or the report has nothing to group by, and the run shows
 up as a pile of unlinked envelopes with no duration and no cost.
 
+## The Orca launch surface
+
+Optional, and off unless the profile sets `session_surface: orca`. It changes where a
+session is watched, never what it may do. `.ai/decisions/0003-orca-session-surface.md`
+records the reasoning; this is the working summary.
+
+```bash
+python scripts/ai-harness/harness_session.py launch \
+  --capability reader --task "Map the retry path" --surface orca
+```
+
+That prints the Orca commands. `--exec` runs them and threads the ids between steps.
+
+| Step | Why it exists |
+| --- | --- |
+| `worktree create --name <lane> --no-parent` | an isolated checkout, for a writing tier only |
+| `terminal create --command "<claude ...>"` | the tier-enforced command, in a visible tab |
+| `terminal wait --for tui-idle` | input written before the TUI is listening is lost |
+| `terminal send --text "<task>" --enter` | the prompt is terminal input, never a shell argument |
+
+### Never `orca worktree create --agent claude`
+
+It is the obvious command and it is the one that breaks the tier. Orca's known-agent
+launcher takes no `--permission-mode` and no `--tools`, so a `reader` started that way
+comes up holding `Write`. The lane is created empty and the tier-enforced command is
+started in it separately. The spare shell tab this leaves is the documented cost.
+
+### A writing tier needs a lane
+
+In-process, `--exec` refuses any tier that writes. On Orca that refusal is replaced, not
+removed: the session is visible in a tab *and* `--lane` confines it to its own checkout.
+Because Orca provides the isolation, `claude --worktree` is dropped from the command and
+the substitution is printed. Only isolation moves. `--permission-mode`, `--tools`, and
+`--add-dir` still come from the tier table.
+
+`--surface orca` and `--background` are mutually exclusive: a detached session exits
+immediately, leaving the tab it was placed in empty.
+
+### Still true on this surface
+
+`claude agents --json` is the registry. A session reports through a bus envelope or
+structured output. `orca terminal read` is a human surface for the same reason
+`claude logs` is - measured, its tail interleaves the typed line character by character
+as the shell's predictive editor redraws it. Never parse it.
+
+`sweep` lists the Claude agent tabs Orca reports for this repository alongside
+background sessions, because a foreground session in a tab is reported as active and
+the background sweep would otherwise never look at it. It only lists them. Claude
+Code rewrites its own terminal title from the conversation, so the title the launcher
+set is gone by the time a sweep runs, and Orca exposes no session id to join on -
+nothing can tell a harness tab from the one you are reading this in. Close what you
+recognise with `orca terminal close --terminal <handle> --tab`.
+
+When Orca is not installed the surface is unavailable and nothing else changes.
+
 ## Never
 
 `--dangerously-skip-permissions` and `--allow-dangerously-skip-permissions` must

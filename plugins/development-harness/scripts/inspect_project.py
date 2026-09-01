@@ -553,6 +553,53 @@ def classify_project_state(
     }
 
 
+def detect_orca(root: Path) -> dict[str, Any]:
+    """Is the Orca ADE CLI usable here?
+
+    Two traps make this more than a `which` call.
+
+    On Linux, bare `orca` is normally `/usr/bin/orca`, the GNOME screen reader.
+    Reporting that as an editor would put an Orca launch surface into a harness
+    whose `orca` command reads the screen aloud. Orca's own CLI documents the
+    answer: honour `ORCA_CLI_COMMAND`, and prefer `orca-ide` on Linux.
+
+    The ADE also has no `--version`; it prints its usage banner and exits zero,
+    and so does the screen reader. `agent-context` is the cheap discriminator -
+    it exists only on the ADE and prints the size of its command schema.
+    """
+    candidates = []
+    configured = os.environ.get("ORCA_CLI_COMMAND", "").strip()
+    if configured:
+        candidates.append(configured)
+    if sys.platform.startswith("linux"):
+        candidates.append("orca-ide")
+    candidates.append("orca")
+
+    for name in candidates:
+        path = shutil.which(name)
+        if not path:
+            continue
+        rc, stdout, stderr = run([name, "agent-context"], root)
+        banner = (stdout or stderr or "").strip()
+        if rc == 0 and "schema" in banner.lower():
+            return {
+                "available": True,
+                "path": path,
+                "command": name,
+                "version": banner.splitlines()[0][:200],
+            }
+        return {
+            "available": False,
+            "path": path,
+            "command": name,
+            "note": (
+                f"{name} on PATH did not answer `agent-context`; on Linux this is "
+                "usually the GNOME screen reader, not the Orca editor"
+            ),
+        }
+    return {"available": False, "path": None}
+
+
 def detect_tools(root: Path) -> dict[str, Any]:
     tools: dict[str, Any] = {}
     for name in ("claude", "codex", "git", "python3"):
@@ -564,6 +611,7 @@ def detect_tools(root: Path) -> dict[str, Any]:
             if rc == 0 and version:
                 item["version"] = version.splitlines()[0][:200]
         tools[name] = item
+    tools["orca"] = detect_orca(root)
     return tools
 
 def main() -> None:

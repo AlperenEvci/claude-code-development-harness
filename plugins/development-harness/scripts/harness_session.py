@@ -17,6 +17,12 @@ session buys no safety and costs a round trip. A tier that writes is different i
 kind: it changes the repository, so its command stays on screen where it can be
 read before it is run.
 
+`--surface orca` launches the same tier-enforced command into a visible Orca
+terminal tab instead of this process. The surface changes where the session is
+watched, never what it may do: the flags still come from the tier table, the
+registry is still `claude agents --json`, and terminal output is still never
+parsed. See `.ai/decisions/0003-orca-session-surface.md`.
+
 `sweep` finds background sessions this repository left behind. Background
 sessions outlive the session that started them, so an orchestrator that forgets
 one leaves an agent running against the repository indefinitely. Like the
@@ -58,6 +64,193 @@ def find_claude() -> str | None:
     return shutil.which("claude")
 
 
+#: Where a launched session runs. `inproc` is the default and is unchanged from
+#: before this option existed. `orca` hands the command to the Orca ADE so the
+#: session appears as a terminal tab the operator can watch.
+SESSION_SURFACES = ("inproc", "orca")
+
+
+#: Orca answers in UTF-8, and its terminal payloads embed a preview of the tab -
+#: box drawing, ANSI, and whatever the agent last printed. `text=True` alone
+#: decodes with the locale codec, which is cp1252 on a default Windows install
+#: and dies on the first such byte. Measured: `sweep` raised UnicodeDecodeError
+#: reading a live tab. `replace` keeps a decorative byte from breaking a
+#: teardown check; nothing here parses the preview.
+ORCA_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
+
+def find_orca() -> str | None:
+    """Locate the Orca CLI.
+
+    Only ever consulted for `--surface orca`. When it is absent the caller says
+    so and falls back to `inproc`, because an unavailable window manager is a
+    missing convenience, not a missing capability.
+    """
+    return shutil.which("orca")
+
+
+def orca_plan(
+    argv: list[str],
+    task: str,
+    *,
+    session_id: str,
+    capability: str,
+    lane: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build the ordered Orca commands that place `argv` in a visible terminal.
+
+    Three properties of the Orca CLI shape this, all of them measured rather
+    than assumed:
+
+    `orca worktree create --agent claude` is **not** usable here. It launches
+    Orca's own known-agent launcher, which accepts no `--permission-mode` or
+    `--tools`, so a tier's enforcement flags would be silently dropped and a
+    `reader` would come up holding `Write`. A lane is therefore created empty
+    and the tier-enforced command is started in it as a second step. The
+    fallback shell this leaves is the documented cost of not weakening a tier.
+
+    The prompt is delivered by `terminal send`, not embedded in `--command`.
+    The command string is re-parsed by the worktree's shell, and this harness
+    runs on both pwsh and POSIX shells, which disagree about quoting; a prompt
+    is arbitrary operator text, so embedding it is a quoting bug waiting for
+    the first apostrophe. Sending it as terminal input sidesteps the shell.
+
+    `terminal wait --for tui-idle` precedes the send because input written
+    before the TUI is listening is lost.
+    """
+    title = f"harness:{capability}:{session_id[:8]}"
+    # The lane's own id is only known after the worktree exists, so later steps
+    # refer to it symbolically and `--exec` substitutes the real value.
+    selector = "id:<worktree-id>" if lane else "active"
+
+    steps: list[dict[str, Any]] = []
+    if lane:
+        steps.append(
+            {
+                "kind": "worktree-create",
+                "why": "an isolated checkout for a session that writes",
+                "argv": [
+                    "orca",
+                    "worktree",
+                    "create",
+                    "--name",
+                    lane,
+                    "--no-parent",
+                    "--json",
+                ],
+            }
+        )
+    steps.append(
+        {
+            "kind": "terminal-create",
+            "why": "start the tier-enforced command in a visible tab",
+            "argv": [
+                "orca",
+                "terminal",
+                "create",
+                "--worktree",
+                selector,
+                "--title",
+                title,
+                "--command",
+                " ".join(quote(item) for item in argv),
+                "--json",
+            ],
+        }
+    )
+    steps.append(
+        {
+            "kind": "wait-idle",
+            "why": "input written before the TUI is listening is lost",
+            "argv": [
+                "orca",
+                "terminal",
+                "wait",
+                "--terminal",
+                "<terminal-handle>",
+                "--for",
+                "tui-idle",
+                "--timeout-ms",
+                "120000",
+                "--json",
+            ],
+        }
+    )
+    steps.append(
+        {
+            "kind": "send-prompt",
+            "why": "the prompt is terminal input, never a shell argument",
+            "argv": [
+                "orca",
+                "terminal",
+                "send",
+                "--terminal",
+                "<terminal-handle>",
+                "--text",
+                task,
+                "--enter",
+                "--json",
+            ],
+        }
+    )
+    return steps
+
+
+def orca_run(steps: list[dict[str, Any]]) -> int:
+    """Run an Orca plan, threading the ids each step discovers into the next.
+
+    Every step is checked for `ok`. Orca reports failure in the JSON body with a
+    zero exit status, so trusting the return code alone would let a failed
+    worktree create be followed by a terminal create against a selector that
+    does not exist.
+    """
+    binary = find_orca()
+    if binary is None:
+        fail(
+            "orca is not on PATH; cannot --exec with --surface orca. "
+            "Re-run with --surface inproc, or run the printed plan by hand."
+        )
+
+    resolved: dict[str, str] = {}
+    for step in steps:
+        argv = [resolved.get(item, item) for item in step["argv"]]
+        leftover = [item for item in argv if item.startswith("<") and item.endswith(">")]
+        if leftover:
+            fail(f"unresolved Orca placeholder {leftover[0]} in {step['kind']}")
+
+        print(f"$ {' '.join(quote(item) for item in argv)}")
+        try:
+            proc = subprocess.run(  # noqa: S603  (fixed argv, no shell)
+                [binary, *argv[1:]],
+                capture_output=True,
+                timeout=180,
+                check=False,
+                **ORCA_TEXT,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            fail(f"Orca step {step['kind']} could not run: {exc}")
+
+        try:
+            payload = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if proc.returncode != 0 or not payload.get("ok", False):
+            detail = (payload.get("error") or {}).get("message") or proc.stderr.strip()
+            fail(f"Orca step {step['kind']} failed: {detail or 'unknown error'}")
+
+        result = payload.get("result") or {}
+        worktree = (result.get("worktree") or {}).get("id")
+        if worktree:
+            resolved["id:<worktree-id>"] = f"id:{worktree}"
+        handle = (result.get("terminal") or {}).get("handle")
+        if handle:
+            resolved["<terminal-handle>"] = handle
+
+    return 0
+
+
+
+
 def launch_argv(
     capability: str,
     task: str,
@@ -67,6 +260,8 @@ def launch_argv(
     worktree: str | None = None,
     scope: list[str] | None = None,
     restricted: bool = False,
+    include_task: bool = True,
+    external_isolation: bool = False,
 ) -> list[str]:
     """Build the command that launches a session under `capability`.
 
@@ -108,6 +303,12 @@ def launch_argv(
             "not pass --tools, so restricted mode would strip Bash from it."
         )
 
+    if external_isolation and not tier["writes"]:
+        raise SessionError(
+            f"{capability} does not isolate into a worktree, so there is "
+            "nothing for an external lane to take over"
+        )
+
     argv = ["claude"]
     if background:
         argv.append("--bg")
@@ -118,7 +319,20 @@ def launch_argv(
 
     scope = [str(item).strip() for item in (scope or []) if str(item).strip()]
 
+    skip_next = False
     for flag in tier["launch_flags"]:
+        if skip_next:
+            skip_next = False
+            continue
+        if external_isolation and flag == "--worktree":
+            # Isolation is satisfied by a checkout this process did not create,
+            # so claude must not create a second one nested inside it. Only the
+            # isolation flag is dropped; every flag that grants authority
+            # (`--permission-mode`, `--tools`, `--add-dir`) still comes from the
+            # tier table, and the substitution is named in the printed plan
+            # rather than applied quietly.
+            skip_next = True
+            continue
         if flag == "<lane>":
             if not worktree:
                 raise SessionError(
@@ -143,7 +357,10 @@ def launch_argv(
     if leftover:
         raise SessionError(f"unsubstituted launch placeholders: {', '.join(leftover)}")
 
-    argv.append(task)
+    if include_task:
+        # The Orca surface delivers the prompt as terminal input instead, so it
+        # asks for the command without it. The task is still validated above.
+        argv.append(task)
     return argv
 
 
@@ -218,6 +435,34 @@ def is_live(entry: dict[str, Any]) -> bool:
 
 
 def cmd_launch(args: argparse.Namespace) -> int:
+    surface = getattr(args, "surface", "inproc")
+    lane = getattr(args, "lane", None)
+    writes = CAPABILITY_TIERS[args.capability]["writes"]
+
+    if surface == "inproc" and lane:
+        fail("--lane describes an Orca checkout; it needs --surface orca")
+
+    if surface == "orca":
+        if args.background:
+            # `--bg` returns a short id and exits, so the tab an operator was
+            # meant to watch would come up already empty. The two features are
+            # answers to the same question and only one can be in effect.
+            fail(
+                "--surface orca cannot be combined with --background: a "
+                "background session detaches immediately, leaving nothing in "
+                "the terminal it was placed in. Choose one."
+            )
+        if writes and not lane:
+            # The in-process gate keeps a writing tier off the automatic path
+            # entirely. Orca replaces that gate rather than removing it: the
+            # session is visible in a tab *and* confined to its own checkout,
+            # so it cannot quietly rewrite the operator's working tree.
+            fail(
+                f"--surface orca requires --lane for {args.capability} because "
+                "this tier writes. The lane is the isolated checkout that makes "
+                "an automatically started writing session recoverable."
+            )
+
     try:
         argv = launch_argv(
             args.capability,
@@ -227,17 +472,39 @@ def cmd_launch(args: argparse.Namespace) -> int:
             worktree=args.worktree,
             scope=args.scope,
             restricted=args.restricted,
+            include_task=surface != "orca",
+            external_isolation=bool(lane),
         )
     except SessionError as exc:
         fail(str(exc))
 
+    if surface == "inproc":
+        if getattr(args, "execute", False):
+            return run_launch(argv, args.capability)
+        if args.json:
+            print(json.dumps(argv, indent=2))
+            return 0
+        print(" ".join(quote(item) for item in argv))
+        return 0
+
+    steps = orca_plan(
+        argv,
+        args.task,
+        session_id=args.session_id,
+        capability=args.capability,
+        lane=lane,
+    )
     if getattr(args, "execute", False):
-        return run_launch(argv, args.capability)
+        return orca_run(steps)
 
     if args.json:
-        print(json.dumps(argv, indent=2))
+        print(json.dumps({"surface": "orca", "lane": lane, "steps": steps}, indent=2))
         return 0
-    print(" ".join(quote(item) for item in argv))
+    if lane:
+        print(f"# isolation: Orca worktree {lane!r} replaces `claude --worktree`")
+    for index, step in enumerate(steps, start=1):
+        print(f"# {index}. {step['kind']}: {step['why']}")
+        print(" ".join(quote(item) for item in step["argv"]))
     return 0
 
 
@@ -295,6 +562,73 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def printable(value: str) -> str:
+    """Make text from another program safe to print on this console.
+
+    Terminal titles are decorative text written by whatever is running in the
+    tab: box drawing, emoji, and lone surrogates all appear. Windows consoles
+    default to a regional code page - cp1254 on this machine - and printing an
+    unencodable character there raises UnicodeEncodeError. Measured: `sweep`
+    died mid-listing on a tab titled with a status glyph.
+
+    A teardown check must not fail because a title was pretty.
+    """
+    encoding = sys.stdout.encoding or "utf-8"
+    return value.encode(encoding, "replace").decode(encoding, "replace")
+
+
+def orca_tabs(root: Path) -> list[dict[str, Any]]:
+    """Claude agent tabs Orca reports for this repository, best effort.
+
+    Foreground sessions in Orca tabs are invisible to the sweep below, which
+    only looks at `kind == "background"`. Listing them closes that gap.
+
+    It only *lists* them. The first version of this filtered on the title the
+    launcher sets, and a live test showed why that cannot work: Claude Code
+    rewrites its own terminal title from the conversation, so a tab created as
+    `harness:reader:1bcf4ec4` was found again as `Orca_surface_live`. Orca
+    exposes no join key back to a session id either, so nothing here can tell a
+    harness-launched tab from the one the operator is reading this in.
+
+    Closing on that basis would recreate, with a worse blast radius, the exact
+    bug `is_self` exists to prevent: a teardown step that stops the session
+    running it. So this reports, and the operator closes what they recognise.
+    `agentIdentity` is Orca's own field and is not rewritten by the TUI.
+
+    Best effort by design. Orca being absent, closed, or of a different version
+    must not turn a teardown check into a failure.
+    """
+    binary = find_orca()
+    if binary is None:
+        return []
+    try:
+        proc = subprocess.run(  # noqa: S603  (fixed argv, no shell)
+            [
+                binary,
+                "terminal",
+                "list",
+                "--worktree",
+                f"path:{root}",
+                "--json",
+            ],
+            capture_output=True,
+            timeout=60,
+            check=False,
+            **ORCA_TEXT,
+        )
+        payload = json.loads(proc.stdout or "{}")
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return []
+    if not payload.get("ok", False):
+        return []
+    terminals = (payload.get("result") or {}).get("terminals") or []
+    return [
+        item
+        for item in terminals
+        if isinstance(item, dict) and str(item.get("agentIdentity", "")) == "claude"
+    ]
+
+
 def cmd_sweep(args: argparse.Namespace) -> int:
     """Report, and optionally stop, background sessions left running here."""
     root = Path(args.root).resolve()
@@ -308,6 +642,20 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         for entry in entries
         if entry.get("kind") == "background" and is_live(entry) and not is_self(entry)
     ]
+
+    tabs = orca_tabs(root)
+    if tabs:
+        print(f"{len(tabs)} Claude agent tab(s) open in Orca for this repository:")
+        for tab in tabs:
+            title = printable(str(tab.get("title", "")))[:70]
+            print(f"  {tab.get('handle', '?')}  {title}")
+        print(
+            "  Listed, not swept. One of these is the tab you are reading this "
+            "in, and nothing here can tell which, so close what you recognise "
+            "with `orca terminal close --terminal <handle> --tab`."
+        )
+        print()
+
     if not orphans:
         print(
             "SWEEP CLEAN: no background sessions running for this repository "
@@ -385,15 +733,33 @@ def main() -> None:
             "text, and repository text must not become tool permissions."
         ),
     )
+    launch.add_argument(
+        "--surface",
+        choices=SESSION_SURFACES,
+        default="inproc",
+        help=(
+            "Where the session runs. inproc (default) is this process. orca "
+            "places the same tier-enforced command in a visible Orca terminal "
+            "tab, and delivers the prompt as terminal input."
+        ),
+    )
+    launch.add_argument(
+        "--lane",
+        help=(
+            "Orca worktree name for a writing tier. Orca creates the checkout, "
+            "so `claude --worktree` is dropped and not nested inside it."
+        ),
+    )
     launch.add_argument("--json", action="store_true", help="Emit argv as JSON")
     launch.add_argument(
         "--exec",
         dest="execute",
         action="store_true",
         help=(
-            "Run the command instead of printing it. Read-only tiers only: a "
-            "tier that writes is refused, with its command printed for the "
-            "operator to run."
+            "Run the command instead of printing it. On the inproc surface, "
+            "read-only tiers only. On the orca surface a writing tier is also "
+            "allowed, because --lane confines it to its own checkout and the "
+            "tab keeps it in view."
         ),
     )
     launch.set_defaults(func=cmd_launch)
