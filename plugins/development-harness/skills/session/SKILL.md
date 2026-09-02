@@ -79,6 +79,29 @@ A writing lane needs a worktree and a scope, and only a writing lane may detach:
 For a read-only tier, add `--exec` and read the result. For a writing tier, show the
 operator the printed command and let them run it.
 
+### Record the run
+
+Add `--report` to an `--exec` dispatch and the launcher writes the run's bus envelope
+itself, with the correlation id and the duration and token counts it measured:
+
+```bash
+<python> scripts/ai-harness/harness_session.py launch \
+  --capability reader --task "<the task>" \
+  --exec --report --correlation <uuid> --root .
+```
+
+The launcher writes it because the tier it launched cannot: a read-only session has no
+`Write` tool, and the cost belongs to whoever held the process rather than to the agent
+inside it. Omit `--correlation` and one is minted; either way the effective id is
+printed on stderr as `# correlation: <uuid>`. Pass that same id to every dispatch
+serving the same question — it is what `harness_report.py` groups by.
+
+`--report` is refused without `--exec`, on `--surface orca` (a tab returns terminal
+state, never structured output), and for a writing tier (which posts its own envelope).
+When a run returns nothing parseable, no envelope is written and the reason is printed.
+Do not fill one in by hand from the agent's prose: the summary would be yours, recorded
+as the agent's.
+
 **Do not work around a refusal.** The two you will meet are load-bearing:
 
 - A read-only tier refused `--background` because `--bg` and `-p` are mutually

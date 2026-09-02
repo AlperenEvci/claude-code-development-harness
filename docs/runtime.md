@@ -614,17 +614,12 @@ machine and not a colleague's. Set `commit_ai_runs` if the handoff is meant to t
 ## A worked pass
 
 ```bash
-# 1. Research, foreground, structured. Cheap and read-only.
-SCHEMA=$(python scripts/ai-harness/harness_bus.py schema)
-claude -p "Map how billing retries are wired" \
-  --permission-mode plan --tools Read,Grep,Glob \
-  --output-format json --json-schema "$SCHEMA" > research.json
-
-# 2. Record what came back, as evidence rather than as instruction.
-python -c "import json,sys; json.dump(json.load(open('research.json'))['structured_output'], open('body.json','w'))"
-python scripts/ai-harness/harness_bus.py post \
-  --session $SID --from billing-researcher --kind result \
-  --capability reader --summary "Retry wiring mapped" --body-file body.json
+# 1+2. Research and record, in one dispatch. --report writes the envelope for
+#      the run, because the tier it launches has no Write tool to write its own.
+CID=$(python -c "import uuid; print(uuid.uuid4())")
+python scripts/ai-harness/harness_session.py launch \
+  --capability reader --task "Map how billing retries are wired" \
+  --exec --report --correlation $CID --root .
 
 # 3. Write the contract yourself. This is the step that must not be delegated.
 #    .ai/specs/billing-retry.md
@@ -646,6 +641,32 @@ python scripts/ai-harness/harness_report.py --out .ai/runs/report.html
 
 Step 5 is the one people skip. A delegate's completion message is a claim, not
 evidence — an envelope changes nothing about that.
+
+Pass the same `$CID` to every dispatch that serves one question, including the
+`--correlation` on `harness_bus.py post` for the lanes that write their own envelopes.
+That is the key `harness_report.py` groups by, and it is the difference between a page
+organised by unit of work and a page organised by process.
+
+### When the launcher will not write the envelope
+
+`--report` is deliberately narrow: `--exec`, the `inproc` surface, and a tier whose
+`writes` is false. Outside that, do it by hand — the route the one-command form
+replaced still works:
+
+```bash
+SCHEMA=$(python scripts/ai-harness/harness_bus.py schema)
+claude -p "<the task>" --permission-mode plan --tools Read,Grep,Glob \
+  --output-format json --json-schema "$SCHEMA" > research.json
+python -c "import json; json.dump(json.load(open('research.json'))['structured_output'], open('body.json','w'))"
+python scripts/ai-harness/harness_bus.py post \
+  --session $SID --from billing-researcher --kind result \
+  --capability reader --summary "Retry wiring mapped" --body-file body.json \
+  --correlation $CID
+```
+
+A run whose output was not parseable writes nothing and says why. That is the intended
+behavior: the summary in an envelope is the agent's, and a launcher that filled one in
+for a run it could not read would be recording its own guess as the agent's finding.
 
 ## Watching a session in Orca
 
