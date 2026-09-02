@@ -4183,3 +4183,327 @@ class ReportTests(unittest.TestCase):
         """Two bands that disagree would put two numbers on one policy."""
         self.assertEqual(REPORT.DEFAULT_FLOOR_TOKENS, CHECKPOINT.DEFAULT_FLOOR_TOKENS)
         self.assertEqual(REPORT.DEFAULT_CEILING_TOKENS, CHECKPOINT.DEFAULT_CEILING_TOKENS)
+
+
+SAMPLE_SESSION_ID = "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84"
+SAMPLE_CORRELATION_ID = "b7f0c2e1-5a44-4d0b-9c33-1e8a7d6b5f20"
+
+
+def stub_claude(stdout: str, returncode: int = 0):
+    """Stand in for the CLI so `--exec` is testable without one installed.
+
+    Patching the subprocess rather than dropping a shim on PATH keeps the test
+    identical on Windows and Linux: a `#!/bin/sh` shim is not executable on one
+    of them, and that is the platform this repository is developed on.
+    """
+
+    def _run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, returncode, stdout, kwargs.get("_", ""))
+
+    return _run
+
+
+def run_reader_with(stdout: str, root: Path, returncode: int = 0, **kwargs):
+    """Run the reader tier against a stubbed CLI. Returns (exit code, stderr)."""
+    argv = SESSION.launch_argv("reader", "Map the retry path")
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(SESSION, "find_claude", return_value="claude"), \
+            mock.patch.object(SESSION.subprocess, "run", stub_claude(stdout, returncode)), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = SESSION.run_launch(
+            argv,
+            "reader",
+            report=True,
+            root=root,
+            session_id=SAMPLE_SESSION_ID,
+            sender=kwargs.pop("sender", "reader"),
+            task="Map the retry path",
+            correlation_id=kwargs.pop("correlation_id", SAMPLE_CORRELATION_ID),
+        )
+    return code, err.getvalue()
+
+
+def written_envelope(root: Path) -> dict:
+    files = sorted((root / ".ai" / "bus" / SAMPLE_SESSION_ID).glob("*.json"))
+    assert len(files) == 1, f"expected one envelope, found {files}"
+    return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+class LaunchCorrelationTests(unittest.TestCase):
+    """`--correlation` and `--report`: the launcher closes its own loop.
+
+    The report groups a unit of work by `correlation_id`, but until now nothing
+    in the dispatch path produced one and nothing wrote an envelope for a
+    foreground run. Both steps were prose in `docs/runtime.md` that a human had
+    to perform, which meant the observability the harness advertises depended on
+    a person remembering a `python -c` one-liner.
+    """
+
+    def launch(self, *args: str, check: bool = True):
+        return run(
+            PYTHON, str(SCRIPTS / "harness_session.py"), "launch", *args, check=check
+        )
+
+    def test_a_launch_with_no_new_flags_prints_exactly_what_it_printed_before(
+        self,
+    ) -> None:
+        """The file is copied byte-for-byte into every generated harness.
+
+        A change here ships to repositories that never asked for it, so the
+        untouched invocation has to produce the untouched line.
+        """
+        proc = self.launch(
+            "--capability", "reader",
+            "--task", "Map the retry path",
+            "--session-id", SAMPLE_SESSION_ID,
+        )
+        self.assertEqual(
+            proc.stdout.strip(),
+            f"claude --session-id {SAMPLE_SESSION_ID} --permission-mode plan "
+            "--tools Read,Grep,Glob 'Map the retry path'",
+        )
+        self.assertNotIn("correlation", proc.stderr)
+
+    def test_a_correlation_that_is_not_a_uuid_is_refused_by_name(self) -> None:
+        """Normalizing the key would join nothing while appearing to work."""
+        proc = self.launch(
+            "--capability", "reader", "--task", "t", "--correlation", "nope",
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--correlation must be a UUID", proc.stderr)
+        self.assertIn("'nope'", proc.stderr)
+
+    def test_the_correlation_is_reported_on_stderr_not_stdout(self) -> None:
+        """stdout stays the command, so piping it into a shell still works."""
+        proc = self.launch(
+            "--capability", "reader", "--task", "t",
+            "--correlation", SAMPLE_CORRELATION_ID,
+        )
+        self.assertIn(f"# correlation: {SAMPLE_CORRELATION_ID}", proc.stderr)
+        self.assertNotIn("correlation", proc.stdout)
+
+    def test_json_keeps_the_bare_array_until_a_correlation_is_in_effect(self) -> None:
+        """Existing callers parse an array; only a new flag changes the shape."""
+        pinned = ("--session-id", SAMPLE_SESSION_ID)
+        bare = json.loads(
+            self.launch(
+                "--capability", "reader", "--task", "t", "--json", *pinned
+            ).stdout
+        )
+        self.assertIsInstance(bare, list)
+
+        wrapped = json.loads(
+            self.launch(
+                "--capability", "reader", "--task", "t", "--json", *pinned,
+                "--correlation", SAMPLE_CORRELATION_ID,
+            ).stdout
+        )
+        self.assertEqual(wrapped["correlation_id"], SAMPLE_CORRELATION_ID)
+        self.assertEqual(wrapped["argv"], bare)
+
+    def test_the_report_refusal_matrix(self) -> None:
+        """Each refusal names its own reason; a shared message hides the cause."""
+        cases = (
+            (("--capability", "reader", "--task", "t", "--report"),
+             "--report needs --exec"),
+            (("--capability", "reader", "--task", "t", "--exec", "--report",
+              "--surface", "orca"),
+             "cannot be used with --surface orca"),
+            (("--capability", "implementer", "--task", "t", "--exec", "--report",
+              "--worktree", "lane-a", "--scope", "src"),
+             "because this tier writes"),
+        )
+        for args, expected in cases:
+            with self.subTest(args=args):
+                proc = self.launch(*args, check=False)
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn(expected, proc.stderr)
+
+    def test_print_mode_flags_are_added_only_on_the_exec_path(self) -> None:
+        """A printed command is for a human; `-p` would make it unconversable."""
+        argv = SESSION.launch_argv("reader", "Map the retry path")
+        self.assertNotIn("-p", argv)
+
+        execd = SESSION.print_mode_argv(argv, schema=False)
+        self.assertEqual(execd[:4], ["claude", "-p", "--output-format", "json"])
+        self.assertNotIn("--json-schema", execd)
+        self.assertEqual(execd[-1], "Map the retry path")
+
+        reporting = SESSION.print_mode_argv(argv, schema=True)
+        self.assertIn("--json-schema", reporting)
+        schema = json.loads(reporting[reporting.index("--json-schema") + 1])
+        self.assertNotIn("trace", schema.get("properties", {}))
+
+    def test_a_refused_writing_tier_is_printed_without_print_mode(self) -> None:
+        """The refusal hands the operator a command they can actually run.
+
+        `--exec` refuses a writing tier and prints its command anyway, so the
+        refusal equips rather than obstructs. Applying print mode before that
+        gate handed them `-p --output-format json` instead - a one-shot they
+        cannot converse with, which is not the session the tier describes.
+        Caught by diffing this command against `main`, not by a unit assertion.
+        """
+        proc = self.launch(
+            "--capability", "implementer", "--exec",
+            "--worktree", "lane-a", "--scope", "src",
+            "--task", "Execute the spec",
+            "--session-id", SAMPLE_SESSION_ID,
+            check=False,
+        )
+        self.assertEqual(
+            proc.stdout.strip(),
+            f"claude --session-id {SAMPLE_SESSION_ID} --permission-mode "
+            "acceptEdits --worktree lane-a --add-dir src 'Execute the spec'",
+        )
+        printed = shlex.split(proc.stdout.strip())
+        self.assertNotIn("-p", printed)
+        self.assertNotIn("--output-format", printed)
+
+    def test_a_bad_sender_is_refused_before_the_run_not_after_it(self) -> None:
+        """The bus would refuse it too - but only after a model was paid for."""
+        proc = self.launch(
+            "--capability", "reader", "--task", "t", "--exec", "--report",
+            "--report-from", "Not An Agent",
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--report-from must be a lowercase-hyphen", proc.stderr)
+
+    def test_a_successful_run_writes_one_valid_envelope(self) -> None:
+        """The launcher posts it because the tier it launched cannot.
+
+        A reader has no `Write` tool, so the session has no route to the bus.
+        The record therefore has to be written by whoever held the subprocess.
+        """
+        payload = json.dumps({
+            "structured_output": {
+                "kind": "result",
+                "summary": "Retries are wired through the billing gateway",
+                "body": {"entrypoint": "src/billing/retry.py"},
+            },
+            "usage": {"input_tokens": 18400, "output_tokens": 900},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            code, err = run_reader_with(payload, root)
+            self.assertEqual(code, 0)
+
+            envelope = written_envelope(root)
+            self.assertEqual(BUS.validate_envelope(envelope, "written"), [])
+            self.assertEqual(envelope["capability"], "reader")
+            self.assertEqual(envelope["from"], "reader")
+            self.assertEqual(envelope["task"], "Map the retry path")
+            self.assertEqual(
+                envelope["trace"]["correlation_id"], SAMPLE_CORRELATION_ID
+            )
+            self.assertEqual(envelope["trace"]["tokens"]["input"], 18400)
+            self.assertIn(".ai/bus/", err)
+
+    def test_the_duration_is_measured_here_and_absent_tokens_stay_absent(self) -> None:
+        """An unmeasured count and a zero one are different facts."""
+        payload = json.dumps({
+            "structured_output": {"kind": "status", "summary": "still going", "body": {}},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(run_reader_with(payload, root)[0], 0)
+            trace = written_envelope(root)["trace"]
+
+        self.assertIsInstance(trace["duration_ms"], int)
+        self.assertGreaterEqual(trace["duration_ms"], 0)
+        self.assertNotIn("tokens", trace)
+
+    def test_the_tier_is_recorded_from_the_launch_not_from_the_agents_claim(
+        self,
+    ) -> None:
+        """An envelope may describe its capability; it may not choose one."""
+        payload = json.dumps({
+            "structured_output": {
+                "kind": "result",
+                "summary": "s",
+                "body": {},
+                "capability": "implementer",
+            },
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(run_reader_with(payload, root)[0], 0)
+            # The claim in the payload is read by nothing. Only the tier this
+            # process launched under reaches the envelope.
+            self.assertEqual(written_envelope(root)["capability"], "reader")
+
+    def test_a_run_that_returned_nothing_usable_writes_no_envelope(self) -> None:
+        """An invented summary is worse than a missing record."""
+        cases = (
+            ("not json at all", 0, "no JSON on stdout"),
+            (json.dumps({"result": "prose"}), 0, "no structured_output"),
+            (
+                json.dumps({
+                    "structured_output": {
+                        "kind": "result", "summary": "x" * 400, "body": {},
+                    }
+                }),
+                0,
+                "not a valid envelope",
+            ),
+        )
+        for stdout, rc, expected in cases:
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    code, err = run_reader_with(stdout, root, returncode=rc)
+                    self.assertEqual(code, 1)
+                    self.assertIn(expected, err)
+                    self.assertFalse((root / ".ai" / "bus").exists())
+
+    def test_a_failed_run_reports_its_own_exit_code_and_writes_nothing(self) -> None:
+        """The child's status is the answer; 1 would hide which failure it was."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            code, err = run_reader_with("", root, returncode=7)
+            self.assertEqual(code, 7)
+            self.assertIn("exited 7", err)
+            self.assertFalse((root / ".ai" / "bus").exists())
+
+    def test_tokens_are_read_defensively(self) -> None:
+        """A missing, null, or non-integer count is unmeasured, never zero."""
+        self.assertEqual(SESSION.usage_tokens({}), (None, None))
+        self.assertEqual(SESSION.usage_tokens({"usage": None}), (None, None))
+        self.assertEqual(
+            SESSION.usage_tokens({"usage": {"input_tokens": "12"}}), (None, None)
+        )
+        self.assertEqual(
+            SESSION.usage_tokens({"usage": {"input_tokens": True}}), (None, None)
+        )
+        self.assertEqual(
+            SESSION.usage_tokens({"usage": {"input": 5, "output": 6}}), (5, 6)
+        )
+
+    def test_the_written_envelope_groups_under_its_correlation_in_the_report(
+        self,
+    ) -> None:
+        """The whole point: the record lands where the report already looks."""
+        payload = json.dumps({
+            "structured_output": {"kind": "result", "summary": "done", "body": {}},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(run_reader_with(payload, root)[0], 0)
+            model = REPORT.build_model(root)
+
+        blob = json.dumps(model)
+        self.assertIn(SAMPLE_CORRELATION_ID, blob)
+
+    def test_the_launcher_never_builds_an_envelope_by_hand(self) -> None:
+        """Two writers of one format is one format that can drift out of review.
+
+        Every cap the bus enforces - summary length, body size, evidence count,
+        sender pattern, kind vocabulary - has to reach this path automatically.
+        """
+        source = (SCRIPTS / "harness_session.py").read_text(encoding="utf-8")
+        self.assertIn("from harness_bus import", source)
+        self.assertIn("build_envelope(", source)
+        self.assertIn("write_envelope(", source)
+        self.assertNotIn("envelope_version", source)
+        self.assertNotIn("MAX_SUMMARY_CHARS", source)

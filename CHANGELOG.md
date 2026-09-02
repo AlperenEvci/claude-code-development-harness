@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.11.0 - 2026-09-02
+
+### Added - the loop the report was built around had no producer
+
+`harness_report.py` groups a unit of work by `correlation_id`, and nothing in the
+dispatch path produced one. `harness_session.py launch` could build a tier-enforced
+command and run it, but a finished foreground run left no record: the operator minted a
+UUID by hand, reshaped `structured_output` with a `python -c` one-liner, and called
+`harness_bus.py post`. Three manual steps stood between a dispatch and the observability
+the harness advertises.
+
+`launch --correlation <uuid>` names the unit of work, and `--report` makes the launcher
+write the run's envelope itself. It writes it because it is the only participant that
+can: a read-only tier has no `Write` tool, so the session cannot post its own record,
+and the duration and token counts belong to whoever held the subprocess. Omitting
+`--correlation` mints one; the effective id is printed on stderr so the next dispatch
+can reuse it.
+
+`--report` is narrow on purpose - `--exec`, the `inproc` surface, and a tier whose
+`writes` is false - and each refusal names its own reason. A run that exits non-zero, or
+returns output that is not JSON, carries no `structured_output`, or violates a bus cap,
+writes **no** envelope and reports why. An invented summary is worse than a missing
+record, so nothing here synthesizes envelope content it did not receive.
+
+`launch` also gained `--root` (posting needs a repository root) and `--report-from`
+(the sender name, defaulting to the tier). The envelope is assembled by
+`harness_bus.build_envelope` and written by `harness_bus.write_envelope`, so every cap
+the bus enforces reaches this path automatically rather than through a second copy.
+
+### Changed
+
+- `--exec` now adds `-p --output-format json` to the command it runs, and
+  `--json-schema` when `--report` is in effect. The command `launch` *prints* is
+  unchanged and asserted so: a printed command is for a human to run interactively, and
+  `-p` would turn it into a one-shot they cannot converse with.
+- `--json` still emits a bare argv array. Only a launch carrying a correlation id gets
+  the wrapping `{"argv": [...], "correlation_id": "..."}` object.
+- The tier recorded on a written envelope comes from the launch, never from the agent's
+  payload. An envelope may describe its capability; it may not choose one.
+
 ## 1.10.0 - 2026-09-01
 
 ### Added - a session could be started, but not watched

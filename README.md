@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.10.0](https://img.shields.io/badge/Version-1.10.0-7C3AED?style=flat-square)
+![Version 1.11.0](https://img.shields.io/badge/Version-1.11.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -257,6 +257,17 @@ python scripts/ai-harness/harness_session.py launch \
 ```
 
 Dispatch follows the tier and is not a preference. `claude --bg` and `claude -p` are mutually exclusive, so a background session has no structured return channel and reports only by writing a bus envelope — and a read-only tier has no `Write` tool to write one with. Asking for `--background` on a `reader` is refused with that reason.
+
+**Close the loop in one command.** `--report` makes the launcher write the run's envelope, because the tier it launched cannot — a read-only session has no `Write` tool, and the duration and token counts belong to whoever held the process:
+
+```bash
+python scripts/ai-harness/harness_session.py launch \
+  --capability reader --task "Map how billing retries are wired" \
+  --exec --report --correlation 4c1d8a90-3e77-42bb-9a55-0f6de2b71c84
+# .ai/bus/<session>/0001-result-<short>.json
+```
+
+Omit `--correlation` and one is minted; the effective id is printed on stderr so the next dispatch can reuse it. A run that returned nothing parseable writes **no** envelope and says why — a launcher that filled in a summary for output it could not read would be recording its own guess as the agent's finding.
 
 **Read the return channel.** `.ai/bus/<session-id>/` holds append-only typed envelopes — `result`, `finding`, `question`, `handoff`, `status` — with a 200-character summary, a 64 KB body, and 50 evidence items enforced at write time:
 
@@ -515,7 +526,7 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 217 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 233 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
 **Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds seven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 

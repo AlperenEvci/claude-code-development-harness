@@ -39,6 +39,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any, NoReturn
@@ -48,6 +49,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
     LAUNCH_PLACEHOLDERS,
+)
+from harness_bus import (  # noqa: E402  (sibling module, resolved above)
+    AGENT_NAME_PATTERN,
+    UUID_PATTERN,
+    BusError,
+    build_envelope,
+    envelope_schema,
+    write_envelope,
 )
 
 
@@ -438,6 +447,47 @@ def cmd_launch(args: argparse.Namespace) -> int:
     surface = getattr(args, "surface", "inproc")
     lane = getattr(args, "lane", None)
     writes = CAPABILITY_TIERS[args.capability]["writes"]
+    execute = getattr(args, "execute", False)
+    report = getattr(args, "report", False)
+
+    correlation = str(getattr(args, "correlation", None) or "").strip()
+    if correlation and not UUID_PATTERN.match(correlation):
+        # Refused rather than normalized. The correlation id is the key the
+        # report groups a unit of work by, and a silently rewritten key joins
+        # nothing.
+        fail(
+            f"--correlation must be a UUID, got {correlation!r}. "
+            "Reuse the id printed by an earlier launch, or omit it and let "
+            "--report mint one."
+        )
+
+    if report:
+        if not execute:
+            fail("--report needs --exec: there is no run to report on")
+        if surface != "inproc":
+            # Decision 0003: the Orca surface is a place to watch a session, not
+            # a channel to read one. Terminal output is never parsed.
+            fail(
+                "--report cannot be used with --surface orca: an Orca tab "
+                "returns terminal state, never structured output"
+            )
+        if writes:
+            fail(
+                f"--report cannot be used with {args.capability} because this "
+                "tier writes: a writing session posts its own envelope, and "
+                "--exec refuses it here in any case."
+            )
+        sender = getattr(args, "report_from", None) or args.capability
+        if not AGENT_NAME_PATTERN.match(sender):
+            # Checked before the run rather than at write time. The bus would
+            # refuse it either way, but only after a model had already been
+            # paid for, and the envelope it refused is the record of that run.
+            fail(
+                f"--report-from must be a lowercase-hyphen agent name, got "
+                f"{sender!r}"
+            )
+        if not correlation:
+            correlation = str(uuid.uuid4())
 
     if surface == "inproc" and lane:
         fail("--lane describes an Orca checkout; it needs --surface orca")
@@ -478,11 +528,34 @@ def cmd_launch(args: argparse.Namespace) -> int:
     except SessionError as exc:
         fail(str(exc))
 
+    if correlation:
+        # stderr, so a caller piping the printed command into a shell is not
+        # handed a comment line it would have to strip.
+        print(f"# correlation: {correlation}", file=sys.stderr)
+
     if surface == "inproc":
-        if getattr(args, "execute", False):
-            return run_launch(argv, args.capability)
+        if execute:
+            return run_launch(
+                argv,
+                args.capability,
+                report=report,
+                root=Path(getattr(args, "root", ".")),
+                session_id=args.session_id,
+                sender=getattr(args, "report_from", None) or args.capability,
+                task=args.task,
+                correlation_id=correlation,
+            )
         if args.json:
-            print(json.dumps(argv, indent=2))
+            # The bare array is what callers that pass no correlation already
+            # parse; only a run that has one gets the wrapping object.
+            if correlation:
+                print(
+                    json.dumps(
+                        {"argv": argv, "correlation_id": correlation}, indent=2
+                    )
+                )
+            else:
+                print(json.dumps(argv, indent=2))
             return 0
         print(" ".join(quote(item) for item in argv))
         return 0
@@ -494,11 +567,14 @@ def cmd_launch(args: argparse.Namespace) -> int:
         capability=args.capability,
         lane=lane,
     )
-    if getattr(args, "execute", False):
+    if execute:
         return orca_run(steps)
 
     if args.json:
-        print(json.dumps({"surface": "orca", "lane": lane, "steps": steps}, indent=2))
+        payload: dict[str, Any] = {"surface": "orca", "lane": lane, "steps": steps}
+        if correlation:
+            payload["correlation_id"] = correlation
+        print(json.dumps(payload, indent=2))
         return 0
     if lane:
         print(f"# isolation: Orca worktree {lane!r} replaces `claude --worktree`")
@@ -508,14 +584,134 @@ def cmd_launch(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_launch(argv: list[str], capability: str) -> int:
+def print_mode_argv(argv: list[str], *, schema: bool) -> list[str]:
+    """Add the flags that make a run parseable, keeping the prompt last.
+
+    Only the `--exec` path calls this. The command `launch` *prints* stays
+    interactive on purpose: `-p` would turn it into a one-shot the operator
+    cannot converse with, and printing exists for a human to run. A run whose
+    output this process has to read is the opposite case, so the two forms
+    differ deliberately rather than by omission.
+
+    `--json-schema` is added only when an envelope is going to be written. It
+    carries the bus schema, which offers no `trace` fields at all, so an agent
+    has no route to reporting its own cost.
+    """
+    flags = ["-p", "--output-format", "json"]
+    if schema:
+        flags += ["--json-schema", json.dumps(envelope_schema())]
+    return [argv[0], *flags, *argv[1:]]
+
+
+def usage_tokens(result: dict[str, Any]) -> tuple[Any, Any]:
+    """Read input and output token counts out of the CLI's own result object.
+
+    Absent is not zero. A field that is missing, null, or not an integer comes
+    back as `None` so `normalize_trace` records it as unmeasured; substituting a
+    zero would turn "nobody counted" into "it cost nothing".
+    """
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return None, None
+
+    def pick(*names: str) -> Any:
+        for name in names:
+            value = usage.get(name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+        return None
+
+    return pick("input_tokens", "input"), pick("output_tokens", "output")
+
+
+def report_envelope(
+    stdout: str,
+    *,
+    root: Path,
+    session_id: str,
+    sender: str,
+    capability: str,
+    task: str,
+    correlation_id: str,
+    duration_ms: int,
+) -> tuple[Path | None, str | None]:
+    """Turn a finished print-mode run into one bus envelope.
+
+    Returns `(path, None)` on success and `(None, reason)` when nothing could be
+    recorded. Every refusal is a reason rather than an exception, because the
+    caller still has to relay the child's own output and exit code.
+
+    Nothing here invents envelope content. The summary, body, evidence, and next
+    step come only from what the agent returned under the schema it was given; a
+    run that returned nothing usable produces no record at all, because an
+    invented summary is worse than a missing one.
+    """
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None, "the run produced no JSON on stdout"
+    if not isinstance(result, dict):
+        return None, "the run's JSON was not an object"
+
+    payload = result.get("structured_output")
+    if not isinstance(payload, dict):
+        return None, "the run's JSON carried no structured_output object"
+
+    tokens_in, tokens_out = usage_tokens(result)
+    try:
+        envelope = build_envelope(
+            session_id=session_id,
+            sender=sender,
+            # The tier is recorded from what this process launched, never from
+            # the agent's own claim. An envelope may describe its capability;
+            # it may not choose one.
+            capability=capability,
+            kind=payload.get("kind"),
+            summary=payload.get("summary", ""),
+            body=payload.get("body"),
+            evidence=payload.get("evidence"),
+            next_step=payload.get("next"),
+            task=task,
+            # Empty means "none", not "the empty id": `normalize_trace` treats
+            # any non-None value as a claim and validates it as a UUID.
+            correlation_id=correlation_id or None,
+            duration_ms=duration_ms,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+        )
+        return write_envelope(root, envelope), None
+    except BusError as exc:
+        return None, f"the structured output is not a valid envelope: {exc}"
+
+
+def run_launch(
+    argv: list[str],
+    capability: str,
+    *,
+    report: bool = False,
+    root: Path | None = None,
+    session_id: str = "",
+    sender: str = "",
+    task: str = "",
+    correlation_id: str = "",
+) -> int:
     """Run a launch command, for the tiers where running it is the cheap path.
 
     The gate is `writes`, read from the shared tier table rather than from a
     second list here. A writing tier is refused with the command still printed,
     so a refusal hands the operator what they need instead of only a complaint.
+
+    With `report`, the launcher also writes the bus envelope for the run. It
+    does that because it is the only participant that can: a read-only tier has
+    no `Write` tool, so the session cannot post its own record, and the duration
+    and token counts belong to whoever held the subprocess rather than to the
+    agent inside it. See `.ai/decisions/0002-session-substrate.md`.
     """
     if CAPABILITY_TIERS[capability]["writes"]:
+        # Printed before print mode is applied, deliberately. This command is
+        # for the operator to run, and `-p` would hand them a one-shot they
+        # cannot converse with - which would make the refusal worse than a
+        # refusal, rather than a refusal that leaves them equipped.
         print(" ".join(quote(item) for item in argv))
         fail(
             f"--exec refuses {capability} because this tier writes to the "
@@ -527,16 +723,55 @@ def run_launch(argv: list[str], capability: str) -> int:
     if binary is None:
         fail("claude is not on PATH; cannot --exec")
 
+    # Only a command this process is about to read needs to be parseable.
+    argv = print_mode_argv(argv, schema=report)
+
+    started = time.monotonic_ns()
     proc = subprocess.run(  # noqa: S603  (argv built from the tier table)
         [binary, *argv[1:]],
         capture_output=True,
         text=True,
         check=False,
     )
+    duration_ms = max(0, (time.monotonic_ns() - started) // 1_000_000)
+
     if proc.stdout:
         print(proc.stdout, end="")
     if proc.stderr:
         print(proc.stderr, end="", file=sys.stderr)
+
+    if not report:
+        return proc.returncode
+
+    if proc.returncode != 0:
+        print(
+            f"# no envelope: the run exited {proc.returncode}",
+            file=sys.stderr,
+        )
+        return proc.returncode
+
+    path, reason = report_envelope(
+        proc.stdout,
+        root=(root or Path(".")).resolve(),
+        session_id=session_id,
+        sender=sender,
+        capability=capability,
+        task=task,
+        correlation_id=correlation_id,
+        duration_ms=duration_ms,
+    )
+    if path is None:
+        print(f"# no envelope: {reason}", file=sys.stderr)
+        # The child succeeded but the loop did not close. Reporting zero here
+        # would tell a caller the record exists.
+        return 1
+
+    root_path = (root or Path(".")).resolve()
+    try:
+        shown = path.relative_to(root_path).as_posix()
+    except ValueError:  # pragma: no cover - the bus always writes under root
+        shown = str(path)
+    print(f"# envelope: {shown}", file=sys.stderr)
     return proc.returncode
 
 
@@ -751,6 +986,29 @@ def main() -> None:
         ),
     )
     launch.add_argument("--json", action="store_true", help="Emit argv as JSON")
+    launch.add_argument("--root", default=".", help="Repository root (default: .)")
+    launch.add_argument(
+        "--correlation",
+        help=(
+            "UUID grouping this dispatch with the other sessions serving the "
+            "same unit of work. Reported on stderr; --report mints one when "
+            "it is omitted."
+        ),
+    )
+    launch.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "After an --exec run, write its bus envelope. Read-only tiers on "
+            "the inproc surface only: a read-only session has no Write tool to "
+            "post its own record, and the duration and token counts belong to "
+            "this process rather than to the agent."
+        ),
+    )
+    launch.add_argument(
+        "--report-from",
+        help="Sender name on the written envelope (default: the tier name)",
+    )
     launch.add_argument(
         "--exec",
         dest="execute",
