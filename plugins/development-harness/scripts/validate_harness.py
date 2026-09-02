@@ -691,6 +691,63 @@ def check_context_policy(
             )
 
 
+ORCA_SECTION = "### Watching a session in Orca"
+
+#: Rules the rendered Orca guidance must carry. Each one is a property the
+#: launcher enforces in code; a harness that documents the surface without them
+#: would invite an operator to reach for Orca's own agent launcher, which takes
+#: no tier flags.
+ORCA_REQUIRED_CLAUSES = (
+    "--lane",
+    "orca worktree create --agent claude",
+    "never parsed",
+)
+
+
+def check_session_surface(
+    profile: dict[str, Any],
+    payload: Path,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """The launch surface decides how sessions get started, so verify it rendered.
+
+    Drift in either direction is a defect. A harness configured for Orca that
+    never documents it leaves the surface undiscoverable; a harness that
+    documents it without being configured for it tells operators to run a tool
+    the project never chose.
+    """
+    surface = str(profile.get("session_surface", "inproc"))
+    if surface not in {"inproc", "orca"}:
+        errors.append(f"session_surface must be inproc or orca, not {surface!r}")
+        return
+
+    claude = payload / "CLAUDE.md"
+    if not claude.is_file():
+        return
+    text = claude.read_text(encoding="utf-8")
+    present = ORCA_SECTION in text
+
+    if surface == "orca":
+        if not present:
+            errors.append(
+                "session_surface is orca but CLAUDE.md has no "
+                f"{ORCA_SECTION!r} section"
+            )
+            return
+        for clause in ORCA_REQUIRED_CLAUSES:
+            if clause not in text:
+                errors.append(
+                    f"the Orca surface section does not state {clause!r}, which "
+                    "the launcher enforces"
+                )
+    elif present:
+        errors.append(
+            f"CLAUDE.md documents {ORCA_SECTION!r} but session_surface is "
+            f"{surface!r}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
@@ -959,6 +1016,7 @@ def main() -> None:
             warnings.append("fleet worktree helper is not executable")
 
     check_context_policy(profile, payload, errors, warnings)
+    check_session_surface(profile, payload, errors, warnings)
     check_workflows(profile, payload, errors, warnings)
     check_permission_bypass(payload, errors)
     check_session_tools(profile, payload, errors)

@@ -647,6 +647,45 @@ python scripts/ai-harness/harness_report.py --out .ai/runs/report.html
 Step 5 is the one people skip. A delegate's completion message is a claim, not
 evidence — an envelope changes nothing about that.
 
+## Watching a session in Orca
+
+Only present when the profile sets `session_surface: orca`. Orca is an agent development
+environment whose CLI manages worktrees and terminals; the harness uses it to put a
+session in a tab you can watch instead of running it inside the orchestrator.
+
+```bash
+python scripts/ai-harness/harness_session.py launch \
+  --capability reader --task "Map the retry path" --surface orca          # prints
+python scripts/ai-harness/harness_session.py launch \
+  --capability implementer --task "Execute the spec" \
+  --surface orca --lane auth-refactor --scope src --exec                  # runs
+```
+
+The surface decides where a session is watched. It never decides what a session may do:
+the flags still come from the capability tier table, and `claude agents --json` is still
+the only answer to what is running.
+
+Three rules are worth knowing before you reach for the Orca CLI yourself:
+
+- **Do not use `orca worktree create --agent claude`.** Orca's own launcher accepts no
+  `--permission-mode` or `--tools`, so the tier would silently vanish and a read-only
+  researcher would come up able to write. The harness creates the lane empty and starts
+  the tier-enforced command in it as a second step.
+- **A writing tier requires `--lane`.** That checkout is what makes an automatically
+  started implementer recoverable - it cannot touch the tree you are working in. Because
+  Orca supplies the isolation, `claude --worktree` is dropped and the substitution is
+  printed.
+- **Never parse terminal output.** `orca terminal read` returns raw capture with redraw
+  artefacts mid-word, exactly like `claude logs`.
+
+`harness_session.py sweep` lists the Claude agent tabs Orca reports for this
+repository as well as background sessions. It does not close them: Claude Code
+rewrites its own tab title, so nothing can distinguish a harness tab from the one you
+are working in, and closing on a guess would stop the session running the sweep.
+
+If Orca is not installed, `--surface orca` is unavailable and the rest of the harness is
+unaffected.
+
 ## Never
 
 `--dangerously-skip-permissions` and `--allow-dangerously-skip-permissions` must never

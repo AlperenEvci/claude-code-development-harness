@@ -155,6 +155,9 @@ Create one normalized JSON object from project evidence plus the user's confirme
   - `claude-only` — omit the Codex-specific project skill.
 - `research_model`, `review_model`: `inherit`, `haiku`, `sonnet`, `opus`, `fable`, or a full `claude-*` model ID.
 - `codex_reasoning`: `low`, `medium`, `high`, `xhigh`.
+- `session_surface`: `inproc` (default) or `orca`. Optional; where `harness_session.py launch` puts a session.
+  - `inproc` — this process, as before this field existed.
+  - `orca` — the Orca ADE, which places the same tier-enforced command in a terminal tab the operator can watch. Requires Standard or Fleet, because Lite installs no session tooling. Offer it only when the inspection reports `tools.orca.available`, and never assume it: the surface changes where a session is watched, not what it may do.
 - `autonomy`: `read-only`, `approval-required`, `repository-write-with-approval`, `isolated-auto`.
 - `network_access`: `deny-by-default`, `ask-before-network`, `approved-for-scoped-tasks`.
 - `hooks_policy`: `disabled`, `examples-only`. Version 0.2 never activates hooks.

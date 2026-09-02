@@ -1,5 +1,76 @@
 # Changelog
 
+## 1.10.0 - 2026-09-01
+
+### Added - a session could be started, but not watched
+
+`harness_session.py` could build a tier-enforced launch command and could tell you what
+was still running. It could not put a session anywhere you could see it. Decision 0002
+rejected a tmux layer for scripting and was right to, but it left one slot open:
+terminal multiplexing as an *operator observability convenience*, never parsed, never on
+the critical path. Claude Code's own `--tmux` fills that slot only where iTerm2 does,
+which is not where this project is developed.
+
+`launch --surface orca` fills it. The same command, placed in an Orca terminal tab you
+can read and interrupt, with the prompt delivered as terminal input once the TUI is
+listening. `session_surface` in the profile turns the guidance on; it defaults to
+`inproc`, so every existing profile renders exactly as before.
+
+The surface decides where a session is watched. It never decides what a session may do.
+The flags still come from the shared tier table, `claude agents --json` is still the
+registry, and terminal output is still never parsed - measured, `orca terminal read`
+interleaves the typed line character by character as the shell's predictive editor
+redraws it, and fails the same way `claude logs` does.
+
+**`orca worktree create --agent claude` is not used, and that is the point.** It is the
+obvious command and it is the one that breaks the tier: Orca's known-agent launcher
+accepts no `--permission-mode` and no `--tools`, so a `reader` started through it comes
+up holding `Write`. The lane is created empty and the tier-enforced command is started
+in it as a separate step. The spare shell tab that leaves is cheaper than a tier that
+quietly stopped applying.
+
+### Changed - `--exec` may now start a writing tier, on this surface only
+
+In-process, `--exec` still refuses any tier that writes and still prints its command. On
+the Orca surface that refusal is replaced rather than removed, by two things the
+in-process path cannot offer: the session is visible in a tab, and `--lane` is required,
+so Orca confines it to its own checkout and it cannot rewrite the tree you are working
+in. Because Orca supplies the isolation, `claude --worktree` is dropped from the command
+and the substitution is printed. Only isolation moves; `--permission-mode`, `--tools`,
+and `--add-dir` still come from the tier table. Recorded, with the alternative that was
+offered, in `.ai/decisions/0003-orca-session-surface.md`.
+
+`--surface orca` and `--background` are now mutually exclusive: a detached session exits
+immediately and would leave an empty tab.
+
+### Fixed - two ways this could have been got wrong
+
+`sweep` had one blind spot it did not know about. A foreground session in a terminal tab
+is reported by `claude agents --json` as active, not background, so the sweep would never
+have looked at it. Those tabs are now listed - and only listed. The first version
+filtered on the title the launcher sets, and running it showed why that cannot work:
+Claude Code rewrites its own terminal title from the conversation, so a tab created as
+`harness:reader:1bcf4ec4` came back as `Orca_surface_live`. Orca exposes no session id to
+join on either, so closing on that basis would have recreated the `is_self` bug with a
+worse blast radius: a teardown step that closes the session running it.
+
+Two encoding faults surfaced the same way, both fatal and neither visible from reading
+the code. Orca's terminal payloads embed a preview of the tab, so `text=True` decoded
+them with the locale code page and `sweep` died with UnicodeDecodeError; the Orca calls
+now pin UTF-8. Printing a tab title then died with UnicodeEncodeError on a cp1254
+console, because titles carry status glyphs and lone surrogates; titles are now reduced
+to what the console can encode. A teardown check must not fail because a title was
+pretty.
+
+Orca detection is not a bare `which`. On Linux, `orca` is normally the GNOME screen
+reader, the editor has no `--version`, and both print a usage banner and exit zero. The
+inspector honours `ORCA_CLI_COMMAND`, prefers `orca-ide` on Linux, and confirms the
+editor with `agent-context` before reporting it as available.
+
+Sixteen tests added, each mutation-checked against its own source. A Lite profile is
+refused the surface, because it installs no session tooling and a harness that documents
+a workflow none of its files can perform is a defect.
+
 ## 1.9.0 - 2026-09-01
 
 ### Changed - the harness had no cheap path, so every task took the expensive one
