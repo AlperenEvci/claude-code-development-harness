@@ -594,16 +594,45 @@ symlink, the same rule the installer and the checkpoint writer follow.
 
 ## Session start
 
-Generated `CLAUDE.md` opens the working model with two commands, before any code is read:
+Generated `CLAUDE.md` opens the working model with one command, before any code is read:
 
 ```bash
-python scripts/ai-harness/harness_checkpoint.py resume
-python scripts/ai-harness/harness_progress.py list --pending
+python scripts/ai-harness/harness_report.py --brief
 ```
 
-They answer what the last session was doing and what is actually finished. Both are
+It answers what the last session was doing and what is actually finished. Both are
 cheaper than reconstructing either from the repository, and reconstructing them from the
 repository is what a session does by default.
+
+It had been two commands, and before that a paragraph asking for three. That is a
+checklist, and a checklist of three is three chances to skip one — the same failure this
+project keeps replacing with a mechanism. `--brief` reads nothing new: it renders the
+model the report already builds, for the one question a session opens with.
+
+```text
+example-saas - session brief 2026-09-03T09:14:02Z
+tier: standard
+
+RESUME  .ai/runs/20260902T2141Z-billing-retry/checkpoint.json  (2026-09-02T21:41:07Z)
+  intent: Wire idempotency keys through the billing retry path
+  next:
+    1. Decide whether the key is per-attempt or per-invoice
+    2. Run npm test -- billing before touching the gateway
+
+UNPROVEN  1 of 4
+  - retry-keys  Add idempotency keys to the retry path
+      verify: npm test -- billing
+
+OPEN QUESTIONS  none
+
+CONTEXT  165000 tokens reported (in-band), caller-reported
+```
+
+Because it runs nothing, it cannot see what is *live* — a background lane it never
+started is invisible to it. `harness_session.py sweep` is what answers that, and the
+brief says so rather than implying coverage it does not have. The two underlying
+commands are unchanged and remain the right call when you want one of the two on its
+own.
 
 One asymmetry between the two is worth knowing. `.ai/progress.json` is committed, so the
 ledger travels. `.ai/runs/` is gitignored unless the profile sets `commit_ai_runs`, so a

@@ -90,7 +90,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.11.0"
+GENERATOR_VERSION = "1.12.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -1647,9 +1647,16 @@ def session_start_section(profile: dict[str, Any]) -> str:
         "for it spends a round trip to learn nothing:",
         "",
         "```bash",
-        f"python {SESSION_TOOL_DIR}/harness_checkpoint.py resume",
-        f"python {SESSION_TOOL_DIR}/harness_progress.py list --pending",
+        f"python {SESSION_TOOL_DIR}/harness_report.py --brief",
         "```",
+        "",
+        "One command, because a checklist of three is three chances to skip one. "
+        "It prints the newest handoff's intent and next steps, what the ledger "
+        "still has unproven, and any question an agent left open. It reads files "
+        "and runs nothing, so it cannot tell you what is still running - "
+        f"`harness_session.py sweep` answers that. `harness_checkpoint.py resume` "
+        f"and `harness_progress.py list --pending` remain, and are what to reach "
+        "for when you want one of the two on its own.",
         "",
         f"`.ai/progress.json` is the ledger, and it is JSON rather than prose "
         "deliberately. An item starts unproven and becomes passing only through "
