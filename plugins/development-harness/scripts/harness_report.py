@@ -943,6 +943,92 @@ def render_text(model: dict[str, Any]) -> str:
     return "\n".join(out) + "\n"
 
 
+def render_brief(model: dict[str, Any]) -> str:
+    """What a session needs in its first minute, from the same model.
+
+    Session start had been three commands the model was asked to remember -
+    resume the checkpoint, list what is unproven, then work. A checklist in
+    prose is exactly the kind of guarantee this project keeps replacing with a
+    mechanism, and three prompts are three chances to skip one.
+
+    This adds no new reading. It is the same model the report already builds,
+    rendered for the one question a session opens with: what was I doing, and
+    what is still unproven?
+    """
+    profile = model["profile"]
+    out = [
+        f"{model['repository']} - session brief {model['generated_at']}",
+        f"tier: {profile.get('harness_tier') or 'unknown'}",
+        "",
+    ]
+
+    readable = [cp for cp in model["checkpoints"] if cp.get("readable")]
+    if readable:
+        # `load_checkpoints` sorts newest first, and the stamped directory names
+        # sort lexicographically in time order.
+        latest = readable[0]
+        out.append(f"RESUME  {latest.get('path')}  ({latest.get('created_at') or '?'})")
+        intent = str(latest.get("intent") or "").strip()
+        if intent:
+            out.append(f"  intent: {intent}")
+        steps = [str(s).strip() for s in (latest.get("next_steps") or []) if str(s).strip()]
+        if steps:
+            out.append("  next:")
+            out += [f"    {index}. {step}" for index, step in enumerate(steps, start=1)]
+        else:
+            # The checkpoint writer refuses this, so a checkpoint without one is
+            # older than that rule rather than a normal state.
+            out.append("  next: none recorded")
+    else:
+        out.append("RESUME  no checkpoint recorded")
+    out.append("")
+
+    ledger = model["ledger"]
+    if not ledger.get("present"):
+        out.append("UNPROVEN  no ledger")
+    else:
+        pending = [item for item in ledger["items"] if not item.get("passes")]
+        out.append(f"UNPROVEN  {ledger['unproven']} of {ledger['total']}")
+        for item in pending:
+            out.append(f"  - {item.get('id') or '?'}  {item.get('title') or ''}".rstrip())
+            verify = str(item.get("verify") or "").strip()
+            if verify:
+                # Printed as the text it is. Nothing here runs it.
+                out.append(f"      verify: {verify}")
+    out.append("")
+
+    questions = [
+        entry
+        for unit in model["work_units"]
+        for entry in unit["envelopes"]
+        if entry.get("kind") == "question"
+    ]
+    if questions:
+        out.append(f"OPEN QUESTIONS  {len(questions)}")
+        for entry in questions:
+            out.append(
+                f"  [{entry.get('from') or '?'}] {entry.get('summary') or ''}".rstrip()
+            )
+    else:
+        out.append("OPEN QUESTIONS  none")
+    out.append("")
+
+    context = model.get("context")
+    if context:
+        out.append(
+            f"CONTEXT  {context['reported_used_tokens']} tokens reported "
+            f"({context.get('zone')}), caller-reported"
+        )
+    else:
+        out.append("CONTEXT  no reported token count")
+
+    out += [
+        "",
+        "Reads files only; it cannot see what is running. For that, sweep.",
+    ]
+    return "\n".join(out) + "\n"
+
+
 # --------------------------------------------------------------------------
 # Writing
 # --------------------------------------------------------------------------
@@ -984,8 +1070,18 @@ def main() -> None:
         )
     )
     parser.add_argument("--root", default=".", help="Repository root (default: .)")
-    parser.add_argument(
+    shape = parser.add_mutually_exclusive_group()
+    shape.add_argument(
         "--json", action="store_true", help="Emit the whole model as JSON."
+    )
+    shape.add_argument(
+        "--brief",
+        action="store_true",
+        help=(
+            "Print what a session opens with: the newest checkpoint's intent and "
+            "next steps, what the ledger still has unproven, and any question an "
+            "agent left open."
+        ),
     )
     parser.add_argument(
         "--out",
@@ -1007,6 +1103,8 @@ def main() -> None:
             print(f"wrote {args.out}")
         elif args.json:
             print(json.dumps(model, indent=2, ensure_ascii=False))
+        elif args.brief:
+            sys.stdout.write(render_brief(model))
         else:
             sys.stdout.write(render_text(model))
     except ReportError as error:

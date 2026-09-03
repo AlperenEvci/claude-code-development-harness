@@ -4507,3 +4507,149 @@ class LaunchCorrelationTests(unittest.TestCase):
         self.assertIn("write_envelope(", source)
         self.assertNotIn("envelope_version", source)
         self.assertNotIn("MAX_SUMMARY_CHARS", source)
+
+
+def seed_checkpoint(root: Path, stamp: str, intent: str, steps: list[str]) -> None:
+    directory = root / ".ai" / "runs" / stamp
+    directory.mkdir(parents=True, exist_ok=True)
+    write_lf(directory / "checkpoint.json", json.dumps({
+        "checkpoint_version": 1,
+        "created_at": f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}T12:00:00Z",
+        "intent": intent,
+        "artifacts": [],
+        "next_steps": steps,
+        "policy": {},
+    }))
+
+
+def seed_ledger(root: Path, items: list[dict]) -> None:
+    (root / ".ai").mkdir(parents=True, exist_ok=True)
+    write_lf(root / ".ai" / "progress.json", json.dumps({
+        "progress_version": 1,
+        "updated_at": "2026-09-02T21:00:00Z",
+        "items": items,
+    }))
+
+
+class SessionBriefTests(unittest.TestCase):
+    """`--brief`: session start is one command, not a checklist of three.
+
+    The generated working model used to open by asking for a checkpoint resume
+    and a pending-ledger listing, and before that for three steps in prose. A
+    checklist of three is three chances to skip one, which is the failure this
+    project keeps replacing with a mechanism. The brief reads nothing new; it
+    renders the model the report already builds.
+    """
+
+    def brief(self, root: Path) -> str:
+        proc = run(
+            PYTHON, str(SCRIPTS / "harness_report.py"), "--root", str(root), "--brief"
+        )
+        return proc.stdout
+
+    def test_it_leads_with_the_newest_handoff_and_its_next_steps(self) -> None:
+        """Two facts decide everything else: what I was doing, and what is next."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed_checkpoint(root, "20260901T0900Z-old", "Older intent", ["Stale step"])
+            seed_checkpoint(
+                root, "20260902T2141Z-billing", "Wire idempotency keys",
+                ["Decide per-attempt or per-invoice", "Run npm test -- billing"],
+            )
+            text = self.brief(root)
+
+        self.assertIn("Wire idempotency keys", text)
+        self.assertIn("1. Decide per-attempt or per-invoice", text)
+        self.assertIn("2. Run npm test -- billing", text)
+        self.assertNotIn("Older intent", text)
+        self.assertNotIn("Stale step", text)
+
+    def test_it_lists_what_is_unproven_and_leaves_out_what_passed(self) -> None:
+        """A brief that repeats finished work buries the part that is not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed_ledger(root, [
+                {"id": "retry-keys", "title": "Add idempotency keys",
+                 "verify": "npm test -- billing", "passes": False,
+                 "evidence": None, "added_at": "2026-09-02T20:00:00Z"},
+                {"id": "already-done", "title": "Proven earlier",
+                 "verify": "npm test", "passes": True,
+                 "evidence": {"command": "npm test", "exit_code": 0},
+                 "added_at": "2026-09-02T20:00:00Z"},
+            ])
+            text = self.brief(root)
+
+        self.assertIn("UNPROVEN  1 of 2", text)
+        self.assertIn("retry-keys", text)
+        self.assertIn("verify: npm test -- billing", text)
+        self.assertNotIn("already-done", text)
+        self.assertNotIn("Proven earlier", text)
+
+    def test_a_question_an_agent_left_open_is_surfaced(self) -> None:
+        """A blocked agent is the one thing a session must not walk past."""
+        session = "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            envelope = BUS.build_envelope(
+                session_id=session, sender="billing-researcher", kind="question",
+                summary="Is the key per attempt or per invoice?", body={},
+                capability="reader",
+            )
+            BUS.write_envelope(root, envelope)
+            envelope = BUS.build_envelope(
+                session_id=session, sender="billing-researcher", kind="status",
+                summary="Halfway through the gateway", body={},
+            )
+            BUS.write_envelope(root, envelope)
+            text = self.brief(root)
+
+        self.assertIn("OPEN QUESTIONS  1", text)
+        self.assertIn("Is the key per attempt or per invoice?", text)
+        self.assertNotIn("Halfway through the gateway", text)
+
+    def test_an_empty_repository_says_so_rather_than_failing(self) -> None:
+        """A first session has no history, and that is not an error state."""
+        with tempfile.TemporaryDirectory() as tmp:
+            text = self.brief(Path(tmp))
+
+        self.assertIn("RESUME  no checkpoint recorded", text)
+        self.assertIn("UNPROVEN  no ledger", text)
+        self.assertIn("OPEN QUESTIONS  none", text)
+
+    def test_it_says_what_it_cannot_see(self) -> None:
+        """It reads files, so a running lane is invisible to it.
+
+        Claiming to answer "where do things stand" while being blind to live
+        sessions is how an operator skips the sweep.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            text = self.brief(Path(tmp))
+        self.assertIn("cannot see what is running", text)
+        self.assertIn("sweep", text)
+
+    def test_brief_and_json_are_mutually_exclusive(self) -> None:
+        """Two output shapes on one run is a caller that meant one of them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run(
+                PYTHON, str(SCRIPTS / "harness_report.py"),
+                "--root", tmp, "--brief", "--json", check=False,
+            )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not allowed with", proc.stderr)
+
+    def test_the_generated_working_model_opens_with_the_one_command(self) -> None:
+        """The payoff is in the rendered harness, not in the flag."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "brief-output"
+            run(
+                PYTHON, str(SCRIPTS / "render_harness.py"),
+                "--config", str(REPO / "examples" / "standard-codex-plugin.json"),
+                "--output", str(output),
+            )
+            claude = (output / "payload" / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertIn("harness_report.py --brief", claude)
+        # The two it replaced still exist and are still named, because one of
+        # them alone is sometimes the right call.
+        self.assertIn("harness_checkpoint.py resume", claude)
+        self.assertIn("harness_progress.py list --pending", claude)

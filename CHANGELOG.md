@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.12.0 - 2026-09-03
+
+### Added - session start was a checklist, and a checklist of three is three chances to skip one
+
+The generated working model opened by asking for `harness_checkpoint.py resume` and
+`harness_progress.py list --pending`, and before 1.4 for three steps in prose. Nothing
+enforced either: no hook fires them, so they were a paragraph the model had to remember
+at exactly the moment it has the least context to remember it with.
+
+`harness_report.py --brief` is one command in their place. It reads nothing new - it
+renders the model the report already builds - for the one question a session opens with:
+the newest handoff's intent and next steps, what the ledger still has unproven, and any
+`question` envelope an agent left open.
+
+It is deliberately explicit about its blind spot. It runs no subprocess, so a background
+lane it never started is invisible to it, and the last line says so and names
+`harness_session.py sweep` rather than implying coverage it does not have.
+
+`--brief` and `--json` are mutually exclusive; two output shapes on one run is a caller
+who meant one of them. The two commands it replaced are unchanged, still installed, and
+still named in the generated `CLAUDE.md` - one of them alone is sometimes the right call.
+
 ## 1.11.0 - 2026-09-02
 
 ### Added - the loop the report was built around had no producer
