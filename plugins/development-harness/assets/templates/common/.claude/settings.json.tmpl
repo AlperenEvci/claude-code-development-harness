@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Write|Edit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{python_command}}",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/scripts/ai-harness/hook_guard.py"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{python_command}}",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/scripts/ai-harness/hook_session_start.py"
+            ],
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

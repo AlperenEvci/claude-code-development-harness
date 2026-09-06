@@ -54,8 +54,10 @@ for config in "$ROOT"/examples/*.json; do
 done
 
 if command -v claude >/dev/null 2>&1; then
-  claude plugin validate "$ROOT/plugins/development-harness"
-  claude plugin validate "$ROOT"
+  # `--strict` is GA and turns manifest warnings into failures; a manifest
+  # that only warns today is the one that breaks installation tomorrow.
+  claude plugin validate --strict "$ROOT/plugins/development-harness"
+  claude plugin validate --strict "$ROOT"
 else
   echo "NOTICE: Claude Code CLI not found; skipped official plugin validation."
 fi

@@ -103,6 +103,7 @@ Default: no network, no secrets, no bypass permissions, no active hooks, no dest
 48. Are prior decisions or research reports available?
 49. Who maintains the backlog and decision records?
 50. Should `.ai/runs/` be committed, ignored, or periodically archived?
+51. Which interpreter name printed a version when it was resolved, `python3` or `python`? Record it as `python_command`; do not ask the operator, the resolution step already answered it.
 
 For Greenfield, product intent lives under `.ai/project/`; after implementation exists, reports describe repository evidence.
 

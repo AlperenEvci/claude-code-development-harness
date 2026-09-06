@@ -113,6 +113,21 @@ code-running tools and WebFetch; it does not strip `Write`. It composes with `--
 rather than replacing it, and `launch` refuses it for `implementer`, which passes no
 `--tools` and would silently lose the `Bash` it needs to run the gate.
 
+### `--bare`
+
+`--bare` is not a substitute for `--restricted`, and `launch` refuses it by name.
+It skips hooks, plugin sync, auto-memory, and `CLAUDE.md` auto-discovery, so a
+session launched with it holds none of the contract the harness installed - the tier
+would be a label on an unconstrained process. It also reads only `ANTHROPIC_API_KEY`
+or an `apiKeyHelper`, never an OAuth login, so on a subscription account it exits
+with `Not logged in` before any API call. Both measured on 2.1.263 and recorded in
+`.ai/reports/0004-bare-flag-smoke-test.md`.
+
+The CLI reference says `--bare` will one day become the default for `-p`. Nothing
+here can pin against that: there is no inverse flag. What the refusal guarantees is
+that the harness never opts in by accident; when the default moves, the launcher must
+learn whatever inverse ships with it.
+
 ## Starting a session
 
 `launch` **prints** the command and does not run it. Starting an agent stays the
@@ -195,6 +210,37 @@ envelope-shaped, so it posts verbatim with `--body-file`.
 `permission_denials` in the same response is an audit channel. An empty array is
 positive evidence that the tier held during the run, rather than the agent's own claim
 that it complied.
+
+## Hooks
+
+A `guarded` harness installs two command hooks and the settings file that wires
+them up. They are the floor under the rules `AGENTS.md` states in prose:
+
+| Script | Event | Refuses or adds |
+|---|---|---|
+| `hook_guard.py` | `PreToolUse` | a secret-bearing read or write, destructive git, a command that widens its own authority |
+| `hook_session_start.py` | `SessionStart` | prints the session brief into context |
+
+Measured against Claude Code 2.1.263 rather than read from the help text: a
+`Read` of `.env` in a guarded repository is denied, the reason reaches the model,
+an ordinary read is untouched, and the brief arrives at `startup`. The record is
+`.ai/reports/0005-guarded-hooks-smoke-test.md`.
+
+Two levers when a guard is wrong:
+
+```bash
+HARNESS_HOOKS_DISABLE=1 claude          # this session, harness hooks only
+```
+
+and the platform's own `disableAllHooks` setting, which is wider and turns off
+every hook from every source.
+
+If the installer reported a conflict on `.claude/settings.json`, the hook scripts
+are installed and **nothing runs them**. `check_installed.py` says so. Merge the
+`hooks` block from the package by hand.
+
+The invariants, what the guard cannot do, and how to add a hook are in
+[`references/hooks.md`](../plugins/development-harness/references/hooks.md).
 
 ## The message bus
 
