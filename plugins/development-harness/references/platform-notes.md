@@ -8,7 +8,7 @@ The public distribution unit is a Claude Code plugin. Plugin skills live under `
 
 The setup skill is manual-only because it creates repository files. It uses `${CLAUDE_PLUGIN_ROOT}` for bundled scripts, `${CLAUDE_PLUGIN_DATA}` for persistent staging outside the target repository, and `${CLAUDE_PROJECT_DIR}` for the repository where Claude Code is running.
 
-The plugin ships no active hooks, MCP server, or default settings.
+The plugin ships no MCP server and no default settings of its own. It renders hooks into a target repository only when the profile asks for `hooks_policy: guarded`, and those are deny-or-inject command hooks it authored; see `references/hooks.md`. It never adopts a hook from a scanned repository.
 
 ## Generated Claude Code project files
 

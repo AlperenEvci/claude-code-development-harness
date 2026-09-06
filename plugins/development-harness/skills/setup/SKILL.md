@@ -72,6 +72,11 @@ this skill. Do not assume `python3`: on Windows the bare name resolves to a Micr
 Store alias stub that is not an interpreter and exits with an error, and every later
 step would fail with a message about installing Python from the Store.
 
+Record the name that worked as `python_command` in the profile. It defaults to
+`python3`, so it only needs writing when `python` was the one that printed a
+version. The generated hooks are invoked through it, so a wrong answer here is a
+harness whose guards never start.
+
 ## 1. Inspect and select the entry path
 
 Run:

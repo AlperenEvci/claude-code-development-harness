@@ -19,6 +19,13 @@ from __future__ import annotations
 
 from typing import Any
 
+# Flags no tier may launch with, whatever the table says. `--bare` skips hooks,
+# plugin sync, auto-memory, and `CLAUDE.md` auto-discovery, so a session launched
+# with it holds none of the contract the harness installed - and on subscription
+# authentication it refuses to start at all. Measured on Claude Code 2.1.263; see
+# `.ai/reports/0004-bare-flag-smoke-test.md`.
+FORBIDDEN_LAUNCH_FLAGS: tuple[str, ...] = ("--bare",)
+
 CAPABILITY_TIERS: dict[str, dict[str, Any]] = {
     "reader": {
         "tools": ["Read", "Grep", "Glob"],

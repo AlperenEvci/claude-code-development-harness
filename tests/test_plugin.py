@@ -4653,3 +4653,417 @@ class SessionBriefTests(unittest.TestCase):
         # them alone is sometimes the right call.
         self.assertIn("harness_checkpoint.py resume", claude)
         self.assertIn("harness_progress.py list --pending", claude)
+
+
+class GroundTruthTests(unittest.TestCase):
+    """1.13.0: the measurements Harness 2.0 stands on.
+
+    `.ai/reports/0004-bare-flag-smoke-test.md` measured that `--bare` strips the
+    contract a read-only lane depends on and refuses OAuth outright. There is no
+    inverse flag to pin, so what the harness can guarantee is that it never opts
+    in - by table or by argv.
+    """
+
+    def test_no_tier_launches_bare(self) -> None:
+        self.assertIn("--bare", CAPABILITIES.FORBIDDEN_LAUNCH_FLAGS)
+        for name, tier in CAPABILITIES.CAPABILITY_TIERS.items():
+            for flag in CAPABILITIES.FORBIDDEN_LAUNCH_FLAGS:
+                self.assertNotIn(flag, tier["launch_flags"], name)
+                self.assertNotIn(flag, tier["launch"], name)
+
+    def test_launch_argv_refuses_a_bare_flag_by_name(self) -> None:
+        """A table edit that adds `--bare` must fail at launch, not at the model."""
+        tier = SESSION.CAPABILITY_TIERS["reader"]
+        original = list(tier["launch_flags"])
+        tier["launch_flags"] = original + ["--bare"]
+        try:
+            with self.assertRaises(SESSION.SessionError) as caught:
+                SESSION.launch_argv("reader", "Map the retry path")
+            self.assertIn("--bare", str(caught.exception))
+            self.assertIn("CLAUDE.md", str(caught.exception))
+        finally:
+            tier["launch_flags"] = original
+        # The restore is real: the unmodified table launches as before.
+        self.assertNotIn("--bare", SESSION.launch_argv("reader", "Map the retry path"))
+
+    def _render_profile(self, temp_path: Path, extra: dict, check: bool = True):
+        data = profile("standard")
+        data.update(extra)
+        config = temp_path / "profile.json"
+        output = temp_path / "generated"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        return run(
+            PYTHON,
+            str(SCRIPTS / "render_harness.py"),
+            "--config",
+            str(config),
+            "--output",
+            str(output),
+            check=check,
+        ), output
+
+    def test_python_command_defaults_to_python3_and_records_what_answered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            _, output = self._render_profile(temp_path, {})
+            recorded = json.loads(
+                (output / "payload/.ai/harness/project-profile.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(recorded["python_command"], "python3")
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            _, output = self._render_profile(temp_path, {"python_command": "python"})
+            recorded = json.loads(
+                (output / "payload/.ai/harness/project-profile.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(recorded["python_command"], "python")
+
+    def test_python_command_rejects_a_name_that_is_not_an_interpreter(self) -> None:
+        """`py3`, `python3.12 -u`, or a relative path would render a hook that
+        cannot start; the refusal names the field so setup can correct it."""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            proc, _ = self._render_profile(
+                temp_path, {"python_command": "py3"}, check=False
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("python_command", proc.stderr)
+
+    def test_the_validator_reports_the_always_loaded_contract_as_one_number(self) -> None:
+        """`CLAUDE.md` imports `AGENTS.md`, and an `@import` loads at launch."""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            _, output = self._render_profile(temp_path, {})
+            payload = output / "payload"
+            expected = sum(
+                (payload / rel).read_text(encoding="utf-8").count("\n") + 1
+                for rel in ("CLAUDE.md", "AGENTS.md")
+            )
+            proc = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+            self.assertIn(
+                f"INFO: always-loaded contract is {expected} lines", proc.stderr
+            )
+            self.assertIn("CLAUDE.md", proc.stderr)
+            self.assertIn("AGENTS.md", proc.stderr)
+            if expected >= 200:
+                self.assertIn("WARNING: always-loaded contract", proc.stderr)
+            else:
+                self.assertNotIn("WARNING: always-loaded contract", proc.stderr)
+
+    def test_the_gate_validates_both_manifests_strictly(self) -> None:
+        gate = (REPO / "scripts/validate-repo.sh").read_text(encoding="utf-8")
+        strict = [
+            line for line in gate.splitlines() if "claude plugin validate" in line
+        ]
+        self.assertEqual(len(strict), 2, strict)
+        for line in strict:
+            self.assertIn("--strict", line)
+
+
+class GuardedHookTests(unittest.TestCase):
+    """1.14.0: the first thing this generator installs that runs unasked.
+
+    Measured against Claude Code 2.1.263 before any of it was written down:
+    `.ai/reports/0005-guarded-hooks-smoke-test.md`. A `Read` of `.env` in a
+    guarded repository is denied and the reason reaches the model; an ordinary
+    read is untouched; the brief arrives at `startup`.
+    """
+
+    GUARD = SCRIPTS / "hook_guard.py"
+    START = SCRIPTS / "hook_session_start.py"
+
+    def guard(self, payload: dict, cwd: Path | None = None):
+        return subprocess.run(
+            [PYTHON, str(self.GUARD)],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            cwd=str(cwd) if cwd else None,
+        )
+
+    def render_guarded(self, temp_path: Path, **overrides):
+        data = profile("standard")
+        data["hooks_policy"] = "guarded"
+        data.update(overrides)
+        config = temp_path / "guarded.json"
+        output = temp_path / "generated"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        run(
+            PYTHON,
+            str(SCRIPTS / "render_harness.py"),
+            "--config",
+            str(config),
+            "--output",
+            str(output),
+        )
+        return output
+
+    # ---------------------------------------------------------------- the guard
+
+    def test_the_guard_refuses_every_secret_file_the_inspector_redacts(self) -> None:
+        """Two lists, one rule. The inspector is never installed into a target
+        repository, so the guard cannot import its list and must not drift from
+        it. This test is the join the code cannot make."""
+        inspector = load_script("inspect_project.py", "inspect_under_test")
+        for name in inspector.SECRET_FILENAMES:
+            proc = self.guard({"tool_name": "Read", "tool_input": {"file_path": name}})
+            self.assertEqual(proc.returncode, 2, f"{name} was not refused")
+            self.assertIn("harness guard", proc.stderr)
+
+    def test_the_guard_refuses_a_write_as_well_as_a_read(self) -> None:
+        proc = self.guard(
+            {"tool_name": "Write", "tool_input": {"file_path": "config/.env.production"}}
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("write to", proc.stderr)
+
+    def test_the_guard_allows_an_ordinary_file(self) -> None:
+        """The control. An over-broad matcher is caught here, not in production."""
+        for name in ("README.md", "src/env_loader.py", "keyboard.ts", "envelope.json"):
+            proc = self.guard({"tool_name": "Read", "tool_input": {"file_path": name}})
+            self.assertEqual(proc.returncode, 0, f"{name} was refused: {proc.stderr}")
+
+    def test_the_guard_refuses_destructive_git_under_every_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".ai/harness").mkdir(parents=True)
+            (root / ".ai/harness/project-profile.json").write_text(
+                json.dumps({"agent_commit_policy": "commit-locally"})
+            )
+            for command in (
+                "git reset --hard HEAD~1",
+                "git clean -fd",
+                "git push --force origin main",
+                "git checkout -- .",
+                "git branch -D feature",
+            ):
+                proc = self.guard(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": command},
+                        "cwd": str(root),
+                    }
+                )
+                self.assertEqual(proc.returncode, 2, f"{command!r} was allowed")
+
+    def test_the_commit_refusal_follows_the_profile_not_the_guard(self) -> None:
+        """`commit-locally` is a real answer an operator can give, and a guard
+        that ignored it would be enforcing a policy nobody chose."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".ai/harness").mkdir(parents=True)
+            profile_path = root / ".ai/harness/project-profile.json"
+
+            profile_path.write_text(json.dumps({"agent_commit_policy": "no-commit"}))
+            denied = self.guard(
+                {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": str(root)}
+            )
+            self.assertEqual(denied.returncode, 2)
+            self.assertIn("no-commit", denied.stderr)
+
+            profile_path.write_text(json.dumps({"agent_commit_policy": "commit-locally"}))
+            allowed = self.guard(
+                {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": str(root)}
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+            # `push` is outward-facing and stays refused under either answer.
+            pushed = self.guard(
+                {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": str(root)}
+            )
+            self.assertEqual(pushed.returncode, 2)
+
+    def test_a_missing_profile_guesses_toward_refusing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            proc = self.guard(
+                {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": temp}
+            )
+            self.assertEqual(proc.returncode, 2)
+
+    def test_the_guard_refuses_a_command_that_would_widen_its_own_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            proc = self.guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "claude --dangerously-skip-permissions -p hi"},
+                    "cwd": temp,
+                }
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("widen", proc.stderr)
+
+    def test_the_escape_hatch_disables_every_hook(self) -> None:
+        """A buggy matcher must never be able to lock an operator out."""
+        env = dict(os.environ, HARNESS_HOOKS_DISABLE="1")
+        proc = subprocess.run(
+            [PYTHON, str(self.GUARD)],
+            input=json.dumps({"tool_name": "Read", "tool_input": {"file_path": ".env"}}),
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_a_malformed_payload_does_not_block_the_session(self) -> None:
+        """Failing closed on garbage input would make a parser bug a lockout."""
+        for raw in ("", "not json", "[]", "null"):
+            proc = subprocess.run(
+                [PYTHON, str(self.GUARD)], input=raw, text=True, capture_output=True
+            )
+            self.assertEqual(proc.returncode, 0, f"{raw!r}: {proc.stderr}")
+
+    # --------------------------------------------------------- the session brief
+
+    def test_the_session_hook_says_nothing_outside_an_installed_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            proc = subprocess.run(
+                [PYTHON, str(self.START)],
+                input=json.dumps({"cwd": temp, "source": "startup"}),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_the_session_hook_prints_the_brief_and_never_fails_a_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_guarded(Path(temp))
+            root = Path(temp) / "installed"
+            shutil.copytree(output / "payload", root)
+            proc = subprocess.run(
+                [PYTHON, str(root / "scripts/ai-harness/hook_session_start.py")],
+                input=json.dumps({"cwd": str(root), "source": "startup"}),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("session brief", proc.stdout)
+            self.assertIn("UNPROVEN", proc.stdout)
+
+            # A corrupt ledger is a bad session start, not a broken one.
+            (root / ".ai/progress.json").write_text("{ not json", encoding="utf-8")
+            degraded = subprocess.run(
+                [PYTHON, str(root / "scripts/ai-harness/hook_session_start.py")],
+                input=json.dumps({"cwd": str(root), "source": "resume"}),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(degraded.returncode, 0, degraded.stderr)
+
+    def test_the_brief_is_capped_because_hook_stdout_is_context(self) -> None:
+        source = self.START.read_text(encoding="utf-8")
+        self.assertIn("MAX_BRIEF_CHARS", source)
+        module = load_script("hook_session_start.py", "hook_start_under_test")
+        self.assertLessEqual(module.MAX_BRIEF_CHARS, 5_000)
+
+    # ------------------------------------------------------------- the rendering
+
+    def test_guarded_renders_the_settings_and_the_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_guarded(Path(temp), python_command="python")
+            payload = output / "payload"
+            settings = payload / ".claude/settings.json"
+            self.assertTrue(settings.is_file())
+            data = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(sorted(data["hooks"]), ["PreToolUse", "SessionStart"])
+            for name in RENDERER.HOOK_SCRIPTS:
+                installed = payload / "scripts/ai-harness" / name
+                self.assertTrue(installed.is_file(), name)
+                self.assertEqual(
+                    installed.read_bytes().replace(b"\r\n", b"\n"),
+                    (SCRIPTS / name).read_bytes().replace(b"\r\n", b"\n"),
+                    f"{name} is not the plugin original",
+                )
+            handler = data["hooks"]["PreToolUse"][0]["hooks"][0]
+            self.assertEqual(handler["command"], "python")
+            self.assertEqual(handler["type"], "command")
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+
+    def test_the_other_policies_render_nothing_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            for policy in ("disabled", "examples-only"):
+                data = profile("standard")
+                data["hooks_policy"] = policy
+                config = Path(temp) / f"{policy}.json"
+                output = Path(temp) / f"gen-{policy}"
+                config.write_text(json.dumps(data, indent=2) + "\n")
+                run(
+                    PYTHON,
+                    str(SCRIPTS / "render_harness.py"),
+                    "--config",
+                    str(config),
+                    "--output",
+                    str(output),
+                )
+                payload = output / "payload"
+                self.assertFalse((payload / ".claude/settings.json").exists(), policy)
+                for name in RENDERER.HOOK_SCRIPTS:
+                    self.assertFalse((payload / "scripts/ai-harness" / name).exists())
+                run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+
+    def test_guarded_is_refused_at_lite_because_it_has_nowhere_to_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            data = profile("lite")
+            data["hooks_policy"] = "guarded"
+            config = Path(temp) / "lite.json"
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            proc = run(
+                PYTHON,
+                str(SCRIPTS / "render_harness.py"),
+                "--config",
+                str(config),
+                "--output",
+                str(Path(temp) / "out"),
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("hooks_policy=guarded requires", proc.stderr)
+
+    def test_the_renderer_and_the_validator_agree_on_the_hook_list(self) -> None:
+        """Two copies on purpose. A validator that imports the list it checks
+        confirms only that the renderer agrees with itself."""
+        validator = load_validator()
+        self.assertEqual(tuple(RENDERER.HOOK_SCRIPTS), tuple(validator.HOOK_SCRIPTS))
+        for name in RENDERER.HOOK_SCRIPTS:
+            self.assertTrue((SCRIPTS / name).is_file(), name)
+
+    def test_the_installed_checker_requires_what_the_renderer_installs(self) -> None:
+        checker = load_script("check_installed.py", "check_installed_hooks_under_test")
+        required = set(checker.HOOK_REQUIRED)
+        for name in RENDERER.HOOK_SCRIPTS:
+            self.assertIn(f"scripts/ai-harness/{name}", required)
+        self.assertIn(".claude/settings.json", required)
+
+    def test_an_unwired_settings_file_is_reported_not_assumed_working(self) -> None:
+        """The installer reports a conflict on an existing settings file and
+        skips it. The hooks are then installed and nothing runs them, which is
+        indistinguishable from working unless something says so."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_guarded(Path(temp))
+            root = Path(temp) / "installed"
+            shutil.copytree(output / "payload", root)
+            (root / ".claude/settings.json").write_text(
+                json.dumps({"hooks": {}}), encoding="utf-8"
+            )
+            proc = run(
+                PYTHON,
+                str(SCRIPTS / "check_installed.py"),
+                "--root",
+                str(root),
+                check=False,
+            )
+            self.assertIn("never wired up", proc.stdout + proc.stderr)
+
+    def test_no_generated_hook_can_grant(self) -> None:
+        """The rule the whole design rests on: repository text may not widen
+        authority, and a hook is the sharpest possible counter-example."""
+        for name in RENDERER.HOOK_SCRIPTS:
+            text = (SCRIPTS / name).read_text(encoding="utf-8")
+            self.assertNotIn("permissionDecision", text, name)
+            self.assertNotIn('"allow"', text, name)
+            self.assertIn("HARNESS_HOOKS_DISABLE", text, name)

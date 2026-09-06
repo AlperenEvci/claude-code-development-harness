@@ -1,5 +1,186 @@
 # AI Backlog
 
+## Harness 2.0 - module roadmap
+
+**Goal:** turn every guarantee the generated harness makes into something that fires
+without being asked, and bring context, cost, and loop handling level with September
+2026 practice.
+
+**Accepted architecture:** `.ai/decisions/0004-harness-v2-architecture.md`
+(accepted 2026-09-06, amended after 1.14.0). **Evidence:** `.ai/reports/0003-harness-engineering-review-2026-09.md`.
+
+**Delivery rule:** one module per feature branch, one minor release per module,
+repository green and CI-confirmed between modules, no agent commits. Every module
+touches the renderer, the validator, tests, a reference, and the changelog together;
+the file lists below are the expected blast radius, to be confirmed by the
+template cartographer before editing.
+
+### Module 0 - Ground truth before hooks (1.13.0) - DONE on Windows, CI pending
+
+Shipped on branch `module-0-ground-truth`. Measured: plain `-p` loads `CLAUDE.md`;
+`--bare` refuses OAuth before any API call and has no inverse flag, so it is refused by
+name (`FORBIDDEN_LAUNCH_FLAGS`) rather than pinned (`.ai/reports/0004-bare-flag-smoke-test.md`).
+The always-loaded contract measures 250-264 lines across the shipped examples against a
+target under 200. `python_command` is in the profile, unconsumed. Gate green locally
+(246 tests, 4 skipped); CI on ubuntu-latest still has to confirm.
+
+Small, first, and it unblocks everything else.
+
+- Measure `--bare` against the installed CLI: does an inverse flag exist, and does
+  `-p` still load `CLAUDE.md` and `--agents` today? Record in a new
+  `.ai/reports/0004-...` smoke test. Then pin `launch_argv` and assert it in a test.
+- Add `claude plugin validate --strict` to `scripts/validate-repo.sh` (skipped with a
+  notice when the CLI is absent, as today).
+- Validator measures rendered `CLAUDE.md` + `AGENTS.md` line count and reports it;
+  warning only until module 3 makes it a failure.
+- Profile gains `python_command` (default `python3`; setup writes `python` on
+  Windows). Nothing consumes it until module 1, but the interview asks now.
+- Files: `harness_session.py`, `validate_harness.py`, `render_harness.py`
+  (`load_profile`), `references/project-profile-schema.md`, `skills/setup/SKILL.md`,
+  `scripts/validate-repo.sh`, `tests/test_plugin.py`, `CHANGELOG.md`.
+
+### Module 1 - Guarded hooks (1.14.0) - DONE on Windows, CI pending
+
+Shipped on branch `module-0-ground-truth`. `hooks_policy: guarded` renders
+`.claude/settings.json` and copies two hook scripts byte-identical into
+`scripts/ai-harness/`; the policy requires Standard or Fleet. The guard denies and
+never allows, and follows the profile's `agent_commit_policy` rather than carrying its
+own. Measured against CLI 2.1.263 in `.ai/reports/0005-guarded-hooks-smoke-test.md`:
+`.env` read denied with the reason reaching the model, ordinary read untouched, brief
+in context at startup, existing settings file reported as a conflict. Validator gained
+`check_hooks()` (13 mutation checks, 13 caught); `check_installed.py` reports the
+installed-but-unwired state. Gate green locally (265 tests); CI still has to confirm.
+
+Two hooks shipped rather than four, per decision 0004: "start with the `PreToolUse`
+guards and `SessionStart` brief; add `PreCompact` and `Stop` once the first two are in
+the gate." `hook_precompact.py` moved to module 2, where the checkpoint subcommand it
+needs is built; `hook_stop.py` moved to module 6, where `commands.smallest_check` is
+added.
+
+**Deviation from decision 0004:** no sidecar and no installer change. The installer's
+uniform conflict contract already reports and skips an existing
+`.claude/settings.json`; a per-path exception in `INSTALL_SCRIPT` would add a branch to
+the most sensitive script in the repository. `check_installed.py` detects the unwired
+state instead.
+
+- Shipped: `hook_guard.py`, `hook_session_start.py`,
+  `common/.claude/settings.json.tmpl`, `references/hooks.md`, the `docs/runtime.md`
+  hooks section, corrected `SECURITY.md` and `platform-notes.md` claims, and the eval
+  case `found-hooks-are-reported-never-adopted`.
+- Not done, deliberately: the Lite tier gets no hooks at all rather than the guard
+  alone. Lite installs no `scripts/ai-harness/`, so the guard has nowhere to land, and
+  building a second copy path for one script was not worth the branch.
+- Not done: the eval cases named `guard-denies-secret-read` and
+  `settings-conflict-is-reported-not-merged`. Both are measured directly in
+  `.ai/reports/0005-...`, and the eval budget was better spent on the adoption seam
+  this release opened.
+
+### Module 2 - Compaction-native context policy (1.15.0)
+
+- `MODEL_WINDOWS` table in `harness_capabilities.py`; `context_policy` band derived
+  from the profile's session model unless set explicitly; validator rejects a band
+  above the model window.
+- `harness_checkpoint.py from-hook` subcommand: reads the `PreCompact` payload on
+  stdin, writes the handoff, exits 0 always. `--used` stays as the fallback and the
+  record says which path produced it.
+- `hook_precompact.py` (deferred from module 1) - `PreCompact` on `auto|manual`:
+  writes a checkpoint through that subcommand with the pending ledger items as next
+  steps; never blocks. It joins `HOOK_SCRIPTS`, the settings template, and the
+  validator's `ALLOWED_HOOK_EVENTS` in the same change.
+- `harness_report.py --brief` reads the newest handoff regardless of producer and
+  labels it `compaction` or `manual`.
+- Path-scoped rules: `common/.claude/rules/sensitive-areas.md.tmpl` and
+  `important-paths.md.tmpl` with `paths:` frontmatter, rendered from the profile;
+  the same content leaves `AGENTS.md`.
+- Files: `harness_capabilities.py`, `harness_checkpoint.py`, `harness_report.py`,
+  `render_harness.py` (`context_budget_section`, `normalize_context_policy`, rules
+  layer), `validate_harness.py`, two rule templates, `references/agent-sessions.md`,
+  tests (target 10).
+
+### Module 3 - Root contract under 200 lines (1.16.0)
+
+- `agent_sessions_section` moves into a generated
+  `.claude/skills/harness-session/SKILL.md` (on demand), leaving a three-line pointer.
+- `disable-model-invocation: true` on `harness-orchestration` and the new skill.
+- Line-count check from module 0 becomes a failure at 200 rendered lines for
+  `CLAUDE.md` + `AGENTS.md` combined.
+- Every fragment assertion in the validator and tests that named the moved text is
+  re-pointed; the eval `trivial-work-skips-the-pipeline` is re-run mentally against
+  the slimmer contract.
+- Files: `render_harness.py`, `validate_harness.py`, `common/CLAUDE.md.tmpl`,
+  `common/AGENTS.md.tmpl`, new skill template, tests, `docs/runtime.md`.
+
+### Module 4 - Model and effort per tier (1.17.0)
+
+- Profile `agent_models` keyed by tier; defaults in the tier table (readers and
+  verifiers `sonnet` / `medium`, implementers `inherit` / `high`); `research_model`
+  and `review_model` become aliases for backward compatibility.
+- Rendered frontmatter gains `effort:`; readers gain `tools: Agent(<readers>)`.
+- `harness_session.py launch` passes `--model` and `--effort` derived from the tier;
+  `--restricted` unchanged.
+- Validator: `model` and `effort` in every agent file match the profile; readers'
+  `Agent(...)` list names only readers.
+- `check_installed.py` reports a project agent that shadows a generated one.
+- Files: `harness_capabilities.py`, `render_harness.py` (`normalize_agent_capabilities`,
+  `write_dynamic_components`), `harness_session.py`, `validate_harness.py`,
+  `check_installed.py`, both agent templates, `references/harness-tiers.md`, tests
+  (target 10).
+
+### Module 5 - Envelope v3 and the cost reader (1.18.0)
+
+- `ENVELOPE_VERSION = 3`; `trace` gains `cost_usd`, `cost_basis`, `model_usage`,
+  `num_turns`, `subtype`. Versions 1 and 2 still read. Fields stay absent from the
+  agent-facing schema.
+- `launch --report` fills them from `total_cost_usd`, `modelUsage`, `num_turns`, and
+  `subtype` in the result JSON; a field the CLI did not return stays absent.
+- `harness_report.py --cost`: per unit of work, per model, cache hit ratio
+  (`cache_read / (cache_read + input)`), and the launcher's `subtype` distribution.
+  Text and HTML.
+- Files: `harness_bus.py`, `harness_session.py`, `harness_report.py`, `docs/runtime.md`,
+  `references/agent-sessions.md`, tests (target 10).
+
+### Module 6 - Loop closure (1.19.0)
+
+- Profile `commands.smoke` and `commands.smallest_check`; the interview asks for
+  both and setup proposes them from the inspector's detected commands.
+- `hook_session_start.py` runs the smoke command and prints one pass/fail line.
+- `hook_stop.py` (deferred from module 1) - `Stop`: exits 0 immediately when
+  `stop_hook_active` is set or the tree is unchanged; otherwise runs
+  `commands.smallest_check` and blocks with the failing tail. Expects the
+  platform's eight-block cap.
+- `harness_progress.py claim <id>` / `release`: one claimed item per session recorded
+  under `.ai/runs/current-task.json`; `--brief` shows it; `check` reports a stale
+  claim.
+- Files: `render_harness.py`, `harness_progress.py`, `harness_report.py`, the two hook
+  scripts, `skills/setup/SKILL.md`, `references/questionnaire.md`, tests (target 8).
+
+### Module 7 - Evals and release (2.0.0)
+
+- Request `claude plugin eval` access; when it lands, `RUN_PLUGIN_EVAL=1` runs with
+  `--max-cost-usd` and ablation on; record the first scored run as a report.
+- New cases from modules 1 and 6; `session` and `agent` coverage via a pre-rendered
+  fixture harness under `tests/fixtures/`.
+- Flip `hooks_policy` default to `guarded`; the three examples regenerate; the
+  frozen 0.2 and 1.x fixtures must still render and validate unchanged.
+- Version 2.0.0 in `plugin.json`, `GENERATOR_VERSION`, `CHANGELOG.md`; decision 0004
+  to accepted; `README.md`, `docs/architecture.md`, `docs/runtime.md` updated.
+
+### Deliberately not in 2.0
+
+Agent teams, prompt- or agent-type hooks, an MCP server, automatic commits, a process
+supervisor or desktop shell, settings.json merging, and any hook that returns `allow`.
+
+### Known risks
+
+- A guard hook with a wrong matcher blocks legitimate work. Mitigation: escape hatch,
+  narrow matchers, a test per deny rule and a test per allowed sibling.
+- `Stop` fires on every response end. Mitigation: tree-changed check before any
+  command runs; the cap is the platform's.
+- Hook stdout is context. Mitigation: `--brief` output cap enforced in the script.
+- `--bare` becoming the `-p` default would silently strip the contract from read-only
+  lanes. Mitigation: module 0 measures and pins it before module 1 starts.
+- Windows: exec form and `python_command`; both legs of CI must run the hook tests.
+
 ## Harness v1.0 — four-phase upgrade
 
 **Goal:** raise the harness from a static file generator to a system with a machine-checked context budget, explicit work graphs, a tiered agent catalog, and on-demand agent synthesis with an artifact message bus.

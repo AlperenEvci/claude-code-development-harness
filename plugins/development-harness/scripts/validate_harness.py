@@ -234,6 +234,210 @@ def frontmatter_list(text: str, key: str) -> list[str] | None:
     return [line.strip().lstrip("-").strip() for line in match.group(1).splitlines()]
 
 
+# Claude Code's memory guidance: keep each always-loaded file under 200 lines.
+# `CLAUDE.md` and its `@AGENTS.md` import count together, because both load at launch.
+ALWAYS_LOADED_LINE_TARGET = 200
+
+
+#: The hook scripts a `guarded` package installs. A separate copy from the
+#: renderer's, for the same reason `SESSION_TOOL_SCRIPTS` keeps one: a validator
+#: that imports the thing it validates checks that the renderer agrees with
+#: itself. A test pins the two lists together.
+HOOK_SCRIPTS = ("hook_guard.py", "hook_session_start.py")
+
+#: Where the rendered hook wiring lands, and the only events it may register.
+#: A hook this plugin did not author is not a hook this plugin will ship.
+HOOK_SETTINGS_PATH = ".claude/settings.json"
+ALLOWED_HOOK_EVENTS = {"PreToolUse", "SessionStart"}
+
+#: Seconds. A guard that can hang for the platform default of 600 would stall a
+#: session on a defect rather than fail it.
+MAX_HOOK_TIMEOUT = 60
+
+
+def check_hooks(
+    profile: dict[str, Any],
+    payload: Path,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """A generated hook must be inert unless asked for, and narrow when asked.
+
+    The rule this file exists to keep: repository text may never widen
+    authority. A hook is the sharpest possible counter-example, because it runs
+    before the permission check and its decision is not the model's to argue
+    with. So a rendered hook may deny and may add context, and may do nothing
+    else - no allow decision, no shell string, no event this plugin did not
+    author, no script that is not the byte-identical original.
+    """
+    policy = str(profile.get("hooks_policy", "examples-only"))
+    settings = payload / ".claude" / "settings.json"
+    tool_dir = payload / "scripts" / "ai-harness"
+    source_dir = Path(__file__).resolve().parent
+
+    if policy != "guarded":
+        if settings.exists():
+            errors.append(
+                f"hooks_policy={policy} renders no hooks but {HOOK_SETTINGS_PATH} "
+                "is present"
+            )
+        for name in HOOK_SCRIPTS:
+            if (tool_dir / name).exists():
+                errors.append(
+                    f"hooks_policy={policy} installs no hooks but "
+                    f"scripts/ai-harness/{name} is present"
+                )
+        return
+
+    for name in HOOK_SCRIPTS:
+        target = tool_dir / name
+        if not target.is_file():
+            errors.append(f"hook script missing: scripts/ai-harness/{name}")
+            continue
+        source = source_dir / name
+        if source.is_file() and sha256(source) != sha256(target):
+            errors.append(
+                f"scripts/ai-harness/{name} differs from the plugin script it is "
+                "copied from; a hook runs unasked, so an edited copy is an "
+                "unreviewed guard"
+            )
+        text = target.read_text(encoding="utf-8")
+        if '"allow"' in text or "permissionDecision" in text:
+            errors.append(
+                f"scripts/ai-harness/{name} mentions a permission decision; a "
+                "generated hook may deny, never allow"
+            )
+        if "HARNESS_HOOKS_DISABLE" not in text:
+            errors.append(
+                f"scripts/ai-harness/{name} has no HARNESS_HOOKS_DISABLE escape; "
+                "a hook with no way out can lock an operator out of the repository"
+            )
+
+    if not settings.is_file():
+        errors.append(f"hooks_policy=guarded but {HOOK_SETTINGS_PATH} is missing")
+        return
+
+    raw = settings.read_text(encoding="utf-8")
+    for token in FORBIDDEN_CODEX_DEFAULTS:
+        if token in raw:
+            errors.append(f"unsafe token in {HOOK_SETTINGS_PATH}: {token}")
+    if "bypassPermissions" in raw:
+        errors.append(
+            f"{HOOK_SETTINGS_PATH} mentions bypassPermissions; generated settings "
+            "may not widen permissions"
+        )
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        errors.append(f"{HOOK_SETTINGS_PATH} is not valid JSON: {error}")
+        return
+    if not isinstance(data, dict):
+        errors.append(f"{HOOK_SETTINGS_PATH} must be a JSON object")
+        return
+
+    for key in data:
+        if key not in {"$schema", "hooks"}:
+            # Permissions, environment, and model belong to the operator. A
+            # generated settings file that carried them would be the plugin
+            # deciding something it was never asked to decide.
+            errors.append(
+                f"{HOOK_SETTINGS_PATH} sets {key}; generated settings carry hooks "
+                "and nothing else"
+            )
+
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict) or not hooks:
+        errors.append(f"{HOOK_SETTINGS_PATH} registers no hooks")
+        return
+
+    expected_command = str(profile.get("python_command", "python3"))
+    seen_scripts: set[str] = set()
+
+    for event, groups in hooks.items():
+        if event not in ALLOWED_HOOK_EVENTS:
+            errors.append(
+                f"{HOOK_SETTINGS_PATH} registers {event}; this generator authors "
+                f"only {', '.join(sorted(ALLOWED_HOOK_EVENTS))}"
+            )
+            continue
+        if not isinstance(groups, list):
+            errors.append(f"{HOOK_SETTINGS_PATH}: {event} must be an array")
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                errors.append(f"{HOOK_SETTINGS_PATH}: {event} entry must be an object")
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list) or not handlers:
+                errors.append(f"{HOOK_SETTINGS_PATH}: {event} entry has no handlers")
+                continue
+            for handler in handlers:
+                if not isinstance(handler, dict):
+                    errors.append(f"{HOOK_SETTINGS_PATH}: {event} handler must be an object")
+                    continue
+                kind = handler.get("type")
+                if kind != "command":
+                    # `prompt` and `agent` handlers call a model. A guard that
+                    # calls a model is slow, non-deterministic, and bills the
+                    # operator for every tool call.
+                    errors.append(
+                        f"{HOOK_SETTINGS_PATH}: {event} handler type {kind!r}; only "
+                        "command hooks are generated"
+                    )
+                    continue
+                if handler.get("command") != expected_command:
+                    errors.append(
+                        f"{HOOK_SETTINGS_PATH}: {event} handler runs "
+                        f"{handler.get('command')!r}, not the profile's "
+                        f"python_command {expected_command!r}"
+                    )
+                args = handler.get("args")
+                if not isinstance(args, list) or not args:
+                    # Exec form only. A shell string would put quoting, globbing,
+                    # and a Windows/POSIX difference into the one file that must
+                    # behave identically on both.
+                    errors.append(
+                        f"{HOOK_SETTINGS_PATH}: {event} handler has no args; "
+                        "generated hooks use exec form"
+                    )
+                    continue
+                script = str(args[0])
+                prefix = "${CLAUDE_PROJECT_DIR}/scripts/ai-harness/"
+                if not script.startswith(prefix):
+                    errors.append(
+                        f"{HOOK_SETTINGS_PATH}: {event} handler runs {script}, which "
+                        f"is not under {prefix}"
+                    )
+                    continue
+                name = script[len(prefix) :]
+                if name not in HOOK_SCRIPTS:
+                    errors.append(
+                        f"{HOOK_SETTINGS_PATH}: {event} handler runs {name}, which is "
+                        "not a hook script this generator installs"
+                    )
+                    continue
+                if not (tool_dir / name).is_file():
+                    errors.append(
+                        f"{HOOK_SETTINGS_PATH}: {event} handler runs {name}, which is "
+                        "not in the payload"
+                    )
+                seen_scripts.add(name)
+                timeout = handler.get("timeout")
+                if not isinstance(timeout, int) or not 1 <= timeout <= MAX_HOOK_TIMEOUT:
+                    errors.append(
+                        f"{HOOK_SETTINGS_PATH}: {event} handler timeout {timeout!r} is "
+                        f"not an integer between 1 and {MAX_HOOK_TIMEOUT} seconds"
+                    )
+
+    missing = [name for name in HOOK_SCRIPTS if name not in seen_scripts]
+    if missing:
+        warnings.append(
+            f"{HOOK_SETTINGS_PATH} installs {', '.join(missing)} but registers "
+            "no event for it"
+        )
+
+
 def check_declared_tier(rel: str, text: str, errors: list[str]) -> str | None:
     """Verify an agent file grants exactly what the tier it names allows.
 
@@ -284,7 +488,24 @@ def check_permission_bypass(payload: Path, errors: list[str]) -> None:
     line would have shipped unexamined. Prose is still exempt: a documented
     prohibition is not an unsafe default, which is why only executable fences
     are read.
+
+    1.14 added a second file class that is executable in full rather than in
+    fences. `.claude/settings.json` is configuration Claude Code acts on, so
+    every byte of it is read here rather than only its code blocks.
     """
+    settings = payload / ".claude" / "settings.json"
+    if settings.is_file():
+        try:
+            settings_text = settings.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            settings_text = ""
+        for token in FORBIDDEN_CODEX_DEFAULTS:
+            if token in settings_text:
+                errors.append(
+                    f"unsafe default token in {HOOK_SETTINGS_PATH}: {token}"
+                )
+                break
+
     for path in sorted(payload.rglob("*.md")):
         rel = path.relative_to(payload).as_posix()
         try:
@@ -842,6 +1063,10 @@ def main() -> None:
             ".ai/templates/ledger.md",
             "scripts/ai-harness/create-lane-worktree.sh",
         ]
+    if str(profile.get("hooks_policy", "")) == "guarded":
+        required_payload.append(HOOK_SETTINGS_PATH)
+        required_payload += [f"scripts/ai-harness/{name}" for name in HOOK_SCRIPTS]
+
     required_payload += expected_dynamic_paths(profile, errors)
 
     for rel in required_payload:
@@ -1020,14 +1245,33 @@ def main() -> None:
     check_workflows(profile, payload, errors, warnings)
     check_permission_bypass(payload, errors)
     check_session_tools(profile, payload, errors)
+    check_hooks(profile, payload, errors, warnings)
     check_read_only_agents_are_not_detached(payload, errors)
 
-    for rel in ("AGENTS.md", "CLAUDE.md"):
+    # `CLAUDE.md` imports `AGENTS.md`, and an `@import` loads at launch, so the
+    # always-loaded contract is the sum of the two, not either alone. The
+    # platform's stated target is under 200 lines. A warning here is the
+    # measurement 2.0 will turn into a failure; it is reported even when under
+    # the line so the number is visible on every run.
+    loaded: dict[str, int] = {}
+    for rel in ("CLAUDE.md", "AGENTS.md"):
         path = payload / rel
         if path.is_file():
-            line_count = path.read_text(encoding="utf-8").count("\n") + 1
-            if line_count > 220:
-                warnings.append(f"{rel} has {line_count} lines; always-loaded context may be too large")
+            loaded[rel] = path.read_text(encoding="utf-8").count("\n") + 1
+    if loaded:
+        total = sum(loaded.values())
+        parts = " + ".join(f"{rel} {count}" for rel, count in loaded.items())
+        print(
+            f"INFO: always-loaded contract is {total} lines ({parts}); "
+            f"target is under {ALWAYS_LOADED_LINE_TARGET}",
+            file=sys.stderr,
+        )
+        if total >= ALWAYS_LOADED_LINE_TARGET:
+            warnings.append(
+                f"always-loaded contract is {total} lines ({parts}); the platform "
+                f"target is under {ALWAYS_LOADED_LINE_TARGET}, and adherence "
+                "drops as it grows"
+            )
 
     for item in warnings:
         print(f"WARNING: {item}", file=sys.stderr)

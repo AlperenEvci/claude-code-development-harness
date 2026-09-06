@@ -5,7 +5,7 @@ The setup and audit skills are intentionally user-invocable only.
 The plugin does not:
 
 - install dependencies,
-- enable hooks,
+- enable a hook it did not author, or adopt one from a scanned repository,
 - grant bypass permissions,
 - open secret-bearing files,
 - access production systems,
@@ -26,7 +26,8 @@ Authority comes from the tier and from nowhere else:
 - `verifier` adds `Bash` and stays under `plan`, so it can run gates but cannot edit what it judges,
 - `implementer` is the only writing tier. It requires **both** a non-empty `writable_paths` scope and a recorded `approved_by_operator: true`, and it runs into a Git worktree,
 - a project profile cannot set tools or permission mode directly, and a synthesized agent's request cannot either — `tools`, `allowedTools`, `disallowedTools`, `permissionMode`, `isolation`, and `dangerouslySkipPermissions` are refused by name rather than silently dropped,
-- profiles cannot activate hooks or grant bypass permissions,
+- a profile may activate hooks only through `hooks_policy: guarded`, which renders command hooks this plugin authored and copies them byte-identical. They may deny a tool call or add context and may do nothing else: no allow decision, no shell string, no event the generator does not author, and no `permissions`, `env`, or `model` key in the settings file. Every one honors `HARNESS_HOOKS_DISABLE=1`. See `plugins/development-harness/references/hooks.md`,
+- profiles cannot grant bypass permissions,
 - Codex uses repository-scoped `workspace-write` without a hard-coded model or bypass flags.
 
 The tier is enforced by the process, not only declared in a file. Each agent records the launch flags for its tier, and `--tools` removes a tool rather than gating it — the removal reaches subagents, so an agent cannot escape its tier by delegating. `validate_harness.py` compares the whole tool list of every agent file in a package, rejects an undeclared agent, and rejects a read-only agent documented as running detached.

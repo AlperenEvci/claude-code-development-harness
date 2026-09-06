@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
+    FORBIDDEN_LAUNCH_FLAGS,
     LAUNCH_PLACEHOLDERS,
 )
 from harness_bus import (  # noqa: E402  (sibling module, resolved above)
@@ -365,6 +366,16 @@ def launch_argv(
     leftover = [item for item in argv if item in LAUNCH_PLACEHOLDERS]
     if leftover:
         raise SessionError(f"unsubstituted launch placeholders: {', '.join(leftover)}")
+
+    forbidden = [item for item in argv if item in FORBIDDEN_LAUNCH_FLAGS]
+    if forbidden:
+        # A session launched bare loads no `CLAUDE.md`, no agents, and no hooks:
+        # it holds none of the contract this harness installed, so the tier it
+        # claims would be a label on an unconstrained process.
+        raise SessionError(
+            f"{capability} refuses {', '.join(forbidden)}: a bare session skips "
+            "CLAUDE.md, agents, and hooks, and so carries none of its contract"
+        )
 
     if include_task:
         # The Orca surface delivers the prompt as terminal input instead, so it

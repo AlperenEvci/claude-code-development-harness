@@ -55,6 +55,15 @@ STANDARD_REQUIRED = [
     ".ai/progress.json",
 ]
 
+#: Installed only when the profile asked for `hooks_policy: guarded`. Kept
+#: beside the tier lists rather than inside one, because hooks follow the policy
+#: and not the tier.
+HOOK_REQUIRED = [
+    ".claude/settings.json",
+    "scripts/ai-harness/hook_guard.py",
+    "scripts/ai-harness/hook_session_start.py",
+]
+
 FLEET_REQUIRED = [
     ".claude/skills/harness-codex-fleet/SKILL.md",
     ".ai/templates/lane-brief.md",
@@ -238,6 +247,8 @@ def main() -> None:
         required.extend(FLEET_REQUIRED)
         if delegate != "codex-cli":
             errors.append("fleet harness requires implementation_delegate=codex-cli")
+    if str(profile.get("hooks_policy", "")) == "guarded":
+        required.extend(HOOK_REQUIRED)
     required.extend(dynamic)
 
     missing = [rel for rel in required if not (root / rel).is_file()]
@@ -373,10 +384,42 @@ def main() -> None:
     elif surface != "inproc":
         errors.append(f"unknown session_surface: {surface}")
 
-    if (root / ".claude/settings.json").exists():
-        text = read_text(root / ".claude/settings.json")
+    hooks_policy = str(profile.get("hooks_policy", "examples-only"))
+    settings_path = root / ".claude/settings.json"
+    if settings_path.exists():
+        text = read_text(settings_path)
         if "bypassPermissions" in text or "dangerously" in text:
             warnings.append("project Claude settings mention bypass/dangerous permissions; review manually")
+        if hooks_policy == "guarded":
+            # The settings file may be the operator's own, merged by hand after
+            # the installer reported a conflict. Report what is actually wired
+            # rather than assuming the rendered file survived.
+            missing = [
+                name
+                for name in ("hook_guard.py", "hook_session_start.py")
+                if name not in text
+            ]
+            if missing:
+                warnings.append(
+                    "hooks_policy is guarded but .claude/settings.json registers "
+                    f"no handler for {', '.join(missing)}; if the installer "
+                    "reported a conflict here, the hooks were never wired up"
+                )
+            else:
+                info.append("Harness hooks are wired in .claude/settings.json")
+    elif hooks_policy == "guarded":
+        errors.append(
+            "hooks_policy is guarded but .claude/settings.json is absent; the "
+            "installed hook scripts never run"
+        )
+
+    if hooks_policy == "guarded":
+        for name in ("hook_guard.py", "hook_session_start.py"):
+            if not (root / "scripts/ai-harness" / name).is_file():
+                errors.append(
+                    f"hooks_policy is guarded but scripts/ai-harness/{name} is "
+                    "missing; the settings file points at a script that is not there"
+                )
 
     if mode == "create":
         info.append("Greenfield project context is installed under .ai/project")

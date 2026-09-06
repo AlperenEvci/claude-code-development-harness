@@ -52,7 +52,11 @@ ALLOWED_NETWORK_ACCESS = {
     "ask-before-network",
     "approved-for-scoped-tasks",
 }
-ALLOWED_HOOK_POLICIES = {"disabled", "examples-only"}
+ALLOWED_HOOK_POLICIES = {"disabled", "examples-only", "guarded"}
+# The interpreter name generated hooks and scripts are invoked through. Bare
+# `python3` is a Microsoft Store stub on Windows, so the profile records which
+# name actually printed a version during setup. An absolute path is accepted.
+ALLOWED_PYTHON_COMMANDS = {"python3", "python"}
 ALLOWED_COMMIT_POLICIES = {"no-commit", "commit-locally"}
 ALLOWED_RISK_LEVELS = {"low", "normal", "high", "regulated"}
 ALLOWED_GENERATED_LANGUAGES = {"English"}
@@ -90,7 +94,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.12.0"
+GENERATOR_VERSION = "1.14.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -385,6 +389,29 @@ def load_profile(path: Path) -> dict[str, Any]:
         fail(f"hooks_policy must be one of {sorted(ALLOWED_HOOK_POLICIES)}")
     data["hooks_policy"] = hooks_policy
 
+    if hooks_policy == "guarded" and str(data.get("harness_tier", "")) not in {
+        "standard",
+        "fleet",
+    }:
+        # The hooks are stdlib scripts installed under `scripts/ai-harness/`, and
+        # Lite installs that directory for nothing else. Accepting the policy
+        # here would render a settings file pointing at scripts that were never
+        # copied, which is a harness that denies every tool call it guards.
+        fail(
+            "hooks_policy=guarded requires a tier that installs scripts/ai-harness; "
+            "use standard or fleet, or leave the policy at examples-only"
+        )
+
+    python_command = str(data.get("python_command", "python3")).strip()
+    if python_command not in ALLOWED_PYTHON_COMMANDS and not Path(
+        python_command
+    ).is_absolute():
+        fail(
+            "python_command must be python3, python, or an absolute interpreter "
+            f"path; got {python_command!r}"
+        )
+    data["python_command"] = python_command
+
     commit_policy = str(data.get("agent_commit_policy", "no-commit")).lower()
     if commit_policy not in ALLOWED_COMMIT_POLICIES:
         fail(f"agent_commit_policy must be one of {sorted(ALLOWED_COMMIT_POLICIES)}")
@@ -433,6 +460,7 @@ def load_profile(path: Path) -> dict[str, Any]:
         "review_model": "inherit",
         "network_access": "deny-by-default",
         "hooks_policy": "examples-only",
+        "python_command": "python3",
         "git_workflow": "feature-branches",
         "agent_commit_policy": "no-commit",
         "parallel_writes": False,
@@ -950,10 +978,35 @@ SESSION_TOOL_SCRIPTS = (
 #: lane script, which already lives here.
 SESSION_TOOL_DIR = "scripts/ai-harness"
 
+#: The hooks a `guarded` harness installs, copied byte-identical beside the
+#: session tooling. They are listed separately because they are gated on the
+#: hook policy rather than on the tier, and because a hook is not a tool the
+#: model runs - it is a thing that runs whether the model wants it or not.
+HOOK_SCRIPTS = (
+    # `PreToolUse`: refuses a secret-bearing read and destructive git.
+    "hook_guard.py",
+    # `SessionStart`: prints the brief 1.12.0 asked the model to remember.
+    "hook_session_start.py",
+)
+
+#: The rendered settings file that wires the hooks up. Written from the common
+#: template layer for every profile and removed again when the policy is not
+#: `guarded`, which is the same shape the Codex skill removal uses.
+HOOK_SETTINGS_PATH = ".claude/settings.json"
+
 
 def has_session_tools(profile: dict[str, Any]) -> bool:
     """Lite has no agents, so it gets no session tooling to manage them with."""
     return str(profile.get("harness_tier", "")) in {"standard", "fleet"}
+
+
+def hooks_are_active(profile: dict[str, Any]) -> bool:
+    """Whether this profile installs hooks that actually fire.
+
+    `disabled` and `examples-only` both render nothing executable, which is what
+    they meant before `guarded` existed and still mean now.
+    """
+    return str(profile.get("hooks_policy", "")) == "guarded"
 
 
 def agent_sessions_section(profile: dict[str, Any]) -> str:
@@ -1570,6 +1623,32 @@ def write_session_tools(payload: Path, profile: dict[str, Any]) -> list[Path]:
     return written
 
 
+def write_hook_scripts(payload: Path, profile: dict[str, Any]) -> list[Path]:
+    """Copy the hook scripts, on exactly the terms the session tooling gets.
+
+    Byte-identical for the same reason: a hook runs without being asked, in
+    someone else's repository, and the copy whose behaviour this plugin's suite
+    covers is the copy that was tested. A templated hook would be a second,
+    unverified variant per project - and this is the one file class where an
+    unverified variant can deny a tool call that should have been allowed.
+    """
+    if not hooks_are_active(profile):
+        return []
+
+    source_dir = Path(__file__).resolve().parent
+    target_dir = payload / "scripts" / "ai-harness"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for name in HOOK_SCRIPTS:
+        source = source_dir / name
+        if not source.is_file():
+            fail(f"hook script missing from the plugin: {name}")
+        write_generated(target_dir / name, source.read_text(encoding="utf-8"))
+        written.append(target_dir / name)
+    return written
+
+
 
 
 def write_progress_ledger(payload: Path, profile: dict[str, Any]) -> Path | None:
@@ -2092,9 +2171,18 @@ def main() -> None:
         if codex_skill_dir.exists():
             shutil.rmtree(codex_skill_dir)
 
+    if not hooks_are_active(profile):
+        # Rendered from the common layer for every profile, then removed unless
+        # the policy asked for it. `copy_templates` has no per-file condition,
+        # so this is the idiom the Codex skill already uses above.
+        settings = payload / ".claude" / "settings.json"
+        if settings.exists():
+            settings.unlink()
+
     write_dynamic_components(payload, profile)
     write_workflows(payload, profile)
     write_session_tools(payload, profile)
+    write_hook_scripts(payload, profile)
     write_progress_ledger(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))

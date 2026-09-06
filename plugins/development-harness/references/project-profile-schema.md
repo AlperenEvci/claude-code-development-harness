@@ -160,7 +160,12 @@ Create one normalized JSON object from project evidence plus the user's confirme
   - `orca` — the Orca ADE, which places the same tier-enforced command in a terminal tab the operator can watch. Requires Standard or Fleet, because Lite installs no session tooling. Offer it only when the inspection reports `tools.orca.available`, and never assume it: the surface changes where a session is watched, not what it may do.
 - `autonomy`: `read-only`, `approval-required`, `repository-write-with-approval`, `isolated-auto`.
 - `network_access`: `deny-by-default`, `ask-before-network`, `approved-for-scoped-tasks`.
-- `hooks_policy`: `disabled`, `examples-only`. Version 0.2 never activates hooks.
+- `hooks_policy`: `disabled`, `examples-only`, `guarded`. `disabled` and
+  `examples-only` render nothing executable. `guarded` renders
+  `.claude/settings.json` and copies the hook scripts, and requires Standard or
+  Fleet because the scripts land under `scripts/ai-harness/`. See
+  `references/hooks.md` before choosing it.
+- `python_command`: `python3` (default), `python`, or an absolute interpreter path. Optional; the name that printed a version when setup resolved the interpreter. Bare `python3` is a Microsoft Store stub on Windows, so setup records `python` there. Nothing consumes it yet; it is the interpreter generated hooks will be invoked through.
 - `agent_commit_policy`: `no-commit`, `commit-locally`. Setup itself never commits.
 - `risk_level`: `low`, `normal`, `high`, `regulated`.
 - `generated_language`: `English` in version 0.2.
