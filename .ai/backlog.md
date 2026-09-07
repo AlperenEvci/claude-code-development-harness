@@ -218,7 +218,7 @@ file list below.
   byte-identically into `scripts/ai-harness/`, so manifests must regenerate. Patch
   with `write_bytes`; `write_text` emits CRLF and breaks the identity check.
 
-### Module 5 - Envelope v3 and the cost reader (1.18.0) - DONE, pending CI
+### Module 5 - Envelope v3 and the cost reader (1.18.0) - DONE, CI-confirmed
 
 Measured first, against CLI 2.1.263, in `.ai/reports/0009-result-json-cost-fields.md`.
 Two runs: a trivial one to read the payload's shape, and one that spawned a `haiku`
@@ -264,20 +264,44 @@ answer questions this repository currently answers by argument - which agents a
 session actually reaches for, and whether the 1.14.0 guard fired. Cheap to carry,
 but a scope addition, so it belongs in a decision rather than a quiet extra field.
 
-### Module 6 - Loop closure (1.19.0)
+### Module 6 - Loop closure (1.19.0) - measured, not started
+
+Measured first, against CLI 2.1.263, in `.ai/reports/0010-stop-hook-smoke-test.md`.
+Six probes: the `Stop` payload, both block channels, and the runaway in each. The
+event fires in `-p` mode and the payload is richer than the module assumed. The cap
+is nine rather than eight, and the number turned out to be the least interesting
+thing about it.
 
 - Profile `commands.smoke` and `commands.smallest_check`; the interview asks for
   both and setup proposes them from the inspector's detected commands.
 - `hook_session_start.py` runs the smoke command and prints one pass/fail line.
 - `hook_stop.py` (deferred from module 1) - `Stop`: exits 0 immediately when
-  `stop_hook_active` is set or the tree is unchanged; otherwise runs
-  `commands.smallest_check` and blocks with the failing tail. Expects the
-  platform's eight-block cap.
+  `stop_hook_active` is set, before it reads the profile or runs anything, then when
+  the tree is unchanged; otherwise runs `commands.smallest_check` and blocks with the
+  failing tail on exit 2.
+- **`stop_hook_active` is the whole hook, not a nicety.** It is `false` on the first
+  stop of a prompt and `true` on every stop after it. A hook that ignores it does not
+  retry nine times and give up loudly - it retries nine times and the run returns
+  `result: ""` with `subtype: "success"`, `is_error: false`, `stop_reason: "end_turn"`
+  and a real bill. A capped runaway is indistinguishable in the result JSON from a
+  clean finish except for the empty answer.
+- **Correction to module 5, shipped one release earlier.** `report_envelope` must
+  refuse to record an empty result as a success, because that is exactly what the CLI
+  reports for a run cut off mid-loop. An envelope with a real cost and a blank summary
+  is a record that reads as evidence and is not one.
+- **Two block channels exist and are equivalent:** exit 2 with the reason on stderr,
+  and exit 0 with `{"decision": "block", "reason": ...}` on stdout, which also carries
+  `systemMessage`. The harness uses exit 2 to match `hook_guard.py`; the alternative
+  is documented in `references/hooks.md` so the choice reads as a choice.
+- **The payload carries more than the module needs, and two fields are worth taking:**
+  `last_assistant_message` (what the model just said, without parsing the transcript)
+  and `background_tasks` (what this session started).
 - `harness_progress.py claim <id>` / `release`: one claimed item per session recorded
   under `.ai/runs/current-task.json`; `--brief` shows it; `check` reports a stale
   claim.
-- Files: `render_harness.py`, `harness_progress.py`, `harness_report.py`, the two hook
-  scripts, `skills/setup/SKILL.md`, `references/questionnaire.md`, tests (target 8).
+- Files: `render_harness.py`, `harness_progress.py`, `harness_report.py`,
+  `harness_session.py`, the two hook scripts, `skills/setup/SKILL.md`,
+  `references/questionnaire.md`, `references/hooks.md`, tests (target 8).
 
 ### Module 7 - Evals and release (2.0.0)
 
