@@ -150,7 +150,7 @@ Deviations, both recorded in `.ai/reports/0007-on-demand-skill-loading.md`:
   situation is an answer to that. Only the checks that ask whether something holds
   *unasked* still read `CLAUDE.md` alone.
 
-### Module 4 - Model and effort per tier (1.17.0) - DONE on Windows, CI pending
+### Module 4 - Model and effort per tier (1.17.0) - DONE, CI-confirmed
 
 Shipped on branch `module-4-model-and-effort`. The tier table gained `model` and
 `effort`; `agent_models` overrides them per tier and the two old aliases still resolve,
@@ -159,7 +159,7 @@ the single place that knows `inherit` yields no `--model`, and both the launcher
 the rendered `## Session launch` block go through it - the block is generated now
 rather than being a literal in the template, so a file cannot document a launch other
 than its own. Twelve tests, six agent mutations and three tier-table mutations, all
-caught. Gate green locally (314 tests); CI still has to confirm.
+caught. Gate green on both legs of CI (run 34136369428, merged as PR #4).
 
 `tools: Agent(<readers>)` was dropped on measurement, not deferred. Details below and
 in `.ai/reports/0008-model-effort-and-agent-scoping.md`.
@@ -218,18 +218,51 @@ file list below.
   byte-identically into `scripts/ai-harness/`, so manifests must regenerate. Patch
   with `write_bytes`; `write_text` emits CRLF and breaks the identity check.
 
-### Module 5 - Envelope v3 and the cost reader (1.18.0)
+### Module 5 - Envelope v3 and the cost reader (1.18.0) - measured, not started
 
-- `ENVELOPE_VERSION = 3`; `trace` gains `cost_usd`, `cost_basis`, `model_usage`,
-  `num_turns`, `subtype`. Versions 1 and 2 still read. Fields stay absent from the
-  agent-facing schema.
+Measured first, against CLI 2.1.263, in `.ai/reports/0009-result-json-cost-fields.md`.
+Two runs: a trivial one to read the payload's shape, and one that spawned a `haiku`
+subagent so a multi-model run could be observed rather than assumed. Four of the five
+named fields exist as written. The fifth is the wrong shape, and the module's one
+formula is wrong in the flattering direction.
+
+- `ENVELOPE_VERSION = 3`; `trace` gains `cost_usd`, `model_usage`, `num_turns`,
+  `subtype`. Versions 1 and 2 still read. Fields stay absent from the agent-facing
+  schema.
+- **No top-level `cost_basis`.** There is none in the payload. `costBasis` is
+  per-model, inside each `modelUsage` entry, so it goes inside `model_usage` next to
+  that model's cost. A single field would have to pick one basis and be silently wrong
+  on any run that used two models.
+- **Each `model_usage` entry keeps both names.** The `modelUsage` key carries the
+  context-window suffix (`claude-opus-5[1m]`); `canonicalModel` is the model without
+  it (`claude-opus-5`). The key is what was billed - a 1M-context session is its own
+  line item - and the canonical name is what an operator thinks in. Aggregate on
+  canonical, keep the key, or the reader either splits one model across rows or hides
+  the context tier that explains the bill.
 - `launch --report` fills them from `total_cost_usd`, `modelUsage`, `num_turns`, and
-  `subtype` in the result JSON; a field the CLI did not return stays absent.
-- `harness_report.py --cost`: per unit of work, per model, cache hit ratio
-  (`cache_read / (cache_read + input)`), and the launcher's `subtype` distribution.
-  Text and HTML.
+  `subtype`; a field the CLI did not return stays absent. Only `success` was ever
+  observed for `subtype`, so treat any other value as opaque rather than enumerating.
+- `harness_report.py --cost`: per unit of work, per model, and the launcher's
+  `subtype` distribution. Text and HTML.
+- **Cache hit ratio is `cache_read / (cache_read + cache_creation + input)`,** not the
+  denominator the roadmap wrote. Measured, the roadmap's formula reports 99.99% for a
+  run whose honest figure is 84.08%, because it drops the 8,274 cache-*creation*
+  tokens that are precisely the part that was not a hit. Print the formula wherever
+  the ratio appears.
+- **And print cache creation as its own figure.** Fixing the denominator does not fix
+  the second case: the haiku subagent reads 0% under either formula, correctly, while
+  concealing 18,417 tokens paid to fill a cache the run never read from. On a harness
+  that spawns short-lived subagents, "what did we pay to cache things we never reused"
+  is the expensive question, and no ratio answers it.
 - Files: `harness_bus.py`, `harness_session.py`, `harness_report.py`, `docs/runtime.md`,
   `references/agent-sessions.md`, tests (target 10).
+
+**Found in the payload, outside the module as written.** `subagent_stats` carries
+`spawned`, `by_type`, `completed`, `failed`, `killed` and `refused` (by depth limit,
+concurrency limit, budget); `permission_denials` is a list in the same result. Both
+answer questions this repository currently answers by argument - which agents a
+session actually reaches for, and whether the 1.14.0 guard fired. Cheap to carry,
+but a scope addition, so it belongs in a decision rather than a quiet extra field.
 
 ### Module 6 - Loop closure (1.19.0)
 
