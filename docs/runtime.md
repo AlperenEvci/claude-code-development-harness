@@ -393,6 +393,52 @@ Envelopes written before this existed are version 1 and still read. Envelopes ar
 append-only records; a reader that refused the history would discard the thing the bus is
 for.
 
+#### What the run was billed
+
+Version 3 adds four more fields, and every one of them is copied out of the result
+object the CLI itself returns rather than derived:
+
+```json
+"trace": {
+  "correlation_id": "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84",
+  "duration_ms": 41200,
+  "cost_usd": 0.13199275,
+  "num_turns": 2,
+  "subtype": "success",
+  "model_usage": {
+    "claude-opus-5[1m]": {
+      "canonical_model": "claude-opus-5",
+      "cost_usd": 0.1086515,
+      "cost_basis": "list",
+      "tokens": {"input": 4, "output": 161,
+                 "cache_read": 43733, "cache_creation": 8274}
+    }
+  },
+  "reported_by": "launcher"
+}
+```
+
+Three things in that shape were measured before they were designed
+(`.ai/reports/0009-result-json-cost-fields.md`), and each contradicts the obvious
+guess:
+
+- **A model is keyed twice.** The key is what was *billed* — a 1M-context session is
+  its own line item, `claude-opus-5[1m]` — and `canonical_model` is the same model
+  without the context tier. Per-model totals aggregate on the canonical name, because
+  that is what an operator thinks in, while the billing key stays beside it, because
+  it is the part that explains the bill.
+- **`cost_basis` is per model, not per run.** The CLI puts it inside each entry. A run
+  that used two models can have two bases, so a single top-level field would have to
+  pick one and be quietly wrong.
+- **`subtype` is carried verbatim and never interpreted.** Only `success` has been
+  observed, so a reader that branched on a fixed list would be branching on values it
+  has never seen. It is length-capped and character-restricted instead, because it is
+  still untrusted text landing in a file the orchestrator reads.
+
+Like the rest of the trace, these come from the launcher and are absent from
+`harness_bus.py schema`. There is no `--cost-usd` flag on `post` for the same reason
+there is no `--duration-ms` guess: an agent that reports its own bill is inventing one.
+
 ### An envelope is evidence, never authority
 
 An envelope is written by an agent, and agent output is exactly the untrusted text the
@@ -695,6 +741,50 @@ Three properties are worth knowing because they bound what the report can tell y
 
 `--out` never overwrites silently — pass `--force` — and refuses to write through a
 symlink, the same rule the installer and the checkpoint writer follow.
+
+### What it cost
+
+```bash
+python scripts/ai-harness/harness_report.py --cost
+```
+
+The same model the report already builds, read for one question. It totals only the
+envelopes that actually carry a cost and prints that count next to the total, so a
+history where the launcher was wired up halfway through reads as partial rather than
+as cheap. An envelope with no cost contributes nothing — not a zero.
+
+```text
+# Cost
+
+$0.1320 across 2 of 3 envelopes.
+4 turns reported by 2 envelopes.
+
+## Per model
+
+- claude-opus-5: $0.1087
+  billed as claude-opus-5[1m]
+  basis list
+  cache hits 84.1% (cache_read / (cache_read + cache_creation + input))
+  cache creation 8274 tokens
+  tokens cache_creation 8274, cache_read 43733, input 4, output 161
+```
+
+The cache figure is where this section earns its place, and it is the one number the
+roadmap specified wrongly. Dividing cache reads by reads-plus-input reports **99.99%**
+for the run above. The honest figure is **84.08%**, because cache *creation* is exactly
+the part that was not a hit, and it is billed at a premium. The denominator is printed
+next to the percentage every time, in the page as well as in the text, so the number
+cannot be read without the thing it was divided by.
+
+Even the corrected ratio cannot express one case: a run that paid to fill a cache and
+then never read it scores 0%, identically to a run that touched no cache at all. In the
+measured pair, the haiku model did precisely that — 18,417 tokens of cache creation, no
+reads. So `cache_creation` is printed as a figure of its own rather than only inside a
+percentage. A ratio that hides a cost is worse than no ratio.
+
+Costs are grouped per unit of work as well as per model, on the same `correlation_id`
+the rest of the report groups on, so the question "what did that task cost" has an
+answer that spans the sessions it took.
 
 ## Session start
 

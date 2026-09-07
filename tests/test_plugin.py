@@ -3171,6 +3171,252 @@ class AgentTuningTests(unittest.TestCase):
             # deliberately added to their own repository.
             self.assertEqual(proc.returncode, 0, combined)
 
+
+class EnvelopeCostTests(unittest.TestCase):
+    """1.18.0: what a run cost travels with the envelope, and reads honestly.
+
+    The numbers here are the ones a real run returned on CLI 2.1.263, recorded in
+    `.ai/reports/0009-result-json-cost-fields.md`, so a change to the cache formula
+    is checked against a measurement rather than against itself.
+    """
+
+    SESSION_ID = "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84"
+
+    #: The multi-model run from report 0009, in the CLI's own spelling.
+    MODEL_USAGE = {
+        "claude-opus-5[1m]": {
+            "canonicalModel": "claude-opus-5",
+            "costUSD": 0.1086515,
+            "costBasis": "list",
+            "inputTokens": 4,
+            "cacheReadInputTokens": 43733,
+            "cacheCreationInputTokens": 8274,
+            "outputTokens": 161,
+        },
+        "claude-haiku-4-5-20251001": {
+            "canonicalModel": "claude-haiku-4-5",
+            "costUSD": 0.02334125,
+            "costBasis": "list",
+            "inputTokens": 10,
+            "cacheCreationInputTokens": 18417,
+            "outputTokens": 62,
+        },
+    }
+
+    def envelope(self, **extra):
+        return BUS.build_envelope(
+            session_id=self.SESSION_ID,
+            sender="harness-codebase-researcher",
+            capability="reader",
+            kind="result",
+            summary="probe",
+            body={"note": "ok"},
+            **extra,
+        )
+
+    # -- the record --------------------------------------------------------
+
+    def test_the_version_moved_and_the_older_ones_still_read(self) -> None:
+        """Envelopes are append-only; refusing v1 would discard real history."""
+        self.assertEqual(BUS.ENVELOPE_VERSION, 3)
+        self.assertEqual(BUS.SUPPORTED_ENVELOPE_VERSIONS, (1, 2, 3))
+        self.assertEqual(self.envelope()["envelope_version"], 3)
+
+    def test_a_version_two_envelope_still_validates(self) -> None:
+        """What earlier releases wrote is still readable, cost or no cost."""
+        record = self.envelope(duration_ms=1200, tokens_in=10, tokens_out=5)
+        record["envelope_version"] = 2
+        self.assertEqual(BUS.validate_envelope(record, "v2"), [])
+
+    def test_cost_is_absent_from_the_agent_facing_schema(self) -> None:
+        """An agent asked what it cost would be guessing, and a recorded guess is
+        worse than a blank. The launcher measures it; the schema an agent answers
+        under offers no place to claim it."""
+        properties = set(BUS.envelope_schema()["properties"])
+        for field in ("cost_usd", "model_usage", "num_turns", "subtype", "trace"):
+            with self.subTest(field=field):
+                self.assertNotIn(field, properties)
+
+    def test_the_cost_basis_lives_per_model_not_on_the_run(self) -> None:
+        """A run that used two models has two bases; one top-level field would
+        have to pick one and be silently wrong."""
+        trace = self.envelope(model_usage=self.MODEL_USAGE)["trace"]
+        self.assertNotIn("cost_basis", trace)
+        for key in self.MODEL_USAGE:
+            with self.subTest(model=key):
+                self.assertEqual(trace["model_usage"][key]["cost_basis"], "list")
+
+    def test_each_model_keeps_both_of_its_names(self) -> None:
+        """The billing key is the line item; the canonical name is what an
+        operator thinks in. Keeping one would either split a model across rows or
+        hide the context tier that explains the bill."""
+        trace = self.envelope(model_usage=self.MODEL_USAGE)["trace"]
+        entry = trace["model_usage"]["claude-opus-5[1m]"]
+        self.assertEqual(entry["canonical_model"], "claude-opus-5")
+        self.assertEqual(entry["tokens"]["cache_creation"], 8274)
+        self.assertEqual(entry["tokens"]["cache_read"], 43733)
+
+    def test_a_malformed_cost_is_refused_rather_than_rounded(self) -> None:
+        bad = (
+            ("negative", {"cost_usd": -1}),
+            ("boolean", {"cost_usd": True}),
+            ("not finite", {"cost_usd": float("inf")}),
+            ("over the cap", {"cost_usd": BUS.MAX_COST_USD + 1}),
+            ("turns as float", {"num_turns": 1.5}),
+            ("turns over the cap", {"num_turns": BUS.MAX_TURNS + 1}),
+            ("subtype with spaces", {"subtype": "not a token"}),
+            ("model usage not an object", {"model_usage": []}),
+            ("model tokens as text", {"model_usage": {"m": {"inputTokens": "10"}}}),
+        )
+        for label, kwargs in bad:
+            with self.subTest(case=label):
+                with self.assertRaises(BUS.BusError):
+                    self.envelope(**kwargs)
+
+    def test_a_costed_envelope_survives_the_round_trip(self) -> None:
+        """Written, read back, and validated: the read path has to carry the new
+        fields or a v3 record would fail its own validator."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            BUS.write_envelope(root, self.envelope(
+                cost_usd=0.13199275, model_usage=self.MODEL_USAGE,
+                num_turns=2, subtype="success",
+            ))
+            (_, data), = BUS.read_envelopes(root, self.SESSION_ID)
+            self.assertEqual(BUS.validate_envelope(data, "v3"), [])
+            self.assertEqual(data["trace"]["cost_usd"], 0.13199275)
+            self.assertEqual(data["trace"]["num_turns"], 2)
+            self.assertEqual(data["trace"]["subtype"], "success")
+            self.assertEqual(len(data["trace"]["model_usage"]), 2)
+
+    # -- the launcher ------------------------------------------------------
+
+    def test_the_launcher_records_only_what_the_cli_returned(self) -> None:
+        """Absent is not zero: a field the CLI omitted must not become a number."""
+        self.assertEqual(SESSION.run_cost({}), {})
+        self.assertEqual(
+            SESSION.run_cost(
+                {"total_cost_usd": None, "num_turns": None,
+                 "subtype": "", "modelUsage": {}}
+            ),
+            {},
+        )
+        filled = SESSION.run_cost({
+            "total_cost_usd": 0.13199275,
+            "num_turns": 2,
+            "subtype": "success",
+            "modelUsage": self.MODEL_USAGE,
+        })
+        self.assertEqual(filled["cost_usd"], 0.13199275)
+        self.assertEqual(filled["num_turns"], 2)
+        self.assertEqual(filled["subtype"], "success")
+        self.assertEqual(filled["model_usage"], self.MODEL_USAGE)
+
+    # -- the reader --------------------------------------------------------
+
+    def test_the_cache_ratio_counts_creation_in_its_denominator(self) -> None:
+        """The roadmap's formula reads 99.99% for a run that was 84.08%.
+
+        Cache creation is exactly the part that was not a hit, and it is billed at
+        a premium. Both figures are computed from the measured token counts.
+        """
+        ratio = REPORT.cache_ratio(
+            {"cache_read": 43733, "cache_creation": 8274, "input": 4}
+        )
+        self.assertAlmostEqual(ratio, 0.8408, places=4)
+        self.assertAlmostEqual(43733 / (43733 + 4), 0.9999, places=4)
+        self.assertIn("cache_creation", REPORT.CACHE_RATIO_FORMULA)
+
+    def test_nothing_read_is_not_a_ratio(self) -> None:
+        self.assertIsNone(REPORT.cache_ratio({}))
+        self.assertIsNone(REPORT.cache_ratio({"cache_read": 0}))
+
+    def test_a_cache_filled_and_never_read_is_still_visible(self) -> None:
+        """The case no ratio can express, which is why creation is its own figure.
+
+        The haiku entry reads 0% under any denominator - correctly, it read
+        nothing - while having paid for 18,417 tokens of cache creation. A reader
+        showing only the ratio would make that identical to touching no cache.
+        """
+        view = REPORT.cost_view([{"trace": {"cost_usd": 0.02334125, "model_usage": {
+            "claude-haiku-4-5-20251001": {
+                "canonical_model": "claude-haiku-4-5",
+                "cost_usd": 0.02334125,
+                "tokens": {"input": 10, "output": 62, "cache_creation": 18417},
+            },
+        }}}], [])
+        haiku, = view["models"]
+        self.assertEqual(haiku["cache_ratio"], 0.0)
+        self.assertEqual(haiku["tokens"]["cache_creation"], 18417)
+        self.assertIn("cache creation 18417 tokens", REPORT.render_cost({"cost": view}))
+
+    def test_models_aggregate_on_the_canonical_name(self) -> None:
+        """Two context variants of one model are one row, with both keys kept."""
+        entries = [
+            {"trace": {"cost_usd": 1.0, "model_usage": {
+                "claude-opus-5[1m]": {"canonical_model": "claude-opus-5",
+                                      "cost_usd": 1.0},
+            }}},
+            {"trace": {"cost_usd": 2.0, "model_usage": {
+                "claude-opus-5": {"canonical_model": "claude-opus-5",
+                                  "cost_usd": 2.0},
+            }}},
+        ]
+        row, = REPORT.cost_view(entries, [])["models"]
+        self.assertEqual(row["model"], "claude-opus-5")
+        self.assertEqual(row["cost_usd"], 3.0)
+        self.assertEqual(row["billing_keys"], ["claude-opus-5", "claude-opus-5[1m]"])
+
+    def test_partial_instrumentation_reads_as_partial(self) -> None:
+        """A history where only some envelopes carry cost must not read as cheap."""
+        view = REPORT.cost_view(
+            [{"trace": {"cost_usd": 1.0}}, {"trace": {}}, {}], []
+        )
+        self.assertEqual(view["priced_envelopes"], 1)
+        self.assertEqual(view["total_envelopes"], 3)
+        self.assertIn("1 of 3 envelopes", REPORT.render_cost({"cost": view}))
+
+    def test_an_uncosted_history_says_so_rather_than_reporting_zero(self) -> None:
+        text = REPORT.render_cost({"cost": REPORT.cost_view([], [])})
+        self.assertIn("No envelope carries a cost", text)
+        self.assertNotIn("$0.0000", text)
+
+    def test_a_unit_of_work_is_priced_across_its_sessions(self) -> None:
+        """The correlation id is the unit; a per-session total would split it."""
+        unit = {"correlation_id": "u1", "envelopes": [
+            {"trace": {"cost_usd": 1.5}},
+            {"trace": {"cost_usd": 0.5}},
+            {"trace": {}},
+        ]}
+        priced, = REPORT.cost_view([], [unit])["per_unit"]
+        self.assertEqual(priced["cost_usd"], 2.0)
+        self.assertEqual(priced["priced_envelopes"], 2)
+
+    def test_both_renderers_state_the_denominator(self) -> None:
+        """A cache figure without its denominator is not a measurement."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".ai/harness").mkdir(parents=True)
+            write_lf(
+                root / ".ai/harness/project-profile.json",
+                json.dumps({"project_name": "Cost", "harness_tier": "standard"},
+                           indent=2) + chr(10),
+            )
+            BUS.write_envelope(root, self.envelope(
+                cost_usd=0.13199275, model_usage=self.MODEL_USAGE,
+                num_turns=2, subtype="success",
+            ))
+            model = REPORT.build_model(root)
+
+            text = REPORT.render_cost(model)
+            self.assertIn(REPORT.CACHE_RATIO_FORMULA, text)
+            self.assertIn("claude-opus-5", text)
+            self.assertIn("billed as claude-opus-5[1m]", text)
+
+            page = REPORT.render_html(model)
+            self.assertIn(REPORT.CACHE_RATIO_FORMULA, page)
+            self.assertIn("Cache creation", page)
+
 if __name__ == "__main__":
     unittest.main()
 

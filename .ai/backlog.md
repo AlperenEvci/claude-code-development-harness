@@ -218,7 +218,7 @@ file list below.
   byte-identically into `scripts/ai-harness/`, so manifests must regenerate. Patch
   with `write_bytes`; `write_text` emits CRLF and breaks the identity check.
 
-### Module 5 - Envelope v3 and the cost reader (1.18.0) - measured, not started
+### Module 5 - Envelope v3 and the cost reader (1.18.0) - DONE, pending CI
 
 Measured first, against CLI 2.1.263, in `.ai/reports/0009-result-json-cost-fields.md`.
 Two runs: a trivial one to read the payload's shape, and one that spawned a `haiku`
@@ -255,7 +255,7 @@ formula is wrong in the flattering direction.
   that spawns short-lived subagents, "what did we pay to cache things we never reused"
   is the expensive question, and no ratio answers it.
 - Files: `harness_bus.py`, `harness_session.py`, `harness_report.py`, `docs/runtime.md`,
-  `references/agent-sessions.md`, tests (target 10).
+  `references/agent-sessions.md`, tests (target 10; shipped 16, 10/10 mutations caught).
 
 **Found in the payload, outside the module as written.** `subagent_stats` carries
 `spawned`, `by_type`, `completed`, `failed`, `killed` and `refused` (by depth limit,

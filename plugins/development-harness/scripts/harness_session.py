@@ -693,6 +693,42 @@ def usage_tokens(result: dict[str, Any]) -> tuple[Any, Any]:
     return pick("input_tokens", "input"), pick("output_tokens", "output")
 
 
+def run_cost(result: dict[str, Any]) -> dict[str, Any]:
+    """Read what the run cost out of the CLI's own result object.
+
+    Same rule as `usage_tokens`, for the same reason: absent is not zero. A field
+    the CLI did not return stays out of the envelope rather than becoming a zero
+    that reads as a measurement. Every name here was observed on 2.1.263 in
+    `.ai/reports/0009-result-json-cost-fields.md`; nothing is inferred.
+
+    `modelUsage` is passed through untouched and normalized by the bus, which is
+    where the two-name rule and the per-model `costBasis` live. Doing it there
+    rather than here means an envelope written by any other producer gets the same
+    treatment as one the launcher wrote.
+    """
+    cost: dict[str, Any] = {}
+
+    total = result.get("total_cost_usd")
+    if isinstance(total, (int, float)) and not isinstance(total, bool):
+        cost["cost_usd"] = float(total)
+
+    usage = result.get("modelUsage")
+    if isinstance(usage, dict) and usage:
+        cost["model_usage"] = usage
+
+    turns = result.get("num_turns")
+    if isinstance(turns, int) and not isinstance(turns, bool):
+        cost["num_turns"] = turns
+
+    subtype = result.get("subtype")
+    if isinstance(subtype, str) and subtype.strip():
+        # Carried verbatim, never interpreted. Only `success` has been observed,
+        # so a launcher that branched on a fixed set would be guessing.
+        cost["subtype"] = subtype.strip()
+
+    return cost
+
+
 def report_envelope(
     stdout: str,
     *,
@@ -747,6 +783,7 @@ def report_envelope(
             duration_ms=duration_ms,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            **run_cost(result),
         )
         return write_envelope(root, envelope), None
     except BusError as exc:

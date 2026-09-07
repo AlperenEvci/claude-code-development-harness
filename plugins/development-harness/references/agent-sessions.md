@@ -180,6 +180,21 @@ running — `claude agents --json --cwd .` remains the only answer to that.
 Post with `--correlation` or the report has nothing to group by, and the run shows
 up as a pile of unlinked envelopes with no duration and no cost.
 
+```bash
+python scripts/ai-harness/harness_report.py --cost
+```
+
+What the recorded work was billed: a total beside the number of envelopes that
+actually carried one, then per model and per unit of work. The per-model rows key on
+the canonical model name and keep the billing key beside it, because a 1M-context
+session is a separate line item and hiding it hides what explains the bill.
+
+You do not report any of this. A foreground run returns its own cost in the result
+JSON, so `harness_session.py report` copies it into the envelope; there is no flag
+that lets an agent claim a figure, and the agent-facing schema does not offer one. An
+`implementer` that posts its own envelope therefore posts one with no cost on it, and
+the reader says so rather than counting it as free.
+
 ## The Orca launch surface
 
 Optional, and off unless the profile sets `session_surface: orca`. It changes where a
