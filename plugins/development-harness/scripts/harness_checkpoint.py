@@ -35,6 +35,24 @@ is eventually a `.env`.
 `resume` prints the most recent checkpoint, so a fresh session starts from the
 record rather than from what someone remembers of the transcript.
 
+`from-hook` is the same idea with the caller removed. It reads a `PreCompact`
+payload on stdin and records the boundary before the transcript is truncated,
+which is the one moment a session reliably loses its own history and the one
+moment nobody is present to type `write`.
+
+It records a boundary log rather than a checkpoint, and the reason is measured:
+one 51-turn run compacted three times
+(`.ai/reports/0006-compaction-smoke-test.md`). A checkpoint directory per
+boundary would bury the record a human wrote under a pile of machine-written
+ones. So the log is one file per session, rewritten as boundaries accumulate,
+and the count is itself the finding: a session that compacted three times was
+given work its ceiling was set too low for.
+
+The payload carries no summary and no token count - only a session id, a
+transcript path, and a trigger. So this writes nothing it was not told. It does
+not open the transcript: that file holds whatever the session read, and copying
+it into a durable artifact is what the engineering contract forbids.
+
 No third-party dependencies.
 """
 
@@ -88,7 +106,29 @@ MAX_NOTE_CHARS = 4_000
 #: caller can branch on the policy without reading stdout.
 EXIT_CEILING = 3
 
+#: Boundary-log shape. Separate from CHECKPOINT_VERSION because the two records
+#: answer different questions and will not move together.
+#: The directory `.ai/runs/` is spelled once. `harness_report.py` keeps the same
+#: constant, and a test pins the two together: a boundary log written under one
+#: name and looked for under another is a record that silently never appears.
+RUNS_DIRNAME = "runs"
+
+BOUNDARY_VERSION = 1
+
+#: Where the boundary logs live. Under `.ai/runs/` because they are transient
+#: orchestration state, in their own directory because `latest_checkpoint` walks
+#: `.ai/runs/` looking for stamped checkpoint directories and must not find these.
+COMPACTION_DIRNAME = "compaction"
+
+#: A long session can compact many times. The log keeps the most recent
+#: boundaries and the total count, so it stays readable without losing the number
+#: that matters.
+MAX_BOUNDARIES = 50
+
 SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
+#: A session id becomes a filename. The platform supplies it, but a value that
+#: reaches the filesystem is validated on the way in regardless of who sent it.
+SESSION_ID_PATTERN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 RUN_DIR_PATTERN = re.compile(r"\A\d{8}T\d{6}Z-[a-z0-9-]+\Z")
 
 
@@ -319,7 +359,7 @@ def refuse_symlinks(path: Path, root: Path) -> None:
 def write_checkpoint(root: Path, record: dict[str, Any], label: str | None) -> Path:
     stamp = record["created_at"].replace("-", "").replace(":", "")
     slug = slugify(label or record["intent"])
-    directory = root / ".ai" / "runs" / f"{stamp}-{slug}"
+    directory = root / ".ai" / RUNS_DIRNAME / f"{stamp}-{slug}"
     refuse_symlinks(directory.parent, root)
     if directory.exists():
         raise CheckpointError(f"checkpoint directory already exists: {directory}")
@@ -334,7 +374,7 @@ def write_checkpoint(root: Path, record: dict[str, Any], label: str | None) -> P
 
 
 def latest_checkpoint(root: Path) -> Path | None:
-    runs = root / ".ai" / "runs"
+    runs = root / ".ai" / RUNS_DIRNAME
     if not runs.is_dir():
         return None
     candidates = [
@@ -344,6 +384,205 @@ def latest_checkpoint(root: Path) -> Path | None:
     ]
     existing = sorted(path for path in candidates if path.is_file())
     return existing[-1] if existing else None
+
+
+# --------------------------------------------------------------------------
+# Compaction boundaries
+# --------------------------------------------------------------------------
+
+
+def pending_items(root: Path) -> list[dict[str, str]]:
+    """The unproven items from the progress ledger, if there is one.
+
+    Read directly rather than through `harness_progress.py`, because this runs
+    inside a hook with a timeout and starting a second interpreter to read one
+    JSON file is latency spent on nothing. A malformed or missing ledger is not
+    an error here: the boundary is worth recording without it.
+    """
+    path = root / ".ai" / "progress.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return []
+
+    out: list[dict[str, str]] = []
+    for item in data["items"]:
+        if not isinstance(item, dict) or item.get("passes"):
+            continue
+        out.append({
+            "id": str(item.get("id") or "?")[:64],
+            "title": str(item.get("title") or "")[:MAX_STEP_CHARS],
+        })
+        if len(out) >= MAX_STEPS:
+            break
+    return out
+
+
+def safe_session_id(value: Any) -> str:
+    """A session id fit to be a filename, or a fixed fallback.
+
+    The platform supplies this, but it lands in a path, and a value that lands in
+    a path is checked on the way in no matter who sent it. A rejected id is not a
+    reason to lose the boundary, so the fallback is a real filename rather than an
+    error: one session's worth of boundaries collects under `unknown-session`.
+    """
+    text = str(value or "").strip()
+    return text if SESSION_ID_PATTERN.match(text) else "unknown-session"
+
+
+def boundary_path(root: Path, session_id: str) -> Path:
+    return root / ".ai" / RUNS_DIRNAME / COMPACTION_DIRNAME / f"{session_id}.json"
+
+
+def read_boundary_log(path: Path) -> dict[str, Any] | None:
+    """The existing log for this session, or None if there is nothing usable.
+
+    Returning None for a file that is not a boundary log is deliberate. The caller
+    treats that as "do not write here": this command rewrites its own records and
+    must never overwrite a file it did not author, even one that happens to sit at
+    the path it wanted.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("boundary_version") != BOUNDARY_VERSION:
+        return None
+    if not isinstance(data.get("boundaries"), list):
+        return None
+    return data
+
+
+def build_boundary_log(
+    *,
+    existing: dict[str, Any] | None,
+    session_id: str,
+    trigger: str,
+    policy: dict[str, Any],
+    pending: list[dict[str, str]],
+    artifacts: list[str],
+    stamp: datetime,
+) -> dict[str, Any]:
+    """Fold one compaction into the session's log.
+
+    Everything here is either supplied by the payload, read from the profile, or
+    counted. Nothing is summarized, because nothing summarizable was passed: the
+    `PreCompact` payload carries a session id, a transcript path, and a trigger,
+    and inventing an intent from those would put a guess where the record goes.
+    """
+    at = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    boundaries = list(existing.get("boundaries", [])) if existing else []
+    boundaries.append({"at": at, "trigger": trigger})
+    count = int(existing.get("compactions", 0)) + 1 if existing else 1
+    if len(boundaries) > MAX_BOUNDARIES:
+        boundaries = boundaries[-MAX_BOUNDARIES:]
+
+    return {
+        "boundary_version": BOUNDARY_VERSION,
+        "session_id": session_id,
+        "first_seen": (existing or {}).get("first_seen") or at,
+        "last_seen": at,
+        "compactions": count,
+        "boundaries": boundaries,
+        "policy": {
+            "floor_tokens": policy["floor_tokens"],
+            "ceiling_tokens": policy["ceiling_tokens"],
+            "on_ceiling": policy["on_ceiling"],
+        },
+        "pending": pending,
+        "artifacts": artifacts[:MAX_ARTIFACTS],
+        # Said in the record rather than left for a reader to work out, because
+        # this file looks like a checkpoint and is not one.
+        "produced_by": "compaction",
+        "note": (
+            "Written by the PreCompact hook at a compaction boundary. It records "
+            "that the transcript was truncated here and what was still unproven; "
+            "it is not a handoff anyone wrote. The transcript was not read."
+        ),
+    }
+
+
+def write_boundary_log(root: Path, record: dict[str, Any]) -> Path:
+    path = boundary_path(root, record["session_id"])
+    refuse_symlinks(path.parent, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise CheckpointError(f"refusing to write through a symlink: {path}")
+    text = json.dumps(record, indent=2, ensure_ascii=False) + "\n"
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return path
+
+
+def latest_boundary_log(root: Path) -> dict[str, Any] | None:
+    """The newest readable boundary log, or None."""
+    base = root / ".ai" / RUNS_DIRNAME / COMPACTION_DIRNAME
+    if not base.is_dir():
+        return None
+    best: dict[str, Any] | None = None
+    for path in sorted(base.glob("*.json")):
+        data = read_boundary_log(path)
+        if data is None:
+            continue
+        if best is None or str(data.get("last_seen") or "") > str(best.get("last_seen") or ""):
+            data = dict(data)
+            data["path"] = f".ai/{RUNS_DIRNAME}/{COMPACTION_DIRNAME}/{path.name}"
+            best = data
+    return best
+
+
+def command_from_hook(args: argparse.Namespace) -> int:
+    """Record a compaction boundary from a `PreCompact` payload on stdin.
+
+    Exits 0 on every path it can reach. A `PreCompact` hook that fails blocks
+    nothing and helps nobody; the compaction is going to happen either way, and a
+    non-zero exit here would put an error in front of the operator at the moment
+    the session is least able to explain it.
+    """
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    root = Path(args.root if args.root != "." else str(payload.get("cwd") or ".")).resolve()
+    session_id = safe_session_id(payload.get("session_id"))
+    trigger = str(payload.get("trigger") or "unknown").strip().lower()
+    if trigger not in {"auto", "manual", "unknown"}:
+        trigger = "unknown"
+
+    path = boundary_path(root, session_id)
+    existing = read_boundary_log(path) if path.exists() else None
+    if existing is None and path.exists():
+        print(
+            f"harness: {path.name} is not a boundary log; leaving it alone",
+            file=sys.stderr,
+        )
+        return 0
+
+    record = build_boundary_log(
+        existing=existing,
+        session_id=session_id,
+        trigger=trigger,
+        policy=read_policy(root),
+        pending=pending_items(root),
+        artifacts=[] if args.no_git else changed_paths(root),
+        stamp=now(),
+    )
+    try:
+        written = write_boundary_log(root, record)
+    except (CheckpointError, OSError) as error:
+        print(f"harness: could not record the compaction boundary ({error})", file=sys.stderr)
+        return 0
+
+    print(
+        f"harness: compaction {record['compactions']} recorded in "
+        f"{written.relative_to(root).as_posix()}"
+    )
+    return 0
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -459,6 +698,17 @@ def main() -> None:
         help="Do not derive changed paths from git status.",
     )
     write.set_defaults(handler=command_write)
+
+    from_hook = sub.add_parser(
+        "from-hook",
+        help="Record a compaction boundary from a PreCompact payload on stdin.",
+    )
+    from_hook.add_argument(
+        "--no-git",
+        action="store_true",
+        help="Do not derive changed paths from git status.",
+    )
+    from_hook.set_defaults(handler=command_from_hook)
 
     resume = sub.add_parser("resume", help="Print the most recent checkpoint.")
     resume.add_argument("--json", action="store_true", help="Emit the raw record.")

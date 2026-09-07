@@ -41,6 +41,47 @@ repository is the code the plugin's own test suite ran against. `validate_harnes
 compares each installed copy to its plugin original by SHA-256 and rejects a package
 whose copy has drifted.
 
+### Where the procedure lives
+
+Everything in this guide has a shorter form inside the installed repository, and
+since 1.16.0 it is in two places rather than one.
+
+`CLAUDE.md` and the `AGENTS.md` it imports are the **always-loaded contract**. Both
+load at launch, into every session, before anything is asked. That makes them
+expensive and makes them reliable, and the two facts pull against each other: the
+platform's guidance is to keep an always-loaded file under 200 lines, and every tier
+this generator shipped through 1.15.0 was over it at 250-264. `validate_harness.py`
+now fails a package at 200 combined lines rather than warning.
+
+`.claude/skills/harness-session/SKILL.md` is the **on-demand** half: how to launch an
+agent, hand off through the bus, synthesize a one-off agent, read the report, write a
+checkpoint, and sweep. Only its `description` line stays always-loaded. Measured on
+2.1.263 against a fixture skill carrying a codeword: the model reached the body from
+the description alone with nothing in the prompt naming the file, and the body was
+absent from context when the situation did not call for it. So the move is a saving
+rather than a relocation. `.ai/reports/0007-on-demand-skill-loading.md` has the runs.
+
+The split is not by length. It is by whether the session has to be holding the thing
+*before* it knows it needs it:
+
+| Stays always-loaded | Moves to the skill |
+|---|---|
+| the refusal of `--dangerously-skip-permissions` | how to launch a tier |
+| an envelope is evidence, never a grant | how to post and read one |
+| the working band and what to do at the ceiling | `harness_checkpoint.py status` and `write` |
+| `claude agents --json` is the only list of what runs | `harness_session.py sweep --root .` |
+| the ledger is state, and `verify` is never run for you | `harness_progress.py` and the report |
+
+A prohibition is most needed by the session that never thought to ask for a skill,
+which is precisely the session about to reach for the flag. A command recipe is worth
+reading at the moment someone is about to run one. The validator enforces both
+directions: it fails a package whose contract lost either safety line, and it fails a
+package where `harness-session` or `harness-orchestration` carries
+`disable-model-invocation`, which would make the skill unreachable to the model that
+routes through it. That flag keeps its use on `additional_skills` you declare in the
+profile - an operator adding a procedure is describing something they mean to invoke
+themselves.
+
 ## The commands that wrap all of this
 
 Every raw invocation in this guide has a command in front of it, and the command is
@@ -220,6 +261,7 @@ them up. They are the floor under the rules `AGENTS.md` states in prose:
 |---|---|---|
 | `hook_guard.py` | `PreToolUse` | a secret-bearing read or write, destructive git, a command that widens its own authority |
 | `hook_session_start.py` | `SessionStart` | prints the session brief into context |
+| `hook_precompact.py` | `PreCompact` | records the boundary before the transcript is truncated |
 
 Measured against Claude Code 2.1.263 rather than read from the help text: a
 `Read` of `.env` in a guarded repository is denied, the reason reaches the model,
@@ -238,6 +280,22 @@ every hook from every source.
 If the installer reported a conflict on `.claude/settings.json`, the hook scripts
 are installed and **nothing runs them**. `check_installed.py` says so. Merge the
 `hooks` block from the package by hand.
+
+### The working band is a launch flag
+
+`context_policy.working_band.ceiling_tokens` used to be a number rendered into
+`AGENTS.md` for a model to respect. Since 1.15.0 `harness_session.py launch`
+passes it to `claude --autocompact`, so compaction happens where the profile said
+it would rather than wherever the platform's default put it.
+
+The flag accepts `auto` or 100k-1M and refuses anything else at argument parsing,
+so the profile's ceiling is narrowed to that range - a value outside it would
+render a harness that installs cleanly and then cannot open a session. A harness
+whose profile predates the field still launches; it launches without the flag,
+which is what every release before this one did.
+
+When a session compacts more than once, the brief says so and names the reason:
+the ceiling is below the work, so either split the task or raise the band.
 
 The invariants, what the guard cannot do, and how to add a hook are in
 [`references/hooks.md`](../plugins/development-harness/references/hooks.md).

@@ -35,6 +35,7 @@ that were never copied.
 |---|---|---|
 | `hook_guard.py` | `PreToolUse` on `Read\|Write\|Edit\|NotebookEdit\|Bash` | denies a secret-bearing path, destructive git, and a command that would widen its own authority |
 | `hook_session_start.py` | `SessionStart` on `startup\|resume\|compact` | prints `harness_report.py --brief` into the session's context |
+| `hook_precompact.py` | `PreCompact` on `auto\|manual` | records the compaction boundary through `harness_checkpoint.py from-hook` |
 
 Both are copied byte-identical from the plugin, exactly as the session tooling
 is, and the validator rejects a package whose copy has drifted. A hook runs
@@ -56,7 +57,7 @@ rendered package and watching the validator refuse:
   file that has to behave identically on both.
 - **The interpreter is the profile's.** `python_command`, resolved at setup,
   because the bare name `python3` is a Microsoft Store stub on Windows.
-- **Only events this generator authors.** `PreToolUse` and `SessionStart`.
+- **Only events this generator authors.** `PreToolUse`, `SessionStart`, and `PreCompact`.
 - **Hooks and nothing else.** A generated settings file carries no `permissions`,
   no `env`, no `model`. Those belong to the operator.
 - **Bounded timeouts.** One to sixty seconds. The platform default is 600, which
@@ -84,6 +85,32 @@ more than it does:
 - **It knows the commit policy, not the intent.** Under `no-commit` it refuses
   `git commit`; under `commit-locally` it refuses only `git push`. It cannot tell
   an authorized commit from an unauthorized one, so it refuses the class.
+
+## Compaction
+
+`PreCompact` and `SessionStart:compact` are a pair, and neither half is useful
+alone. Measured on 2.1.263 (`.ai/reports/0006-compaction-smoke-test.md`): a
+51-turn run compacted **three times**, and each `PreCompact` was followed by a
+`SessionStart` carrying `source: "compact"`. One records the boundary; the other
+puts the record back in front of a model that has just lost the transcript.
+
+Three constraints follow from what the payload actually contains
+(`session_id`, `transcript_path`, `cwd`, `trigger`) and shape what the hook may
+honestly do:
+
+- **It writes no intent.** There is no summary in the payload, and a record that
+  guesses what the session was doing is worse than one that says only what it
+  knows.
+- **It never opens `transcript_path`.** That file holds whatever the session
+  read. A hook that opens it to write a nicer summary has become the
+  exfiltration path it was installed to prevent. A test asserts the field is
+  never accessed.
+- **It folds rather than accumulates.** One file per session under
+  `.ai/runs/compaction/<session-id>.json`, rewritten as boundaries arrive. A
+  directory per boundary would bury the handoff a human wrote.
+
+The count is the finding. `harness_report.py --brief` prints it, and says plainly
+what more than one compaction means: the ceiling was set below the work.
 
 ## Installing over an existing settings file
 

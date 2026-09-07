@@ -46,7 +46,8 @@ from typing import Any, NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
+from harness_capabilities import (
+    autocompact_flag,  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
     FORBIDDEN_LAUNCH_FLAGS,
     LAUNCH_PLACEHOLDERS,
@@ -261,6 +262,39 @@ def orca_run(steps: list[dict[str, Any]]) -> int:
 
 
 
+def declared_ceiling(root: Path) -> int | None:
+    """The working band's ceiling from the installed profile, or None.
+
+    Since 1.15.0 this is not only rendered into the contract for a model to
+    respect; it is handed to `claude --autocompact`, so the compaction boundary
+    lands where the profile said it would rather than wherever the platform's
+    default put it. That is the difference between a budget and a note about a
+    budget.
+
+    Every failure returns None, and None means "launch without the flag". A
+    harness whose profile is missing, unreadable, or older than this field still
+    opens a session; it just opens one whose band is prose again, which is what
+    every release before this one had.
+    """
+    path = Path(root) / ".ai" / "harness" / "project-profile.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    policy = data.get("context_policy")
+    if not isinstance(policy, dict):
+        return None
+    band = policy.get("working_band")
+    if not isinstance(band, dict):
+        return None
+    ceiling = band.get("ceiling_tokens")
+    if isinstance(ceiling, bool) or not isinstance(ceiling, int):
+        return None
+    return ceiling
+
+
 def launch_argv(
     capability: str,
     task: str,
@@ -272,6 +306,7 @@ def launch_argv(
     restricted: bool = False,
     include_task: bool = True,
     external_isolation: bool = False,
+    autocompact_tokens: int | None = None,
 ) -> list[str]:
     """Build the command that launches a session under `capability`.
 
@@ -279,6 +314,11 @@ def launch_argv(
     way and launched another. Placeholders in the table are substituted here, and
     a tier that declares one without a value supplied is an error rather than a
     command with `<scope>` in it.
+
+    `autocompact_tokens` is the profile's declared ceiling, and passing it is what
+    turns the working band from a number in `AGENTS.md` into something the platform
+    enforces. It is a parameter rather than a profile read inside this function so
+    that the command builder stays pure and testable; `command_launch` supplies it.
     """
     if capability not in CAPABILITY_TIERS:
         raise SessionError(
@@ -324,6 +364,11 @@ def launch_argv(
         argv.append("--bg")
     if restricted:
         argv.append("--restricted")
+    if autocompact_tokens is not None:
+        # An out-of-range ceiling yields no flag rather than an error: see
+        # `autocompact_flag`. A harness installed before 1.15.0 narrowed the
+        # range must still be able to open a session.
+        argv += autocompact_flag(autocompact_tokens)
     if session_id:
         argv += ["--session-id", session_id]
 
@@ -535,6 +580,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
             restricted=args.restricted,
             include_task=surface != "orca",
             external_isolation=bool(lane),
+            autocompact_tokens=declared_ceiling(Path(getattr(args, "root", "."))),
         )
     except SessionError as exc:
         fail(str(exc))

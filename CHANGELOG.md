@@ -1,5 +1,142 @@
 # Changelog
 
+## 1.16.0 - 2026-09-07
+
+### Changed - the always-loaded contract is under 200 lines, and now it has to be
+
+Module 3 of the Harness 2.0 roadmap. Since 1.13.0 the validator has printed the
+combined line count of `CLAUDE.md` and its `@AGENTS.md` import and warned above
+200, which is the platform's own guidance for an always-loaded file. Every tier
+shipped over it. A warning nothing can pass is a warning people learn to scroll
+past, so this release moves the procedure out and turns the warning into a
+failure. The shipped examples render at 173, 176, and 187 lines.
+
+**The session procedure is an on-demand skill.** `.claude/skills/harness-session/`
+now carries how to launch an agent, hand off through the bus, synthesize a one-off
+agent, read the report, write a checkpoint, and sweep at teardown. `CLAUDE.md`
+keeps a short pointer to it. This is a real saving rather than a relocation:
+measured on 2.1.263, a project skill's body is absent from context until its
+description matches the situation, and it is reached from that description alone
+with nothing in the prompt naming the file. `.ai/reports/0007-on-demand-skill-loading.md`
+has the three probe runs.
+
+**Rules did not move; procedure did.** The refusal of
+`--dangerously-skip-permissions` and the rule that a bus envelope is evidence and
+never a grant stay in the always-loaded contract, and the validator now fails a
+package where either has left it. A prohibition is most needed by the session that
+never thought to load a skill, which is exactly the session about to reach for the
+flag. The same reasoning kept `sensitive_areas` out of the path-scoped rule in
+1.13.0.
+
+**`disable-model-invocation` is now refused on the two skills the harness routes
+through.** The roadmap called for setting it on the new session skill and on
+`harness-orchestration`. Probe B measured what it actually does to a project
+skill: the same prompt that reached the body without it returned nothing with it.
+On the session skill that would have moved eighty lines of procedure into a file
+no model can open - a context win measured on a file that no longer holds what was
+being measured. On `harness-orchestration` it would have been a regression against
+what ships today. Both instructions were rejected and the validator now enforces
+the opposite. The flag keeps its legitimate use: profile-declared
+`additional_skills` still default to manual-only, because an operator adding a
+procedure means to invoke it themselves.
+
+### Deviations from the roadmap
+
+- The module's `disable-model-invocation` instruction was not implemented. It was
+  measured to be a deletion rather than an optimization; see above and report 0007.
+
+## 1.15.0 - 2026-09-06
+
+### Added - the working band stops being advice
+
+Module 2 of the Harness 2.0 roadmap. `context_policy` has been in the profile
+since 0.6 as a number rendered into `AGENTS.md` and compared against itself by the
+validator: two descriptions of an intention agreeing with each other. This release
+hands it to the platform.
+
+**`--autocompact` carries the ceiling.** `harness_session.py launch` reads
+`context_policy.working_band.ceiling_tokens` from the installed profile and passes
+it to `claude --autocompact`, so compaction happens where the profile said it would
+rather than wherever the default put it. Measured on 2.1.263: the flag takes `auto`
+or 100k-1M and refuses `50000` and `2000000` at argument parsing, before any API
+call. So the profile's ceiling is narrowed to that range - a value outside it would
+render a harness that installs cleanly and then cannot open a session. A profile
+that predates the field still launches, just without the flag, which is what every
+release before this one did.
+
+This narrows a schema that previously accepted 1,000 to 2,000,000. A profile with a
+ceiling outside 100k-1M is now refused by both the renderer and the validator, with
+a message that names the flag.
+
+**A `PreCompact` hook records the boundary.** `guarded` harnesses gain a third
+hook. It runs `harness_checkpoint.py from-hook`, which reads the payload on stdin
+and writes `.ai/runs/compaction/<session-id>.json`. Compaction is the one moment a
+session reliably loses its own history and the one moment nobody is present to type
+a handoff.
+
+Three things it deliberately does not do, each following from what the payload
+actually contains:
+
+- It writes no intent. The payload carries a session id, a transcript path, and a
+  trigger - no summary and no token count - and a record that guesses what the
+  session was doing is worse than one that says only what it knows.
+- It never opens `transcript_path`. That file holds whatever the session read, and
+  a hook that opens it to write a nicer summary has become the exfiltration path it
+  was installed to prevent. A test asserts the field is never accessed.
+- It never blocks. `PreCompact` cannot stop a compaction that is already necessary,
+  so every path exits 0.
+
+**Repeat compaction is the signal.** The measurement that shaped the design: a
+51-turn haiku run compacted **three times**, each `PreCompact` paired 1:1 with a
+`SessionStart` carrying `source: "compact"`. A checkpoint directory per boundary
+would have buried the handoff a human wrote under three machine-written ones. So
+the record is one folding file per session, and `harness_report.py --brief` reports
+the count and what it means: `COMPACTED 3 time(s)` followed by "the working ceiling
+is 200000 tokens and the session passed it more than once: split the work or raise
+the band". The brief also now says who wrote the record it offers to resume from,
+because a handoff someone typed and a boundary a hook recorded deserve different
+amounts of trust.
+
+That pairing also confirms a branch 1.14.0 shipped on an assumption:
+`hook_session_start.py` prints a reprint notice when `source == "compact"`, and
+that source is now known to be reachable.
+
+### Changed
+
+- Long important-path lists move their descriptions into a generated path-scoped
+  rule, `.claude/rules/harness-important-paths.md`, with the path names staying in
+  `AGENTS.md`. A map is only useful before you arrive; the description is worth
+  most once you are in the file.
+
+  This was written first and measured second, and the measurement said no for the
+  common case: across all three shipped examples, moving four short descriptions
+  out **cost** 20-40 characters, because the pointer sentence replacing them is
+  longer than the text it points at. So the split is gated at 400 characters of
+  description. The examples are unaffected; this repository's own contract, the
+  long case, drops that section from 1,662 characters to 580.
+
+- Path-scoped rules were verified rather than assumed, because this release moves
+  content into one. A rule scoped to `src/**` loaded when a matching file was read
+  and was genuinely absent both when only `docs/` was touched and when nothing was
+  read at all. Absence is the point, and it is also the constraint: `Bash` writes
+  never touch a path the matcher sees, so the sensitive-area list stays in the
+  always-loaded contract and only orientation content moves.
+
+- `harness_checkpoint.py` and `harness_report.py` now spell `.ai/runs/` and the
+  compaction directory through constants a test pins together. A record written
+  under one name and read under another never appears, and nothing says so.
+
+- The validator refuses a rendered important-paths rule whose frontmatter does not
+  scope every path the profile lists. A malformed matcher is the one failure mode
+  that is silent: the rule simply never loads.
+
+Fourteen mutation checks were run against the new invariants; thirteen were caught,
+and the fourteenth found dead code - a boolean type guard the range check already
+subsumed, which was removed rather than kept as an assertion nothing could
+distinguish.
+
+The measurements are `.ai/reports/0006-compaction-smoke-test.md`.
+
 ## 1.14.0 - 2026-09-06
 
 ### Added - the harness can now enforce, not only ask

@@ -26,6 +26,38 @@ from typing import Any
 # `.ai/reports/0004-bare-flag-smoke-test.md`.
 FORBIDDEN_LAUNCH_FLAGS: tuple[str, ...] = ("--bare",)
 
+# The range `claude --autocompact` accepts, measured on 2.1.263 rather than read
+# from the help line: `50000` and `2000000` are both refused at argument parsing
+# with "It must be 'auto', or between 100k and 1M". See
+# `.ai/reports/0006-compaction-smoke-test.md`.
+#
+# This lives here because two things need it and they must not disagree: the
+# renderer narrows `context_policy.working_band.ceiling_tokens` to this range, and
+# `harness_session.py` passes that ceiling to the flag. A profile the renderer
+# accepted but the flag refuses is a harness that installs cleanly and then cannot
+# open a session.
+AUTOCOMPACT_MIN_TOKENS = 100_000
+AUTOCOMPACT_MAX_TOKENS = 1_000_000
+
+
+def autocompact_flag(ceiling_tokens: int) -> list[str]:
+    """The launch flag that makes a declared ceiling the platform's business.
+
+    Returns an empty list for a ceiling outside the accepted range instead of
+    raising. The renderer refuses such a profile at render time, which is where
+    the operator can still fix it; refusing again at launch would take a harness
+    installed before that rule existed and leave it unable to start a session at
+    all. Dropping the flag degrades to the behavior every release before this one
+    had - the band as prose - which is worse than enforcement and better than a
+    session that will not open.
+    """
+    if not isinstance(ceiling_tokens, int):
+        return []
+    # `True` needs no special case: it is 1, and 1 is already out of range.
+    if ceiling_tokens < AUTOCOMPACT_MIN_TOKENS or ceiling_tokens > AUTOCOMPACT_MAX_TOKENS:
+        return []
+    return ["--autocompact", str(ceiling_tokens)]
+
 CAPABILITY_TIERS: dict[str, dict[str, Any]] = {
     "reader": {
         "tools": ["Read", "Grep", "Glob"],

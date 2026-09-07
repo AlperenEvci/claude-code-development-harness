@@ -62,6 +62,7 @@ HOOK_REQUIRED = [
     ".claude/settings.json",
     "scripts/ai-harness/hook_guard.py",
     "scripts/ai-harness/hook_session_start.py",
+    "scripts/ai-harness/hook_precompact.py",
 ]
 
 FLEET_REQUIRED = [
