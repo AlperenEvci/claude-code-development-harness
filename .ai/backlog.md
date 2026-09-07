@@ -303,7 +303,7 @@ thing about it.
   `harness_session.py`, the two hook scripts, `skills/setup/SKILL.md`,
   `references/questionnaire.md`, `references/hooks.md`, tests (target 8).
 
-### Module 7 - Evals and release (2.0.0) - DONE, pending CI
+### Module 7 - Evals and release (2.0.0) - DONE, CI-confirmed
 
 Shipped on branch `module-7-release`. `claude plugin eval` was still gated on 2.1.263
 (`.ai/reports/0011-eval-gate-at-2.0.0.md`), so no scored run exists; two cases from
