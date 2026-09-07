@@ -48,9 +48,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness_capabilities import (
     autocompact_flag,  # noqa: E402  (sibling module, resolved above)
+    ALLOWED_EFFORT,
     CAPABILITY_TIERS,
     FORBIDDEN_LAUNCH_FLAGS,
     LAUNCH_PLACEHOLDERS,
+    model_effort_flags,
 )
 from harness_bus import (  # noqa: E402  (sibling module, resolved above)
     AGENT_NAME_PATTERN,
@@ -307,6 +309,8 @@ def launch_argv(
     include_task: bool = True,
     external_isolation: bool = False,
     autocompact_tokens: int | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     """Build the command that launches a session under `capability`.
 
@@ -369,6 +373,14 @@ def launch_argv(
         # `autocompact_flag`. A harness installed before 1.15.0 narrowed the
         # range must still be able to open a session.
         argv += autocompact_flag(autocompact_tokens)
+    # Same shape, and the same reason it is a helper rather than two appends: the
+    # tier's model may be `inherit`, which is legal in frontmatter and rejected by
+    # the launcher as `unrecognized_model`. `model_effort_flags` is the one place
+    # that knows to omit the flag instead of forwarding the word.
+    argv += model_effort_flags(
+        tier["model"] if model is None else model,
+        tier["effort"] if effort is None else effort,
+    )
     if session_id:
         argv += ["--session-id", session_id]
 

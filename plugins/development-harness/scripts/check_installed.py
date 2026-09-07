@@ -14,6 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
+    ALLOWED_EFFORT,
     CAPABILITY_TIERS,
     EDIT_ACCEPTING_MODES,
 )
@@ -140,6 +141,24 @@ def check_agent_authority(
                 errors.append(
                     f"{capability} agent carries permission mode {mode}: {rel}"
                 )
+
+    # Effort is a warning here, not an error, and that is the difference between
+    # this gate and the package validator. Before installation an unusable effort
+    # is a defect in a package nobody is running yet. After installation the file
+    # is live, an operator may have tuned it on purpose, and the harness has no
+    # standing to call that a failure - but an effort the CLI will silently ignore
+    # is still worth saying out loud, because nothing else will ever mention it.
+    effort_match = re.search(r"^effort:\s*(\S+)\s*$", text, re.MULTILINE)
+    if effort_match is None:
+        warnings.append(f"agent declares no effort: {rel}")
+    else:
+        effort = effort_match.group(1).strip().strip("\"'").lower()
+        if effort not in ALLOWED_EFFORT:
+            warnings.append(
+                f"agent effort {effort!r} is not one of {', '.join(ALLOWED_EFFORT)}; "
+                f"the CLI ignores an unknown value and runs at its default: {rel}"
+            )
+
     return capability
 
 
@@ -192,6 +211,44 @@ def dynamic_component_paths(profile: dict[str, Any]) -> dict[str, dict[str, Any]
     return result
 
 
+def check_shadowed_agents(
+    root: Path,
+    profile: dict[str, Any],
+    dynamic: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> None:
+    """Report an agent that is named like a generated one but is not one.
+
+    Generated agents are the reviewed ones: their authority comes from the tier
+    table, the renderer wrote them, and both the package validator and this
+    checker hold them to it. They are also the ones an operator reaches for by
+    name. A hand-added file called `harness-something` sits in the same directory,
+    answers to the same naming convention, and carries none of that provenance -
+    so the name is doing work the file has not earned.
+
+    A warning rather than an error, deliberately. Adding an agent to your own
+    repository is allowed and this checker has no business failing it; what it can
+    do is refuse to let the file pass as generated. The authority such a file
+    grants is a separate question, and `check_agent_authority` has already asked it.
+    """
+    generated = {rel for rel in dynamic if rel.startswith(".claude/agents/")}
+    generated |= {rel for rel in STANDARD_REQUIRED if rel.startswith(".claude/agents/")}
+
+    agents_dir = root / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return
+
+    for path in sorted(agents_dir.glob("*.md")):
+        rel = f".claude/agents/{path.name}"
+        if rel in generated:
+            continue
+        if path.stem.startswith("harness-"):
+            warnings.append(
+                f"agent is named like a generated one but the profile does not "
+                f"declare it, so it is not covered by the harness contract: {rel}"
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
@@ -226,6 +283,7 @@ def main() -> None:
     delegate = str(profile.get("implementation_delegate", "codex-cli")).lower()
     greenfield = profile.get("greenfield_context")
     dynamic = dynamic_component_paths(profile)
+    check_shadowed_agents(root, profile, dynamic, warnings)
     required = list(BASE_REQUIRED)
     if mode == "create":
         required.extend([

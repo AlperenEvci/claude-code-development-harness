@@ -1475,8 +1475,21 @@ class CapabilityTierTests(unittest.TestCase):
                 text = self.agent_text(output, name)
                 self.assertIn("## Session launch", text)
                 # The whole command, not just the flags: the dispatch mode is part
-                # of the boundary, and it comes from the same shared table.
-                self.assertIn(CAPABILITIES.launch_command(capability), text)
+                # of the boundary, and it comes from the same shared table. Since
+                # 1.17.0 the command also carries the tier's model and effort, so
+                # the expectation is built from the model the file itself declares
+                # - a file documenting a launch other than its own is the defect
+                # this assertion is for.
+                declared = re.search(r'^model: "([^"]+)"$', text, re.MULTILINE)
+                self.assertIsNotNone(declared, f"{name} declares no model")
+                effort = re.search(r'^effort: "([^"]+)"$', text, re.MULTILINE)
+                self.assertIsNotNone(effort, f"{name} declares no effort")
+                self.assertIn(
+                    CAPABILITIES.launch_command(
+                        capability, declared.group(1), effort.group(1)
+                    ),
+                    text,
+                )
 
             # A read-only tier told to launch with `--bg` produces a session whose
             # output is unreachable: `--bg` refuses `--print`, so there is no
@@ -2948,6 +2961,216 @@ class EvalCaseTests(unittest.TestCase):
                 self.assertIn(case["name"], readme)
 
 
+
+class AgentTuningTests(unittest.TestCase):
+    """1.17.0: model and effort come from the tier, and the launcher knows the difference.
+
+    Measured first, on CLI 2.1.263, in
+    `.ai/reports/0008-model-effort-and-agent-scoping.md`. Two of the four findings
+    are load-bearing here and each has its own test: an unknown `--effort` is a
+    warning on a zero exit code, so nothing but the validator can catch it; and
+    `inherit` is legal in frontmatter and rejected by the launcher, so the flag has
+    to be omitted rather than forwarded.
+    """
+
+    def render(self, temp_path: Path, overrides: dict | None = None) -> Path:
+        config = temp_path / "profile.json"
+        output = temp_path / "generated"
+        data = profile("standard")
+        data.update(overrides or {})
+        write_lf(config, json.dumps(data, indent=2) + chr(10))
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output / "payload"
+
+    def render_fails(self, temp_path: Path, overrides: dict) -> str:
+        config = temp_path / "profile.json"
+        data = profile("standard")
+        data.update(overrides)
+        write_lf(config, json.dumps(data, indent=2) + chr(10))
+        proc = run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                   "--output", str(temp_path / "generated"), check=False)
+        self.assertNotEqual(proc.returncode, 0, "the renderer accepted the profile")
+        return proc.stdout + proc.stderr
+
+    def test_every_tier_carries_a_model_and_an_effort(self) -> None:
+        """The table is the single source; a tier missing one is unresolvable."""
+        for name, tier in CAPABILITIES.CAPABILITY_TIERS.items():
+            with self.subTest(tier=name):
+                self.assertIn("model", tier)
+                self.assertIn("effort", tier)
+                self.assertIn(tier["effort"], CAPABILITIES.ALLOWED_EFFORT)
+
+    def test_the_claude_effort_ladder_is_not_the_codex_one(self) -> None:
+        """Two ladders, rendered near each other, validated against each other is a bug.
+
+        `codex_reasoning` already renders as the word "effort" in generated prose.
+        The Codex ladder has no `max`; the Claude one does. Sharing a constant, or
+        checking one against the other's set, would let `max` through to Codex or
+        refuse it for Claude.
+        """
+        self.assertIn("max", CAPABILITIES.ALLOWED_EFFORT)
+        self.assertNotIn("max", RENDERER.ALLOWED_REASONING)
+        self.assertNotEqual(set(CAPABILITIES.ALLOWED_EFFORT), RENDERER.ALLOWED_REASONING)
+
+    def test_inherit_yields_no_model_flag(self) -> None:
+        """The whole point of the helper. Measured: --model inherit is rejected."""
+        self.assertEqual(
+            CAPABILITIES.model_effort_flags("inherit", "high"), ["--effort", "high"]
+        )
+        self.assertEqual(
+            CAPABILITIES.model_effort_flags("sonnet", "medium"),
+            ["--model", "sonnet", "--effort", "medium"],
+        )
+
+    def test_no_tier_ever_launches_with_model_inherit(self) -> None:
+        """The failure this prevents is a session that dies at the API on exit 0.
+
+        Checked across every tier rather than only the implementer, so a future
+        tier defaulting to `inherit` cannot reintroduce it.
+        """
+        for capability, tier in CAPABILITIES.CAPABILITY_TIERS.items():
+            with self.subTest(capability=capability):
+                argv = SESSION.launch_argv(
+                    capability,
+                    "t",
+                    background=bool(tier["writes"]),
+                    worktree="lane-a" if tier["writes"] else None,
+                    scope=["src"] if tier["writes"] else None,
+                )
+                self.assertNotIn("inherit", argv)
+                if tier["model"] == CAPABILITIES.MODEL_INHERIT:
+                    self.assertNotIn("--model", argv)
+                else:
+                    self.assertIn("--model", argv)
+
+    def test_the_legacy_aliases_still_name_their_tiers(self) -> None:
+        """v0.2 profiles predate agent_models and must keep resolving."""
+        data = {"research_model": "opus"}
+        RENDERER.normalize_agent_models(data)
+        self.assertEqual(data["agent_models"]["reader"]["model"], "opus")
+        self.assertEqual(data["research_model"], "opus")
+        # Absent alias falls through to the tier default rather than to `inherit`.
+        self.assertEqual(
+            data["agent_models"]["verifier"]["model"],
+            CAPABILITIES.CAPABILITY_TIERS["verifier"]["model"],
+        )
+
+    def test_an_alias_that_contradicts_its_entry_is_refused(self) -> None:
+        """Preferring one silently means the profile reads as a lie."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_fails(
+                Path(temp),
+                {
+                    "research_model": "opus",
+                    "agent_models": {"reader": {"model": "haiku"}},
+                },
+            )
+            self.assertIn("disagree", output)
+
+    def test_an_effort_off_the_ladder_is_refused_at_render_time(self) -> None:
+        """The only gate there is. The CLI warns and runs at its default on exit 0."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_fails(
+                Path(temp), {"agent_models": {"reader": {"effort": "ludicrous"}}}
+            )
+            self.assertIn("effort", output)
+
+    def test_an_agent_may_not_name_its_own_effort(self) -> None:
+        """Model has an escape hatch; effort does not, because it fails quietly."""
+        with tempfile.TemporaryDirectory() as temp:
+            agents = [
+                {
+                    "name": "billing-researcher",
+                    "description": "Map billing behavior without editing",
+                    "capability": "reader",
+                    "effort": "max",
+                    "instructions": ["Return evidence."],
+                }
+            ]
+            output = self.render_fails(Path(temp), {"additional_agents": agents})
+            self.assertIn("effort", output)
+
+    def test_a_rendered_agent_declares_the_tier_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            researcher = (payload / ".claude/agents/harness-codebase-researcher.md")
+            text = researcher.read_text(encoding="utf-8")
+            expected = CAPABILITIES.CAPABILITY_TIERS["reader"]["effort"]
+            self.assertIn(f'effort: "{expected}"', text)
+            # The profile's alias still drives the model.
+            self.assertIn('model: "opus"', text)
+            # And the documented launch line is the one this file describes.
+            self.assertIn(f"--model opus --effort {expected}", text)
+
+    def test_the_validator_catches_tuning_that_drifted(self) -> None:
+        """Six mutations, each a way the file and the profile could disagree."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            profile_data = json.loads(
+                (payload / ".ai/harness/project-profile.json").read_text(encoding="utf-8")
+            )
+            agent = payload / ".claude/agents/harness-codebase-researcher.md"
+            original = agent.read_text(encoding="utf-8")
+            mutations = (
+                ("effort dropped", lambda t: t.replace('effort: "medium"\n', "")),
+                ("effort off ladder", lambda t: t.replace('effort: "medium"', 'effort: "nope"')),
+                ("effort drifted", lambda t: t.replace('effort: "medium"', 'effort: "max"')),
+                ("model dropped", lambda t: t.replace('model: "opus"\n', "")),
+                ("model drifted", lambda t: t.replace('model: "opus"', 'model: "haiku"')),
+                ("launch names inherit", lambda t: t.replace("--model opus", "--model inherit")),
+            )
+            for label, mutate in mutations:
+                write_lf(agent, mutate(original))
+                errors: list[str] = []
+                VALIDATOR.check_agent_tuning(profile_data, payload, errors)
+                VALIDATOR.check_launch_line_is_runnable(payload, errors)
+                write_lf(agent, original)
+                with self.subTest(mutation=label):
+                    self.assertTrue(errors, f"{label} was not caught")
+
+    def test_a_synthesized_agent_satisfies_the_new_check(self) -> None:
+        """A promoted agent is checked by the renderer's rules, not by softer ones."""
+        spec = AGENTGEN.normalize_need(
+            {
+                "name": "retry-mapper",
+                "need": "Map the retry path across the queue workers.",
+                "capability": "reader",
+            }
+        )
+        self.assertEqual(spec["effort"], CAPABILITIES.CAPABILITY_TIERS["reader"]["effort"])
+        markdown = AGENTGEN.build_markdown(spec)
+        self.assertIn(f'effort: "{spec["effort"]}"', markdown)
+        self.assertNotIn("--model inherit", markdown)
+
+    def test_the_installed_checker_reports_an_agent_posing_as_generated(self) -> None:
+        """The name carries provenance the file has not earned - a warning, not a failure."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            planted = payload / ".claude/agents/harness-not-generated.md"
+            write_lf(
+                planted,
+                "---\n"
+                "name: harness-not-generated\n"
+                'description: "Hand-added agent wearing the generated naming convention"\n'
+                "capability: reader\n"
+                "tools:\n  - Read\n  - Grep\n  - Glob\n"
+                "disallowedTools:\n  - Write\n  - Edit\n  - Bash\n"
+                "permissionMode: plan\n"
+                'model: "sonnet"\n'
+                'effort: "medium"\n'
+                "maxTurns: 30\n"
+                "---\n\nHand-written.\n",
+            )
+            proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                       "--root", str(payload), check=False)
+            combined = proc.stdout + proc.stderr
+            self.assertIn("harness-not-generated", combined)
+            self.assertIn("named like a generated one", combined)
+            # A warning: the checker has no business failing an agent someone
+            # deliberately added to their own repository.
+            self.assertEqual(proc.returncode, 0, combined)
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -4329,8 +4552,8 @@ class LaunchCorrelationTests(unittest.TestCase):
         )
         self.assertEqual(
             proc.stdout.strip(),
-            f"claude --session-id {SAMPLE_SESSION_ID} --permission-mode plan "
-            "--tools Read,Grep,Glob 'Map the retry path'",
+            f"claude --model sonnet --effort medium --session-id {SAMPLE_SESSION_ID} "
+            "--permission-mode plan --tools Read,Grep,Glob 'Map the retry path'",
         )
         self.assertNotIn("correlation", proc.stderr)
 
@@ -4423,12 +4646,16 @@ class LaunchCorrelationTests(unittest.TestCase):
         )
         self.assertEqual(
             proc.stdout.strip(),
-            f"claude --session-id {SAMPLE_SESSION_ID} --permission-mode "
-            "acceptEdits --worktree lane-a --add-dir src 'Execute the spec'",
+            f"claude --effort high --session-id {SAMPLE_SESSION_ID} "
+            "--permission-mode acceptEdits --worktree lane-a --add-dir src "
+            "'Execute the spec'",
         )
         printed = shlex.split(proc.stdout.strip())
         self.assertNotIn("-p", printed)
         self.assertNotIn("--output-format", printed)
+        # The implementer tier's model is `inherit`, which the launcher rejects as
+        # unrecognized_model. The flag is omitted, not forwarded.
+        self.assertNotIn("--model", printed)
 
     def test_a_bad_sender_is_refused_before_the_run_not_after_it(self) -> None:
         """The bus would refuse it too - but only after a model was paid for."""

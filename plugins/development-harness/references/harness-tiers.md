@@ -79,6 +79,27 @@ Fleet defaults:
 - one commit per isolated lane only when explicitly allowed,
 - orchestrator integrates and runs the full gate.
 
+## Model and effort per capability tier
+
+Every generated agent carries a model and a Claude effort, both from the shared table
+in `harness_capabilities.py`. A profile overrides them per tier through `agent_models`.
+
+| Capability | Model | Effort | Why |
+|---|---|---|---|
+| `reader` | `sonnet` | `medium` | Bounded, well-specified retrieval, launched often. |
+| `verifier` | `sonnet` | `medium` | Runs configured gates and reports; the work is checking, not deciding. |
+| `implementer` | `inherit` | `high` | Works against a contract the main session wrote, and is the one tier whose mistakes land in the tree. |
+
+`inherit` means "use the session's model". It is valid in frontmatter and rejected by
+the launcher as `unrecognized_model`, so a rendered launch line for an inheriting tier
+omits `--model` rather than naming it. An effort outside `low, medium, high, xhigh,
+max` is refused when the package is built: the CLI only warns and then runs at its
+default, so render time is the only place it can be caught. Both measured on 2.1.263
+in `.ai/reports/0008-model-effort-and-agent-scoping.md`.
+
+This is the Claude ladder. `codex_reasoning` is the Codex one, it has no `max`, and the
+two are never validated against each other.
+
 ## Escalation path
 
 Start Lite or Standard. Escalate only when observed tasks justify the next tier. Downgrade when orchestration cost repeatedly exceeds its quality gain.

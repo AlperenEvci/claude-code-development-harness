@@ -15,7 +15,7 @@ touches the renderer, the validator, tests, a reference, and the changelog toget
 the file lists below are the expected blast radius, to be confirmed by the
 template cartographer before editing.
 
-### Module 0 - Ground truth before hooks (1.13.0) - DONE on Windows, CI pending
+### Module 0 - Ground truth before hooks (1.13.0) - DONE, CI-confirmed
 
 Shipped on branch `module-0-ground-truth`. Measured: plain `-p` loads `CLAUDE.md`;
 `--bare` refuses OAuth before any API call and has no inverse flag, so it is refused by
@@ -39,7 +39,7 @@ Small, first, and it unblocks everything else.
   (`load_profile`), `references/project-profile-schema.md`, `skills/setup/SKILL.md`,
   `scripts/validate-repo.sh`, `tests/test_plugin.py`, `CHANGELOG.md`.
 
-### Module 1 - Guarded hooks (1.14.0) - DONE on Windows, CI pending
+### Module 1 - Guarded hooks (1.14.0) - DONE, CI-confirmed
 
 Shipped on branch `module-0-ground-truth`. `hooks_policy: guarded` renders
 `.claude/settings.json` and copies two hook scripts byte-identical into
@@ -49,7 +49,7 @@ own. Measured against CLI 2.1.263 in `.ai/reports/0005-guarded-hooks-smoke-test.
 `.env` read denied with the reason reaching the model, ordinary read untouched, brief
 in context at startup, existing settings file reported as a conflict. Validator gained
 `check_hooks()` (13 mutation checks, 13 caught); `check_installed.py` reports the
-installed-but-unwired state. Gate green locally (265 tests); CI still has to confirm.
+installed-but-unwired state. Gate green on both legs of CI (run 34133234783, merged as PR #3).
 
 Two hooks shipped rather than four, per decision 0004: "start with the `PreToolUse`
 guards and `SessionStart` brief; add `PreCompact` and `Stop` once the first two are in
@@ -75,7 +75,7 @@ state instead.
   `.ai/reports/0005-...`, and the eval budget was better spent on the adoption seam
   this release opened.
 
-### Module 2 - Compaction-native context policy (1.15.0) - DONE on Windows, CI pending
+### Module 2 - Compaction-native context policy (1.15.0) - DONE, CI-confirmed
 
 Shipped on branch `module-0-ground-truth`. The working band is now a launch flag:
 `harness_session.py launch` passes the profile's ceiling to `claude --autocompact`,
@@ -83,7 +83,7 @@ and the ceiling is narrowed to the 100k-1M range that flag accepts. A third hook
 `hook_precompact.py`, records the compaction boundary through a new
 `harness_checkpoint.py from-hook`; the brief reports the count and reads it as a
 ceiling problem. Fourteen mutation checks, thirteen caught, the fourteenth found dead
-code. Gate green locally (291 tests); CI still has to confirm.
+code. Gate green on both legs of CI (run 34133234783, merged as PR #3).
 
 Measured first, in `.ai/reports/0006-compaction-smoke-test.md`: what `--autocompact`
 accepts, the `PreCompact` payload's actual fields, that one 51-turn run compacted
@@ -116,7 +116,7 @@ path-scoped rule is genuinely absent when nothing matches it.
   brief names the producer of each on its own line instead, which is the same
   information without pretending they are one kind of thing.
 
-### Module 3 - Root contract under 200 lines (1.16.0) - DONE on Windows, CI pending
+### Module 3 - Root contract under 200 lines (1.16.0) - DONE, CI-confirmed
 
 Shipped on branch `module-0-ground-truth`. `agent_sessions_section`, the session-start
 procedure, and the checkpoint recipes moved into a generated
@@ -126,7 +126,7 @@ because its body is generated from the tier table, the tool directory, and the p
 187 (greenfield) always-loaded lines; module 0's warning is now an error, extracted
 into `check_always_loaded_size` so a test can call it - the subprocess version passed
 under mutation because a padded `CLAUDE.md` fails the payload hash check anyway. Gate
-green locally (302 tests, 4 skipped), 8/8 mutations caught; CI still has to confirm.
+green on both legs of CI (run 34133234783, merged as PR #3), 8/8 mutations caught.
 
 Deviations, both recorded in `.ai/reports/0007-on-demand-skill-loading.md`:
 
@@ -150,7 +150,21 @@ Deviations, both recorded in `.ai/reports/0007-on-demand-skill-loading.md`:
   situation is an answer to that. Only the checks that ask whether something holds
   *unasked* still read `CLAUDE.md` alone.
 
-### Module 4 - Model and effort per tier (1.17.0) - measured, not started
+### Module 4 - Model and effort per tier (1.17.0) - DONE on Windows, CI pending
+
+Shipped on branch `module-4-model-and-effort`. The tier table gained `model` and
+`effort`; `agent_models` overrides them per tier and the two old aliases still resolve,
+with a disagreeing pair refused rather than silently ranked. `model_effort_flags` is
+the single place that knows `inherit` yields no `--model`, and both the launcher and
+the rendered `## Session launch` block go through it - the block is generated now
+rather than being a literal in the template, so a file cannot document a launch other
+than its own. Twelve tests, six agent mutations and three tier-table mutations, all
+caught. Gate green locally (314 tests); CI still has to confirm.
+
+`tools: Agent(<readers>)` was dropped on measurement, not deferred. Details below and
+in `.ai/reports/0008-model-effort-and-agent-scoping.md`.
+
+**Original plan, with what measurement changed:**
 
 Measured first, against CLI 2.1.263, in
 `.ai/reports/0008-model-effort-and-agent-scoping.md`. Three of the four assumptions
