@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.17.0](https://img.shields.io/badge/Version-1.17.0-7C3AED?style=flat-square)
+![Version 1.18.0](https://img.shields.io/badge/Version-1.18.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -328,9 +328,12 @@ Everything above writes a record — envelopes, the ledger, checkpoints, the ban
 python scripts/ai-harness/harness_report.py --out .ai/runs/report.html
 python scripts/ai-harness/harness_report.py --json    # the same model, for other tools
 python scripts/ai-harness/harness_report.py --brief   # the same model, for a session opening
+python scripts/ai-harness/harness_report.py --cost    # the same model, for what it was billed
 ```
 
 `--brief` is what the generated `CLAUDE.md` now opens with, in place of the two-command checklist it used to ask for: the newest handoff's intent and next steps, what the ledger still has unproven, and any question an agent left open. It runs nothing, so a background lane it never started is invisible to it — and its last line says so and names the sweep, rather than implying coverage it does not have.
+
+`--cost` reads what the recorded work was billed. The launcher copies it out of the result JSON the CLI already returns, per model and per unit of work; no agent reports its own cost, and the schema an agent answers does not offer the field. Two details are measured rather than assumed. A model is keyed twice — `claude-opus-5[1m]` is what was billed, `claude-opus-5` is what you think in — so totals aggregate on the canonical name and keep the billing key beside it. And the cache hit ratio counts cache *creation* in its denominator: leaving it out reports 99.99% for a run whose honest figure is 84.08%. Creation is also printed as a figure of its own, because a run that paid to fill a cache and never read it scores 0% under any ratio.
 
 It groups by `correlation_id` rather than by session, because that is the unit of work: one question is often two agents across two sessions, and a view organised by process cuts it in half. Envelopes with no `trace` are collected separately and never given a duration or a token count — an unmeasured trace and a zero one are different facts.
 
@@ -535,7 +538,7 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 314 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 330 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
 **Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds eight cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, a hostile `.claude/settings.json` found in the scanned repository is a finding rather than a starting point, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 

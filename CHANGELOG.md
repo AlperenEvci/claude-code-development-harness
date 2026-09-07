@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.18.0 - 2026-09-07
+
+### Added - an envelope records what the run was billed, and the reader says so honestly
+
+Module 5 of the Harness 2.0 roadmap. The trace has carried a duration and a token
+count since 1.11.0, which answers how long a unit of work took and says nothing about
+what it cost. Envelope version 3 adds `cost_usd`, `model_usage`, `num_turns` and
+`subtype`, all copied out of the result object the CLI already returns, and
+`harness_report.py --cost` reads them back per model and per unit of work.
+
+Nothing here is self-reported. A foreground run hands its own cost to whoever launched
+it, so the launcher copies it in; the agent-facing schema does not offer the fields and
+`post` has no flag for them, the same rule that already applied to duration and tokens.
+An agent that reports its own bill is inventing one.
+
+Envelope versions 1 and 2 still read. Envelopes are append-only records, and a reader
+that refused the history would discard the thing the bus exists to keep.
+
+### Three findings that changed the design
+
+Measured against CLI 2.1.263 before any of this was written, in
+`.ai/reports/0009-result-json-cost-fields.md`.
+
+**The cache hit ratio the roadmap specified was wrong in the flattering direction.**
+`cache_read / (cache_read + input)` reports **99.99%** for a run whose honest figure is
+**84.08%**, because cache *creation* is exactly the portion that was not a hit and is
+billed at a premium. The denominator now includes it, and it is printed beside every
+percentage in both the text and the page, so the number cannot be read without the
+thing it was divided by.
+
+**No ratio can express a cache that was filled and never read.** In the measured run
+the haiku model paid for 18,417 tokens of cache creation and read none of them, which
+scores 0% under any denominator — identical to a run that touched no cache at all. So
+`cache_creation` is printed as a figure of its own rather than only inside a
+percentage. This one was found while correcting the report above: the corrected formula
+fixes the opus case and leaves the haiku case looking the same as free.
+
+**A model is keyed twice, and `cost_basis` is per model.** The billing key carries the
+context tier (`claude-opus-5[1m]` is its own line item) while `canonicalModel` does
+not. Per-model totals aggregate on the canonical name, which is what an operator thinks
+in, and keep the billing key beside it, which is what explains the bill. `costBasis`
+lives inside each entry rather than on the run, so a top-level field would have had to
+pick one basis for a two-model run and be quietly wrong.
+
+`subtype` is carried verbatim and never interpreted. Only `success` has been observed,
+so a reader branching on a fixed list would be branching on values it has never seen;
+it is length-capped and character-restricted instead, because it is still untrusted
+text landing in a file the orchestrator reads.
+
+### Changed
+
+- A history where only some envelopes carry a cost reads as partial: `--cost` prints
+  the total beside the count of envelopes that actually carried one, and an envelope
+  with no cost contributes nothing rather than a zero.
+- Malformed cost is refused at write time like every other envelope field — negatives,
+  booleans, non-finite values, a four-figure runaway, a fractional turn count, a
+  free-text subtype, and more than 32 models in one run.
+
 ## 1.17.0 - 2026-09-07
 
 ### Added - every agent carries a model and an effort, and the launcher knows what `inherit` means

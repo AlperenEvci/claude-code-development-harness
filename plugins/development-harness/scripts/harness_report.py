@@ -554,6 +554,207 @@ def latest_context(checkpoints: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+#: The denominator the cache ratio is computed against, stated once so the two
+#: renderers cannot drift from each other or from the docs.
+CACHE_RATIO_FORMULA = "cache_read / (cache_read + cache_creation + input)"
+
+
+def cache_ratio(tokens: dict[str, int]) -> float | None:
+    """How much of what we read was already cached, or None when nothing was read.
+
+    The denominator includes `cache_creation` deliberately. Leaving it out - which
+    is what the roadmap originally specified - reports 99.99% for a run whose
+    honest figure is 84.08%, because cache creation is exactly the part that was
+    not a hit and is billed at a premium
+    (`.ai/reports/0009-result-json-cost-fields.md`).
+
+    This ratio still cannot distinguish a run that paid to fill a cache it never
+    reused from one that touched no cache at all: both read 0%. That is why the
+    reader prints `cache_creation` as a figure of its own rather than only inside
+    this number.
+    """
+    read = tokens.get("cache_read", 0)
+    denominator = read + tokens.get("cache_creation", 0) + tokens.get("input", 0)
+    if denominator <= 0:
+        return None
+    return read / denominator
+
+
+def cost_view(entries: list[dict[str, Any]], units: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the recorded work cost, per model and per unit of work.
+
+    Every number here is summed from envelopes the launcher wrote. An envelope
+    that recorded no cost contributes nothing rather than a zero, and a total is
+    reported alongside the count of envelopes that actually carried one, so a
+    partially-instrumented history reads as partial instead of as cheap.
+
+    Models are aggregated on `canonical_model` - what an operator thinks in - while
+    each billing key is kept beside it, because a 1M-context session is its own
+    line item and hiding it would hide the thing that explains the bill.
+    """
+    models: dict[str, dict[str, Any]] = {}
+    subtypes: dict[str, int] = {}
+    total_cost = 0.0
+    priced = 0
+    turns = 0
+    turns_seen = 0
+
+    for entry in entries:
+        trace = entry.get("trace") or {}
+
+        cost = trace.get("cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            total_cost += float(cost)
+            priced += 1
+
+        count = trace.get("num_turns")
+        if isinstance(count, int) and not isinstance(count, bool):
+            turns += count
+            turns_seen += 1
+
+        subtype = trace.get("subtype")
+        if isinstance(subtype, str) and subtype:
+            subtypes[subtype] = subtypes.get(subtype, 0) + 1
+
+        usage = trace.get("model_usage")
+        if not isinstance(usage, dict):
+            continue
+        for key, record in usage.items():
+            if not isinstance(record, dict):
+                continue
+            canonical = record.get("canonical_model")
+            name = canonical if isinstance(canonical, str) and canonical else str(key)
+            bucket = models.setdefault(
+                name,
+                {
+                    "model": name,
+                    "billing_keys": [],
+                    "cost_usd": 0.0,
+                    "cost_basis": [],
+                    "tokens": {},
+                    "envelopes": 0,
+                },
+            )
+            bucket["envelopes"] += 1
+            if str(key) not in bucket["billing_keys"]:
+                bucket["billing_keys"].append(str(key))
+            basis = record.get("cost_basis")
+            if isinstance(basis, str) and basis and basis not in bucket["cost_basis"]:
+                bucket["cost_basis"].append(basis)
+            model_cost = record.get("cost_usd")
+            if isinstance(model_cost, (int, float)) and not isinstance(model_cost, bool):
+                bucket["cost_usd"] += float(model_cost)
+            for label, value in (record.get("tokens") or {}).items():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    bucket["tokens"][label] = bucket["tokens"].get(label, 0) + value
+
+    for bucket in models.values():
+        bucket["cost_usd"] = round(bucket["cost_usd"], 6)
+        bucket["billing_keys"].sort()
+        bucket["cost_basis"].sort()
+        bucket["cache_ratio"] = cache_ratio(bucket["tokens"])
+
+    per_unit: list[dict[str, Any]] = []
+    for unit in units:
+        unit_cost = 0.0
+        unit_priced = 0
+        # The group's member list is `envelopes`; `envelope_count` beside it is a
+        # number. Reading the wrong one yields an empty section rather than an error.
+        for member in unit.get("envelopes") or []:
+            value = (member.get("trace") or {}).get("cost_usd")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                unit_cost += float(value)
+                unit_priced += 1
+        if not unit_priced:
+            continue
+        per_unit.append(
+            {
+                "correlation_id": unit.get("correlation_id"),
+                "cost_usd": round(unit_cost, 6),
+                "priced_envelopes": unit_priced,
+            }
+        )
+    per_unit.sort(key=lambda item: (-item["cost_usd"], str(item["correlation_id"] or "")))
+
+    return {
+        "total_cost_usd": round(total_cost, 6),
+        "priced_envelopes": priced,
+        "total_envelopes": len(entries),
+        "num_turns": turns if turns_seen else None,
+        "turn_reports": turns_seen,
+        "models": sorted(models.values(), key=lambda item: -item["cost_usd"]),
+        "subtypes": dict(sorted(subtypes.items())),
+        "per_unit": per_unit,
+        "cache_ratio_formula": CACHE_RATIO_FORMULA,
+    }
+
+
+def render_cost(model: dict[str, Any]) -> str:
+    """The `--cost` view as text."""
+    cost = model.get("cost", {})
+    lines = ["# Cost", ""]
+
+    priced = cost.get("priced_envelopes", 0)
+    total_envelopes = cost.get("total_envelopes", 0)
+    if not priced:
+        lines += [
+            f"No envelope carries a cost. {total_envelopes} recorded; cost arrives "
+            "with envelope version 3, so anything written earlier has none.",
+            "",
+        ]
+        return chr(10).join(lines)
+
+    lines.append(
+        f"${cost['total_cost_usd']:.4f} across {priced} of {total_envelopes} envelopes."
+    )
+    if cost.get("num_turns") is not None:
+        lines.append(
+            f"{cost['num_turns']} turns reported by {cost['turn_reports']} envelopes."
+        )
+    lines.append("")
+
+    if cost.get("models"):
+        lines += ["## Per model", ""]
+        for item in cost["models"]:
+            tokens = item.get("tokens", {})
+            lines.append(f"- {item['model']}: ${item['cost_usd']:.4f}")
+            keys = [k for k in item["billing_keys"] if k != item["model"]]
+            if keys:
+                lines.append(f"  billed as {', '.join(keys)}")
+            if item.get("cost_basis"):
+                lines.append(f"  basis {', '.join(item['cost_basis'])}")
+            ratio = item.get("cache_ratio")
+            if ratio is not None:
+                lines.append(f"  cache hits {ratio * 100:.1f}% ({cost['cache_ratio_formula']})")
+            created = tokens.get("cache_creation")
+            if created:
+                # Printed on its own because no ratio can surface it: a run that
+                # paid to fill a cache it never read reads 0% either way.
+                lines.append(f"  cache creation {created} tokens")
+            counted = ", ".join(
+                f"{label} {value}" for label, value in sorted(tokens.items())
+            )
+            if counted:
+                lines.append(f"  tokens {counted}")
+        lines.append("")
+
+    if cost.get("subtypes"):
+        spread = ", ".join(f"{k} {v}" for k, v in cost["subtypes"].items())
+        lines += ["## Launcher outcomes", "", spread, ""]
+
+    if cost.get("per_unit"):
+        lines += ["## Per unit of work", ""]
+        for item in cost["per_unit"]:
+            label = item["correlation_id"] or "(uncorrelated)"
+            lines.append(
+                f"- {label}: ${item['cost_usd']:.4f} over "
+                f"{item['priced_envelopes']} envelopes"
+            )
+        lines.append("")
+
+    return chr(10).join(lines)
+
+
 def build_model(root: Path) -> dict[str, Any]:
     """Assemble the whole view. Reads files; runs nothing."""
     profile = load_profile(root)
@@ -562,6 +763,8 @@ def build_model(root: Path) -> dict[str, Any]:
     ]
     checkpoints = load_checkpoints(root)
 
+    units = group_work_units(entries)
+
     model = {
         "report_version": REPORT_VERSION,
         "generated_at": now_text(),
@@ -569,8 +772,9 @@ def build_model(root: Path) -> dict[str, Any]:
         # and belongs in no artifact that gets shared.
         "repository": root.name,
         "profile": profile,
-        "work_units": group_work_units(entries),
+        "work_units": units,
         "envelope_total": len(entries),
+        "cost": cost_view(entries, units),
         "ledger": load_ledger(root),
         "checkpoints": checkpoints,
         "compaction": load_compaction(root),
@@ -846,6 +1050,69 @@ def render_html(model: dict[str, Any]) -> str:
         for entry in unit["envelopes"]:
             lines += render_envelope(entry)
         lines.append("</div>")
+
+    # --- Cost -----------------------------------------------------------
+    cost = model.get("cost") or {}
+    lines.append('<h2 id="cost">Cost</h2>')
+    if not cost.get("priced_envelopes"):
+        lines.append(
+            '<p class="empty">No envelope carries a cost. Cost arrives with '
+            "envelope version 3, so anything written earlier has none.</p>"
+        )
+    else:
+        summary = (
+            f"${cost['total_cost_usd']:.4f} across {cost['priced_envelopes']} of "
+            f"{cost['total_envelopes']} envelopes"
+        )
+        if cost.get("num_turns") is not None:
+            summary += (
+                f" - {cost['num_turns']} turns from {cost['turn_reports']} envelopes"
+            )
+        lines.append(f'<p class="muted">{esc(summary)}</p>')
+
+        if cost.get("models"):
+            lines.append("<table>")
+            lines.append(
+                "<thead><tr><th>Model</th><th>Cost</th><th>Cache hits</th>"
+                "<th>Cache creation</th><th>Billed as</th></tr></thead><tbody>"
+            )
+            for item in cost["models"]:
+                ratio = item.get("cache_ratio")
+                ratio_text = "-" if ratio is None else f"{ratio * 100:.1f}%"
+                created = (item.get("tokens") or {}).get("cache_creation") or 0
+                keys = ", ".join(
+                    key for key in item["billing_keys"] if key != item["model"]
+                )
+                lines.append(
+                    "<tr>"
+                    f"<td>{esc(item['model'])}</td>"
+                    f"<td>${item['cost_usd']:.4f}</td>"
+                    f"<td>{esc(ratio_text)}</td>"
+                    f"<td>{created}</td>"
+                    f"<td>{esc(keys or '-')}</td>"
+                    "</tr>"
+                )
+            lines.append("</tbody></table>")
+            # The denominator is stated wherever the ratio is shown. Cache creation
+            # gets its own column for the case no ratio can express: a run that paid
+            # to fill a cache it never read reads 0% either way.
+            lines.append(
+                f'<p class="muted">Cache hits are {esc(cost["cache_ratio_formula"])}.</p>'
+            )
+
+        if cost.get("subtypes"):
+            spread = ", ".join(f"{k} {v}" for k, v in cost["subtypes"].items())
+            lines.append(f'<p class="muted">Launcher outcomes: {esc(spread)}</p>')
+
+        if cost.get("per_unit"):
+            lines.append("<ul>")
+            for item in cost["per_unit"]:
+                label = item["correlation_id"] or "(uncorrelated)"
+                lines.append(
+                    f"<li>{esc(label)}: ${item['cost_usd']:.4f} over "
+                    f"{item['priced_envelopes']} envelopes</li>"
+                )
+            lines.append("</ul>")
 
     # --- Ledger ---------------------------------------------------------
     ledger = model["ledger"]
@@ -1141,6 +1408,14 @@ def main() -> None:
             "agent left open."
         ),
     )
+    shape.add_argument(
+        "--cost",
+        action="store_true",
+        help=(
+            "Print what the recorded work cost: totals, per model with a cache hit "
+            "ratio, the launcher's outcome spread, and per unit of work."
+        ),
+    )
     parser.add_argument(
         "--out",
         help="Write a self-contained HTML report to this path instead of stdout.",
@@ -1163,6 +1438,8 @@ def main() -> None:
             print(json.dumps(model, indent=2, ensure_ascii=False))
         elif args.brief:
             sys.stdout.write(render_brief(model))
+        elif args.cost:
+            sys.stdout.write(render_cost(model))
         else:
             sys.stdout.write(render_text(model))
     except ReportError as error:

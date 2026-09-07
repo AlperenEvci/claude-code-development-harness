@@ -37,13 +37,14 @@ from harness_capabilities import (  # noqa: E402  (sibling module, resolved abov
     CAPABILITY_TIERS,
 )
 
-ENVELOPE_VERSION = 2
+ENVELOPE_VERSION = 3
 
-#: Version 2 adds the optional `trace` object. Envelopes are append-only, so a
-#: repository that has been running since version 1 has version 1 records on
-#: disk, and refusing to read them would discard the history the bus exists to
-#: keep. Reading accepts both; writing always produces the current version.
-SUPPORTED_ENVELOPE_VERSIONS = (1, 2)
+#: Version 2 added the optional `trace` object; version 3 adds what a run cost to
+#: it. Envelopes are append-only, so a repository that has been running since
+#: version 1 has version 1 records on disk, and refusing to read them would
+#: discard the history the bus exists to keep. Reading accepts all three; writing
+#: always produces the current version.
+SUPPORTED_ENVELOPE_VERSIONS = (1, 2, 3)
 
 #: What an envelope is for. Deliberately small — a vocabulary an orchestrator can
 #: branch on without reading prose. `result` closes a task, `finding` reports
@@ -70,6 +71,21 @@ MAX_EVIDENCE_ITEMS = 50
 #: a millisecond/second mix-up rather than to express a policy about runtimes.
 MAX_DURATION_MS = 24 * 60 * 60 * 1000
 MAX_TOKENS = 100_000_000
+#: A single unit of work costing four figures is a runaway, not a measurement, and
+#: an envelope is not the place to discover that. The cap is a write-time refusal
+#: like every other in this file, not a budget.
+MAX_COST_USD = 10_000.0
+MAX_TURNS = 100_000
+#: `subtype` is carried verbatim and never enumerated. Only `success` was observed
+#: in `.ai/reports/0009-result-json-cost-fields.md`, so a reader that branched on a
+#: fixed list would be guessing at the values it has never seen. It is length-capped
+#: and character-restricted instead, because it is still untrusted text reaching a
+#: file the orchestrator reads.
+MAX_SUBTYPE_CHARS = 64
+SUBTYPE_PATTERN = re.compile(r"\A[a-z0-9][a-z0-9_-]*\Z")
+#: Enough models for any real run. The bound exists so a malformed report cannot
+#: turn one envelope into an unbounded write.
+MAX_MODEL_USAGE_ENTRIES = 32
 
 BUS_DIRNAME = "bus"
 
@@ -170,11 +186,109 @@ def normalize_evidence(value: Any) -> list[str]:
     return items
 
 
+#: The per-model token counters an entry may carry, mapped from the CLI's spelling
+#: to the envelope's. `cache_creation` is here for a reason worth stating: without
+#: it the cache hit ratio is computed against a denominator that omits exactly the
+#: tokens that were not hits, which reads 99.99% for a run whose honest figure is
+#: 84.08% (`.ai/reports/0009-result-json-cost-fields.md`).
+MODEL_TOKEN_FIELDS = {
+    "inputTokens": "input",
+    "outputTokens": "output",
+    "cacheReadInputTokens": "cache_read",
+    "cacheCreationInputTokens": "cache_creation",
+}
+
+
+def normalize_model_usage(raw: Any) -> dict[str, dict[str, Any]] | None:
+    """Normalize the CLI's `modelUsage` into the envelope's `model_usage`.
+
+    Each entry keeps two names on purpose. The key is what was billed - a
+    1M-context session appears as `claude-opus-5[1m]` and is a separate line item -
+    while `canonical_model` is the same model without the context suffix, which is
+    what an operator thinks in and what a per-model total has to aggregate on.
+    Keeping only one would either split a model across rows or hide the context
+    tier that explains the bill.
+
+    `cost_basis` lives here rather than on the trace because that is where the CLI
+    puts it. A run that used two models has two bases, and a single top-level field
+    would have to pick one and be silently wrong.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise BusError("model_usage must be an object keyed by model")
+    if len(raw) > MAX_MODEL_USAGE_ENTRIES:
+        raise BusError(
+            f"model_usage has {len(raw)} entries, expected at most "
+            f"{MAX_MODEL_USAGE_ENTRIES}"
+        )
+
+    usage: dict[str, dict[str, Any]] = {}
+    for key, entry in raw.items():
+        name = str(key).strip()
+        if not name or len(name) > MAX_SUMMARY_CHARS:
+            raise BusError(f"model_usage key is not a usable model name: {key!r}")
+        if not isinstance(entry, dict):
+            raise BusError(f"model_usage[{name}] must be an object")
+
+        record: dict[str, Any] = {}
+        canonical = str(entry.get("canonicalModel") or entry.get("canonical_model") or "").strip()
+        if canonical:
+            record["canonical_model"] = canonical
+
+        cost = entry.get("costUSD", entry.get("cost_usd"))
+        if cost is not None:
+            record["cost_usd"] = normalize_cost(cost, f"model_usage[{name}].cost_usd")
+
+        basis = str(entry.get("costBasis") or entry.get("cost_basis") or "").strip()
+        if basis:
+            if len(basis) > MAX_SUBTYPE_CHARS:
+                raise BusError(f"model_usage[{name}].cost_basis is too long")
+            record["cost_basis"] = basis
+
+        tokens: dict[str, int] = {}
+        for source, label in MODEL_TOKEN_FIELDS.items():
+            value = entry.get(source, entry.get(label))
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise BusError(f"model_usage[{name}].{label} must be an integer")
+            if value < 0 or value > MAX_TOKENS:
+                raise BusError(
+                    f"model_usage[{name}].{label} is {value}, expected 0..{MAX_TOKENS}"
+                )
+            tokens[label] = value
+        if tokens:
+            record["tokens"] = tokens
+
+        # An entry that measured nothing is not a model that cost nothing.
+        if record:
+            usage[name] = record
+
+    return usage or None
+
+
+def normalize_cost(value: Any, label: str) -> float:
+    """A cost is a non-negative number of dollars, and `True` is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BusError(f"{label} must be a number of US dollars")
+    cost = float(value)
+    if cost != cost or cost in (float("inf"), float("-inf")):
+        raise BusError(f"{label} must be a finite number")
+    if cost < 0 or cost > MAX_COST_USD:
+        raise BusError(f"{label} is {cost}, expected 0..{MAX_COST_USD}")
+    return cost
+
+
 def normalize_trace(
     correlation_id: str | None,
     duration_ms: Any,
     tokens_in: Any,
     tokens_out: Any,
+    cost_usd: Any = None,
+    model_usage: Any = None,
+    num_turns: Any = None,
+    subtype: Any = None,
 ) -> dict[str, Any] | None:
     """Assemble the optional `trace` object, or None when nothing was measured.
 
@@ -218,6 +332,29 @@ def normalize_trace(
             raise BusError(f"tokens.{label} is {value}, expected 0..{MAX_TOKENS}")
         trace.setdefault("tokens", {})[label] = value
 
+    if cost_usd is not None:
+        trace["cost_usd"] = normalize_cost(cost_usd, "cost_usd")
+
+    usage = normalize_model_usage(model_usage)
+    if usage is not None:
+        trace["model_usage"] = usage
+
+    if num_turns is not None:
+        if isinstance(num_turns, bool) or not isinstance(num_turns, int):
+            raise BusError("num_turns must be an integer")
+        if num_turns < 0 or num_turns > MAX_TURNS:
+            raise BusError(f"num_turns is {num_turns}, expected 0..{MAX_TURNS}")
+        trace["num_turns"] = num_turns
+
+    if subtype is not None:
+        text_subtype = str(subtype).strip().lower()
+        if len(text_subtype) > MAX_SUBTYPE_CHARS or not SUBTYPE_PATTERN.match(text_subtype):
+            raise BusError(
+                f"subtype {subtype!r} is not a short lowercase token; it is carried "
+                "verbatim from the CLI and never interpreted"
+            )
+        trace["subtype"] = text_subtype
+
     if not trace:
         return None
     # Recorded as reported, for the same reason `capability` is. The bus knows
@@ -243,6 +380,10 @@ def build_envelope(
     duration_ms: Any = None,
     tokens_in: Any = None,
     tokens_out: Any = None,
+    cost_usd: Any = None,
+    model_usage: Any = None,
+    num_turns: Any = None,
+    subtype: Any = None,
 ) -> dict[str, Any]:
     """Validate the parts of an envelope and assemble it. Raises `BusError`."""
     if not UUID_PATTERN.match(str(session_id or "")):
@@ -310,7 +451,16 @@ def build_envelope(
         "next": (str(next_step).strip() or None) if next_step else None,
         # Absent rather than an empty object when nothing was measured: a blank
         # trace and an unmeasured one are different facts.
-        "trace": normalize_trace(correlation_id, duration_ms, tokens_in, tokens_out),
+        "trace": normalize_trace(
+            correlation_id,
+            duration_ms,
+            tokens_in,
+            tokens_out,
+            cost_usd,
+            model_usage,
+            num_turns,
+            subtype,
+        ),
     }
     return envelope
 
@@ -368,6 +518,10 @@ def validate_envelope(data: Any, label: str) -> list[str]:
             duration_ms=(data.get("trace") or {}).get("duration_ms"),
             tokens_in=((data.get("trace") or {}).get("tokens") or {}).get("input"),
             tokens_out=((data.get("trace") or {}).get("tokens") or {}).get("output"),
+            cost_usd=(data.get("trace") or {}).get("cost_usd"),
+            model_usage=(data.get("trace") or {}).get("model_usage"),
+            num_turns=(data.get("trace") or {}).get("num_turns"),
+            subtype=(data.get("trace") or {}).get("subtype"),
         )
     except BusError as exc:
         errors.append(f"{label}: {exc}")
