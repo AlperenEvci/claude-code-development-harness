@@ -339,8 +339,11 @@ supervisor or desktop shell, settings.json merging, and any hook that returns `a
 
 ## After 2.0 - host portability (Claude Code, Codex, OpenCode)
 
-**Status:** accepted as direction, not scheduled. Nothing here starts before 2.0.0
-ships. Recorded now so the 2.0 modules do not quietly make it harder.
+**Status:** measured on 2026-09-07 (`.ai/reports/0012-host-portability-smoke-test.md`);
+design proposed in `.ai/decisions/0005-host-portability.md`, awaiting the operator's
+acceptance before any code. Module plan: 2.1.0 `hosts` field and portable contract;
+2.2.0 OpenCode guard and permission floor; 2.3.0 Codex agents and forbidden flags;
+2.4.0 launcher host table. The measured answers to (a)-(f) are in the report.
 
 **Goal:** one rendered harness that Claude Code, Codex, and OpenCode each pick up
 correctly, rather than one harness that works fully in Claude Code and partially
@@ -401,7 +404,7 @@ No table of capabilities written from documentation.
   launcher? The launcher is the only script with a hard CLI binding, so it is the
   whole cost.
 
-**Blocked on:** 2.0.0 shipped and CI-confirmed. Revisit the moment module 7 closes.
+**Blocked on:** decision 0005 accepted.
 
 ## Harness v1.0 — four-phase upgrade
 
