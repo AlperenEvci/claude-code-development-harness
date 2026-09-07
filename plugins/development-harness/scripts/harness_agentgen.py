@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
     DEFAULT_CAPABILITY,
+    MODEL_INHERIT,
     capability_grant_errors,
     launch_command,
 )
@@ -128,7 +129,9 @@ def normalize_need(raw: Any) -> dict[str, Any]:
     if errors:
         raise AgentGenError(errors[0])
 
-    model = str(raw.get("model", "inherit")).strip() or "inherit"
+    tier = CAPABILITY_TIERS[capability]
+    default_model = str(tier["model"])
+    model = str(raw.get("model", default_model)).strip() or default_model
 
     return {
         "name": name,
@@ -136,6 +139,12 @@ def normalize_need(raw: Any) -> dict[str, Any]:
         "capability": capability,
         "duties": duties,
         "model": model,
+        # Tier-derived and not in ALLOWED_NEED_KEYS: a need may not name its own
+        # effort, for the same reason it may not name its own tools. A promoted
+        # agent is checked by the renderer's validator, which compares effort
+        # against the tier, so a need-supplied value would only ever be a way to
+        # fail that check later instead of here.
+        "effort": str(tier["effort"]),
         "writable_paths": writable,
         "approved_by_operator": approved,
     }
@@ -201,7 +210,7 @@ def build_definition(spec: dict[str, Any]) -> dict[str, Any]:
         "prompt": build_prompt(spec),
         "tools": list(tier["tools"]),
     }
-    if spec["model"] != "inherit":
+    if spec["model"] != MODEL_INHERIT:
         definition["model"] = spec["model"]
     return {spec["name"]: definition}
 
@@ -229,6 +238,7 @@ def build_markdown(spec: dict[str, Any]) -> str:
     lines += [
         f"permissionMode: {tier['permission_mode']}",
         f"model: {json.dumps(spec['model'])}",
+        f"effort: {json.dumps(spec['effort'])}",
         "maxTurns: 30",
         "---",
         "",
@@ -237,7 +247,7 @@ def build_markdown(spec: dict[str, Any]) -> str:
         f"## Session launch ({spec['capability']})",
         "",
         "```bash",
-        launch_command(spec["capability"]),
+        launch_command(spec["capability"], spec["model"], spec["effort"]),
         "```",
         "",
     ]
@@ -270,7 +280,10 @@ def cmd_emit(args: argparse.Namespace) -> int:
     payload = json.dumps(definition, ensure_ascii=False)
     if args.launch:
         # Printed, never run. Starting an agent is the operator's action.
-        print(f"{launch_command(spec['capability'])} --agents {json.dumps(payload)}")
+        print(
+            f"{launch_command(spec['capability'], spec['model'], spec['effort'])} "
+            f"--agents {json.dumps(payload)}"
+        )
         return 0
     print(payload if args.compact else json.dumps(definition, indent=2, ensure_ascii=False))
     return 0

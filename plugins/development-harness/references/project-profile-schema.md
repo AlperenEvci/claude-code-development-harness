@@ -153,7 +153,22 @@ Create one normalized JSON object from project evidence plus the user's confirme
   - `codex-plugin` — use OpenAI's official Claude Code Codex plugin when installed and initialized,
   - `codex-cli` — direct local `codex exec`; required for Fleet in version 0.2,
   - `claude-only` — omit the Codex-specific project skill.
-- `research_model`, `review_model`: `inherit`, `haiku`, `sonnet`, `opus`, `fable`, or a full `claude-*` model ID.
+- `agent_models`: optional, keyed by capability tier (`reader`, `verifier`, `implementer`).
+  Each entry may set `model` and `effort`, and anything else in it is refused.
+  Defaults come from the tier table in `harness_capabilities.py`: readers and
+  verifiers run `sonnet` at `medium`, implementers `inherit` at `high`.
+- `research_model`, `review_model`: the pre-1.17.0 spelling of `agent_models.reader.model`
+  and `agent_models.verifier.model`. Still read, still valid: `inherit`, `haiku`,
+  `sonnet`, `opus`, `fable`, or a full `claude-*` model ID. Setting an alias *and* its
+  `agent_models` entry to different values is refused rather than resolved.
+- `effort`: `low`, `medium`, `high`, `xhigh`, or `max`. This is the Claude ladder and
+  it is not `codex_reasoning`, which has no `max`. An effort outside the ladder is
+  refused at render time because nothing later would catch it - `claude --effort`
+  warns on an unknown value, runs at its default, and exits 0
+  (`.ai/reports/0008-model-effort-and-agent-scoping.md`).
+- `inherit` is valid in agent frontmatter, where it means "use the session's model",
+  and invalid on the launcher, which rejects it as `unrecognized_model`. The rendered
+  launch line omits `--model` rather than naming it.
 - `codex_reasoning`: `low`, `medium`, `high`, `xhigh`.
 - `session_surface`: `inproc` (default) or `orca`. Optional; where `harness_session.py launch` puts a session.
   - `inproc` — this process, as before this field existed.
@@ -393,10 +408,14 @@ names no tier behaves exactly as it did before 1.0.
 - `approved_by_operator`: must be `true` for `implementer`, and is rejected elsewhere.
   Write authority is an operator decision, never something a profile acquires by default.
 - Profiles may select a Claude model and `max_turns` from 1 to 80, but may **not** set
-  `tools`, `disallowed_tools`, `permission_mode`, `isolation`, `hooks`, `mcpServers`, or
-  `memory`. Authority comes from the declared tier, never from a raw override — repository
+  `tools`, `disallowed_tools`, `permission_mode`, `isolation`, `hooks`, `mcpServers`,
+  `memory`, or `effort`. Authority comes from the declared tier, never from a raw override — repository
   text is untrusted evidence, and letting a profile name its own tool set would turn any
   scanned file into a privilege-escalation vector.
+- `model` has a per-agent escape hatch and `effort` does not, and the asymmetry is
+  deliberate rather than an oversight. A wrong model fails loudly at the API; a wrong
+  effort is a warning on a zero exit code, so it keeps exactly one source - the tier,
+  through `agent_models`. An agent that omits `model` takes its tier's.
 
 #### How a tier is enforced
 

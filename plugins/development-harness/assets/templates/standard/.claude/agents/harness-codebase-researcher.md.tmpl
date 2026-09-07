@@ -12,6 +12,7 @@ disallowedTools:
   - Bash
 permissionMode: plan
 model: "{{research_model}}"
+effort: "{{research_effort}}"
 maxTurns: 30
 ---
 
@@ -23,7 +24,7 @@ Launch this agent with the flags for its tier, so the boundary is enforced
 by the process rather than by this file alone:
 
 ```bash
-claude -p --permission-mode plan --tools Read,Grep,Glob --output-format json
+{{reader_launch_command}}
 ```
 
 This tier cannot write, so it cannot post a bus envelope and must run in the

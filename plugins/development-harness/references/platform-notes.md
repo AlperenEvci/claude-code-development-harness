@@ -16,7 +16,13 @@ Claude Code discovers project skills under `.claude/skills/` and project subagen
 
 `CLAUDE.md` is concise persistent guidance. Procedures live in project skills; noisy exploration runs in isolated subagents.
 
-Subagent `model` may be a supported alias or `inherit`. Research and review agents use read-oriented tools.
+Subagent `model` may be a supported alias or `inherit`, and `effort` is one of
+`low`, `medium`, `high`, `xhigh`, `max`. Research and review agents use read-oriented
+tools. Two measured caveats (`.ai/reports/0008-model-effort-and-agent-scoping.md`,
+CLI 2.1.263): `inherit` is frontmatter-only and the launcher rejects it as
+`unrecognized_model`, so `--model` is omitted rather than set; and an unknown
+`--effort` produces a warning and a default-effort session on exit 0, so an effort is
+validated when the package is built, not when it runs.
 
 ## Codex transports
 

@@ -19,10 +19,12 @@ from typing import Any, NoReturn
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
+    ALLOWED_EFFORT,
     AUTOCOMPACT_MAX_TOKENS,
     AUTOCOMPACT_MIN_TOKENS,
     CAPABILITY_TIERS,
     DEFAULT_CAPABILITY,
+    MODEL_INHERIT,
     capability_grant_errors,
     launch_command,
 )
@@ -96,7 +98,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.16.0"
+GENERATOR_VERSION = "1.17.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -220,6 +222,105 @@ def normalize_greenfield_context(data: dict[str, Any]) -> None:
         )
 
     data["greenfield_context"] = context
+
+
+def validate_model(value: str, label: str) -> str:
+    """A model is `inherit`, a supported alias, or a full `claude-*` ID."""
+    model = str(value).strip()
+    if model not in ALLOWED_CLAUDE_MODEL_ALIASES and not re.fullmatch(
+        r"claude-[a-zA-Z0-9._-]+", model
+    ):
+        fail(
+            f"{label} must be inherit, a supported Claude alias, "
+            "or a full claude-* model ID"
+        )
+    return model
+
+
+def validate_effort(value: str, label: str) -> str:
+    """An effort outside the ladder is refused here, because nothing later will.
+
+    `claude --effort bogus` prints a warning, runs at the default effort, and exits
+    0 (`.ai/reports/0008-model-effort-and-agent-scoping.md`). A typo would therefore
+    render, validate, launch, and silently do the opposite of what the profile asked
+    for, with no signal anywhere. Render time is the only place this can be caught.
+    """
+    effort = str(value).strip().lower()
+    if effort not in ALLOWED_EFFORT:
+        fail(f"{label} must be one of {', '.join(ALLOWED_EFFORT)}")
+    return effort
+
+
+#: The pre-1.17.0 spelling of two of the six values, kept working. `research_model`
+#: named the reader tier's model and `review_model` the verifier's, back when those
+#: were the only two agents and neither had an effort.
+MODEL_ALIASES = {"reader": "research_model", "verifier": "review_model"}
+
+
+def normalize_agent_models(data: dict[str, Any]) -> None:
+    """Resolve every tier's model and effort, from `agent_models` or the tier table.
+
+    Three sources, in descending precedence: an explicit `agent_models.<tier>` entry,
+    the legacy alias for that tier, then the shared tier table's default. A profile
+    that sets both an entry and its alias to *different* values is refused rather
+    than resolved, because silently preferring one would mean the operator reads one
+    model in the profile and gets another in the agent file.
+
+    The aliases are written back so `{{research_model}}` and `{{review_model}}` keep
+    resolving for templates and for this repository's own installed contract.
+    """
+    supplied = data.get("agent_models", {})
+    if supplied is None:
+        supplied = {}
+    if not isinstance(supplied, dict):
+        fail("agent_models must be an object keyed by capability tier")
+
+    unknown = sorted(set(supplied) - set(CAPABILITY_TIERS))
+    if unknown:
+        fail(
+            "agent_models names unknown capability tiers: "
+            + ", ".join(unknown)
+            + f" (expected any of {', '.join(sorted(CAPABILITY_TIERS))})"
+        )
+
+    resolved: dict[str, dict[str, str]] = {}
+    for tier_name, tier in CAPABILITY_TIERS.items():
+        entry = supplied.get(tier_name, {})
+        if not isinstance(entry, dict):
+            fail(f"agent_models.{tier_name} must be an object")
+        unknown_keys = sorted(set(entry) - {"model", "effort"})
+        if unknown_keys:
+            fail(
+                f"agent_models.{tier_name} may only set model and effort, not "
+                + ", ".join(unknown_keys)
+            )
+
+        alias = MODEL_ALIASES.get(tier_name)
+        alias_value = data.get(alias) if alias else None
+        if "model" in entry:
+            model = validate_model(entry["model"], f"agent_models.{tier_name}.model")
+            if alias_value is not None:
+                aliased = validate_model(alias_value, alias)
+                if aliased != model:
+                    fail(
+                        f"{alias} is {aliased!r} but agent_models.{tier_name}.model "
+                        f"is {model!r}; set one or the other, not two that disagree"
+                    )
+        elif alias_value is not None:
+            model = validate_model(alias_value, alias)
+        else:
+            model = str(tier["model"])
+
+        effort = (
+            validate_effort(entry["effort"], f"agent_models.{tier_name}.effort")
+            if "effort" in entry
+            else str(tier["effort"])
+        )
+        resolved[tier_name] = {"model": model, "effort": effort}
+
+    data["agent_models"] = resolved
+    for tier_name, alias in MODEL_ALIASES.items():
+        data[alias] = resolved[tier_name]["model"]
 
 
 def normalize_agent_capabilities(data: dict[str, Any]) -> None:
@@ -443,16 +544,7 @@ def load_profile(path: Path) -> dict[str, Any]:
         fail("generated_language currently supports English only")
     data["generated_language"] = generated_language
 
-    for model_key in ("research_model", "review_model"):
-        model = str(data.get(model_key, "inherit")).strip()
-        if model not in ALLOWED_CLAUDE_MODEL_ALIASES and not re.fullmatch(
-            r"claude-[a-zA-Z0-9._-]+", model
-        ):
-            fail(
-                f"{model_key} must be inherit, a supported Claude alias, "
-                "or a full claude-* model ID"
-            )
-        data[model_key] = model
+    normalize_agent_models(data)
 
     if not isinstance(data.get("languages"), list):
         fail("languages must be an array")
@@ -472,8 +564,6 @@ def load_profile(path: Path) -> dict[str, Any]:
         "lint_command": "",
         "build_command": "",
         "full_gate_command": "",
-        "research_model": "inherit",
-        "review_model": "inherit",
         "network_access": "deny-by-default",
         "hooks_policy": "examples-only",
         "python_command": "python3",
@@ -1190,8 +1280,26 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
     greenfield = greenfield_context(profile)
     is_create = profile.get("harness_mode") == "create"
 
+    models = profile.get("agent_models", {})
+
+    def tuned(name: str, key: str) -> str:
+        return str(models.get(name, {}).get(key, CAPABILITY_TIERS[name][key]))
+
     return {
         **{k: str(v).lower() if isinstance(v, bool) else str(v) for k, v in profile.items()},
+        # `agent_models` is nested, and the spread above stringifies a dict into its
+        # repr. Every value a template may name is therefore flattened here, and the
+        # launch lines are built by the same function the session tooling uses.
+        "research_effort": tuned("reader", "effort"),
+        "review_effort": tuned("verifier", "effort"),
+        "implementer_model": tuned("implementer", "model"),
+        "implementer_effort": tuned("implementer", "effort"),
+        "reader_launch_command": launch_command(
+            "reader", tuned("reader", "model"), tuned("reader", "effort")
+        ),
+        "verifier_launch_command": launch_command(
+            "verifier", tuned("verifier", "model"), tuned("verifier", "effort")
+        ),
         **execution_context(profile),
         "stack_markdown": stack_markdown(profile),
         "important_paths_markdown": important_paths_section(profile, is_create),
@@ -1725,7 +1833,15 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
             agent.get("instructions", []),
             f"additional_agents[{index}].instructions",
         )
-        model = str(agent.get("model", "inherit")).strip() or "inherit"
+        # The tier supplies the model unless this agent names its own. `effort` has
+        # no per-agent escape hatch on purpose, and the asymmetry is deliberate: a
+        # wrong model fails loudly at the API, while a wrong effort is a warning on
+        # a zero exit code, so it stays tier-derived with exactly one source.
+        tier_models = profile.get("agent_models", {}).get(agent["capability"], {})
+        default_model = str(
+            tier_models.get("model", CAPABILITY_TIERS[agent["capability"]]["model"])
+        )
+        model = str(agent.get("model", default_model)).strip() or default_model
         if model not in ALLOWED_CLAUDE_MODEL_ALIASES and not re.fullmatch(
             r"claude-[a-zA-Z0-9._-]+", model
         ):
@@ -1733,6 +1849,9 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
                 f"additional_agents[{index}].model must be inherit, a supported "
                 "Claude alias, or a full claude-* model ID"
             )
+        effort = str(
+            tier_models.get("effort", CAPABILITY_TIERS[agent["capability"]]["effort"])
+        )
         forbidden_keys = {
             "tools",
             "disallowed_tools",
@@ -1742,6 +1861,7 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
             "hooks",
             "mcpServers",
             "memory",
+            "effort",
         }
         supplied = sorted(key for key in forbidden_keys if key in agent)
         if supplied:
@@ -1775,6 +1895,7 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
         frontmatter += [
             f"permissionMode: {tier['permission_mode']}",
             f"model: {yaml_string(model)}",
+            f"effort: {yaml_string(effort)}",
             f"maxTurns: {max_turns}",
             "---",
             "",
@@ -1814,7 +1935,7 @@ def write_dynamic_components(payload: Path, profile: dict[str, Any]) -> list[Pat
             "by the process rather than by this file alone:",
             "",
             "```bash",
-            launch_command(capability),
+            launch_command(capability, model, effort),
             "```",
             "",
             (

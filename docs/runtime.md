@@ -19,7 +19,7 @@ A **Standard** or **Fleet** harness installs seven stdlib-only scripts:
 
 ```text
 scripts/ai-harness/
-├── harness_capabilities.py   # the tier table: tools, permission mode, launch flags
+├── harness_capabilities.py   # the tier table: tools, permission mode, launch flags, model, effort
 ├── harness_session.py        # launch specifications, listing, teardown sweep
 ├── harness_bus.py            # append-only typed envelopes under .ai/bus/
 ├── harness_agentgen.py       # need -> spec -> validate -> emit an agent

@@ -171,7 +171,7 @@ When the user has no stack preference, propose a small number of viable options 
 Resolve:
 
 1. implementation transport: `codex-plugin`, `codex-cli`, or `claude-only`,
-2. researcher and reviewer model tiers,
+2. per-tier agent models and Claude effort (`agent_models`; defaults are fine),
 3. autonomy, network, sensitive-area, Git, and commit boundaries,
 4. whether Git is already initialized, should be initialized by the user after harness review, or should be deferred,
 5. setup depth:

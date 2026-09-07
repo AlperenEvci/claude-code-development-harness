@@ -58,6 +58,47 @@ def autocompact_flag(ceiling_tokens: int) -> list[str]:
         return []
     return ["--autocompact", str(ceiling_tokens)]
 
+
+#: The effort ladder `claude --effort` accepts, measured against CLI 2.1.263 in
+#: `.ai/reports/0008-model-effort-and-agent-scoping.md`.
+#:
+#: This is deliberately NOT the Codex ladder. `render_harness.ALLOWED_REASONING`
+#: is `{low, medium, high, xhigh}`; this one ends in `max`. The two are rendered
+#: near each other in `CLAUDE.md`, where `codex_reasoning_line` already calls its
+#: value "effort", so they are kept as separate constants with separate names to
+#: stop one being validated against the other's set.
+ALLOWED_EFFORT = ("low", "medium", "high", "xhigh", "max")
+
+#: The model value that means "use whatever model the session is already running".
+#: It is valid in agent frontmatter and *invalid* on the launcher, which rejects it
+#: as `unrecognized_model` - on a zero exit code. `model_effort_flags` is the single
+#: place that knows this, so the distinction cannot be forgotten at a call site.
+MODEL_INHERIT = "inherit"
+
+
+def model_effort_flags(model: str | None, effort: str | None) -> list[str]:
+    """Return the `--model` / `--effort` flags a tier contributes, or neither.
+
+    Shaped like `autocompact_flag`: a caller appends the result unconditionally
+    and gets nothing when there is nothing to say.
+
+    `inherit` yields no `--model`. Passing it through would fail the session at the
+    API with `unrecognized_model`, and it would fail only for the implementer tier,
+    whose default it is - the tier launched least often and debugged most expensively.
+    An effort outside `ALLOWED_EFFORT` is dropped here as a last resort; the real
+    gate is `validate_harness.py`, because the CLI only *warns* on an unknown value
+    and then runs at its default, so nothing downstream can tell it was discarded.
+    """
+    flags: list[str] = []
+    resolved_model = str(model or "").strip()
+    if resolved_model and resolved_model != MODEL_INHERIT:
+        flags += ["--model", resolved_model]
+    resolved_effort = str(effort or "").strip().lower()
+    if resolved_effort in ALLOWED_EFFORT:
+        flags += ["--effort", resolved_effort]
+    return flags
+
+
 CAPABILITY_TIERS: dict[str, dict[str, Any]] = {
     "reader": {
         "tools": ["Read", "Grep", "Glob"],
@@ -65,6 +106,8 @@ CAPABILITY_TIERS: dict[str, dict[str, Any]] = {
         "permission_mode": "plan",
         "writes": False,
         "launch_flags": ["--permission-mode", "plan", "--tools", "Read,Grep,Glob"],
+        "model": "sonnet",
+        "effort": "medium",
         "role": "a read-only project-domain researcher",
         "duties": [
             "Gather evidence; do not implement or edit.",
@@ -77,6 +120,8 @@ CAPABILITY_TIERS: dict[str, dict[str, Any]] = {
         "permission_mode": "plan",
         "writes": False,
         "launch_flags": ["--permission-mode", "plan", "--tools", "Read,Grep,Glob,Bash"],
+        "model": "sonnet",
+        "effort": "medium",
         "role": "an independent verifier",
         "duties": [
             "Run the configured gates and inspect the diff; do not edit files.",
@@ -97,6 +142,8 @@ CAPABILITY_TIERS: dict[str, dict[str, Any]] = {
             "--add-dir",
             "<scope>",
         ],
+        "model": "inherit",
+        "effort": "high",
         "role": "a bounded implementer",
         "duties": [
             "Work only against an explicit written contract.",
@@ -124,7 +171,11 @@ DEFAULT_CAPABILITY = "reader"
 EDIT_ACCEPTING_MODES = ("acceptEdits", "auto", "bypassPermissions")
 
 
-def launch_command(capability: str) -> str:
+def launch_command(
+    capability: str,
+    model: str | None = None,
+    effort: str | None = None,
+) -> str:
     """The command that launches this tier, in the dispatch mode it can report from.
 
     Not cosmetic. `claude --bg` refuses `--print`, so a background session has no
@@ -137,11 +188,26 @@ def launch_command(capability: str) -> str:
     So the dispatch mode follows from the tier, not from the caller's preference:
     a writing tier can run detached and post its own envelope; a read-only tier
     runs in the foreground and the orchestrator reads its structured output.
+
+    `model` and `effort` default to the tier's, and a caller passes them only to
+    reflect a profile that overrode one. They are arguments rather than entries in
+    `launch_flags` because `launch_flags` is a constant and these two are the only
+    part of a tier an operator may configure; putting a configurable value in the
+    shared table would mean the table no longer describes every package that uses
+    it. What the table still guarantees is that the documented command and the
+    command `harness_session.py` builds are assembled from one function.
     """
     tier = CAPABILITY_TIERS[capability]
+    tuning = " ".join(
+        model_effort_flags(
+            tier["model"] if model is None else model,
+            tier["effort"] if effort is None else effort,
+        )
+    )
+    tuning = f" {tuning}" if tuning else ""
     if tier["writes"]:
-        return f"claude --bg {tier['launch']}"
-    return f"claude -p {tier['launch']} --output-format json"
+        return f"claude --bg {tier['launch']}{tuning}"
+    return f"claude -p {tier['launch']}{tuning} --output-format json"
 
 
 def capability_grant_errors(

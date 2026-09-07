@@ -22,10 +22,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness_capabilities import (
+    ALLOWED_EFFORT,
     AUTOCOMPACT_MAX_TOKENS,
     AUTOCOMPACT_MIN_TOKENS,  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
     EDIT_ACCEPTING_MODES,
+    MODEL_INHERIT,
 )
 
 #: Kept in step with render_harness.SESSION_TOOL_SCRIPTS by a test, rather than
@@ -548,6 +550,98 @@ def check_declared_tier(rel: str, text: str, errors: list[str]) -> str | None:
                 errors.append(f"{capability} agent uses permission mode {mode}: {rel}")
 
     return capability
+
+
+def check_agent_tuning(
+    profile: dict[str, Any],
+    payload: Path,
+    errors: list[str],
+) -> None:
+    """Every agent's model and effort must be the ones the profile resolved.
+
+    Two different failures share this check. An `effort` outside the ladder is the
+    quieter one: `claude --effort` warns on an unknown value, runs at its default,
+    and exits 0, so a package can ship an effort that never takes effect and
+    nothing downstream will say so. And a `model` or `effort` that simply drifted
+    from the profile means the file an operator reads and the session that actually
+    runs disagree, which is the same class of defect the tier check exists for.
+
+    An agent may name its own `model` - the profile's `additional_agents` allows it -
+    so the model is checked against the tier default *or* an explicitly declared one.
+    `effort` has no such escape hatch and is compared to the tier's value alone.
+    """
+    models = profile.get("agent_models", {})
+    declared_models = {
+        component_name(agent.get("name")): str(agent["model"]).strip()
+        for agent in profile.get("additional_agents", [])
+        if isinstance(agent, dict) and "model" in agent
+    }
+
+    for path in sorted((payload / ".claude" / "agents").glob("*.md")):
+        rel = f".claude/agents/{path.name}"
+        text = path.read_text(encoding="utf-8")
+        parsed = frontmatter(text)
+        if parsed is None:
+            continue
+        match = re.search(r"^capability:[ \t]*(\S+)[ \t]*$", text, re.MULTILINE)
+        if match is None:
+            continue
+        capability = match.group(1).strip().strip("\"'")
+        tier = CAPABILITY_TIERS.get(capability)
+        if tier is None:
+            continue
+        tuning = models.get(capability, {})
+
+        effort = str(parsed.get("effort", "")).strip()
+        if not effort:
+            errors.append(f"agent declares no effort: {rel}")
+        elif effort not in ALLOWED_EFFORT:
+            errors.append(
+                f"agent effort {effort!r} is not one of "
+                f"{', '.join(ALLOWED_EFFORT)}, and the CLI would ignore it "
+                f"without failing: {rel}"
+            )
+        else:
+            expected_effort = str(tuning.get("effort", tier["effort"]))
+            if effort != expected_effort:
+                errors.append(
+                    f"agent effort {effort!r} does not match the {capability} "
+                    f"tier's {expected_effort!r}: {rel}"
+                )
+
+        model = str(parsed.get("model", "")).strip()
+        if not model:
+            errors.append(f"agent declares no model: {rel}")
+            continue
+        expected_model = declared_models.get(
+            path.stem, str(tuning.get("model", tier["model"]))
+        )
+        if model != expected_model:
+            errors.append(
+                f"agent model {model!r} does not match the profile's "
+                f"{expected_model!r}: {rel}"
+            )
+
+
+def check_launch_line_is_runnable(payload: Path, errors: list[str]) -> None:
+    """No agent may document a launch line that names `inherit` as a model.
+
+    `inherit` is valid in frontmatter, where it means "use the session's model",
+    and invalid on the launcher, which rejects it as `unrecognized_model` - on a
+    zero exit code, measured in
+    `.ai/reports/0008-model-effort-and-agent-scoping.md`. The renderer already
+    omits the flag through `model_effort_flags`; this check is what keeps a
+    hand-edited or hand-added agent file from reintroducing it, and it is cheap
+    because the failure it prevents is a session that dies at the API for a reason
+    the frontmatter says is legal.
+    """
+    for path in sorted((payload / ".claude" / "agents").glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        if f"--model {MODEL_INHERIT}" in text:
+            errors.append(
+                "agent documents `--model inherit`, which the launcher rejects as "
+                f"unrecognized_model: .claude/agents/{path.name}"
+            )
 
 
 def check_permission_bypass(payload: Path, errors: list[str]) -> None:
@@ -1463,6 +1557,8 @@ def main() -> None:
             errors.append(f"manual generated project skill is model-invocable: {rel}")
 
     check_agent_capabilities(profile, payload, errors)
+    check_agent_tuning(profile, payload, errors)
+    check_launch_line_is_runnable(payload, errors)
 
     codex_rel = ".claude/skills/harness-codex-delegate/SKILL.md"
     codex_path = payload / codex_rel

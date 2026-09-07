@@ -1,5 +1,88 @@
 # Changelog
 
+## 1.17.0 - 2026-09-07
+
+### Added - every agent carries a model and an effort, and the launcher knows what `inherit` means
+
+Module 4 of the Harness 2.0 roadmap. Until now two profile fields, `research_model`
+and `review_model`, tuned the two generated agents and nothing else; a synthesized
+agent, a profile-declared one, and every launched session took whatever the CLI
+happened to default to. The capability tier table now carries a `model` and an
+`effort` alongside the tools and permission mode it already held, so the same table
+that decides what an agent may *do* decides what it thinks *with*.
+
+Readers and verifiers run `sonnet` at `medium` effort: bounded, well-specified work,
+launched often. Implementers run `inherit` at `high`: they work against a contract
+the main session wrote, and they are the one tier whose mistakes land in the tree.
+A profile overrides any of it through `agent_models`, keyed by tier.
+
+**`research_model` and `review_model` still work.** They are now the older spelling
+of `agent_models.reader.model` and `agent_models.verifier.model`. A profile that sets
+an alias *and* its `agent_models` entry to different values is refused rather than
+resolved, because silently preferring one would mean the operator reads one model in
+the profile and gets another in the agent file.
+
+### Three findings that changed the design
+
+Measured against CLI 2.1.263 before any of this was written, in
+`.ai/reports/0008-model-effort-and-agent-scoping.md`.
+
+**`inherit` is a frontmatter word, not a flag value.** It is valid in an agent file,
+where it means "use the session's model", and the launcher rejects it as
+`unrecognized_model`. So `model_effort_flags` omits `--model` rather than forwarding
+the word, the same way `autocompact_flag` returns nothing rather than an empty flag.
+Forwarding it would have failed only on the implementer tier - the one launched least
+often and debugged most expensively - and it would have failed on a zero exit code.
+The validator also refuses any agent file that documents `--model inherit`, which is
+what stops a hand-edited launch block from reintroducing it.
+
+**An unknown `--effort` is a warning, not an error.** `claude --effort bogus` prints a
+warning, runs at the default effort, and exits 0. A typo in a profile would therefore
+render, validate, launch, and silently do the opposite of what was asked, with no
+signal anywhere in the chain. Effort is validated when the package is built, because
+that is the only place it can be. The constant is deliberately separate from
+`ALLOWED_REASONING`: the Claude ladder ends in `max` and the Codex one does not, and
+the two are rendered three lines apart in `CLAUDE.md`, so each is now labelled with
+the tool it belongs to.
+
+**`tools: Agent(<readers>)` was dropped rather than shipped.** The roadmap called for
+reader agents to declare a parenthesized `Agent(...)` list so a reader could only
+delegate to another reader. The specifier parses and restricts nothing: a probe
+declaring `Agent(probe-inner)` spawned `general-purpose` successfully. Shipping it
+would have put a string in generated frontmatter that the platform ignores and then
+had the validator check the string was present - a gate on a fiction, which is worse
+than no gate, because the package would report a containment property it does not
+have. Same shape as 1.16.0's `disable-model-invocation` finding: the instruction came
+from documentation, the measurement contradicted it, and the measurement won.
+
+A related measurement is recorded for whenever reader-to-reader scoping is attempted
+again: the available-agent-types listing does not reach a subagent, so a grant
+expressed only in frontmatter is one the grantee cannot discover. It has to be in the
+prompt.
+
+### Changed
+
+- Generated agent frontmatter gains `effort:`, and the `## Session launch` block is
+  now rendered from the same function `harness_session.py` uses rather than being a
+  literal copy in the template. A file cannot document a launch other than its own.
+- `harness_session.py launch` passes `--model` and `--effort` derived from the tier.
+  `--restricted` is unchanged.
+- Synthesized agents (`harness_agentgen.py`) take the tier's model and effort. A need
+  may not name its own effort, for the same reason it may not name its own tools.
+- Profile-declared agents may still name a `model`; `effort` is tier-derived only. The
+  asymmetry is deliberate - a wrong model fails loudly at the API, a wrong effort does
+  not fail at all - and `effort` joins the list of keys a profile may not override.
+- `check_installed.py` reports an agent named like a generated one that the profile
+  does not declare, and warns about an effort the CLI would ignore. Both are warnings:
+  after installation the files are live and an operator may have tuned them, but a
+  setting that silently does nothing is still worth saying out loud.
+
+### Verification
+
+Full gate green. Twelve new tests in `AgentTuningTests`, including six mutations of a
+rendered agent's tuning and three mutations of the shared table, each caught. The
+frozen v0.2 fixtures still render and validate.
+
 ## 1.16.0 - 2026-09-07
 
 ### Changed - the always-loaded contract is under 200 lines, and now it has to be
