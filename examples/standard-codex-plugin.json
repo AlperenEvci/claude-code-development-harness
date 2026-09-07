@@ -27,6 +27,8 @@
   "lint_command": "npm run lint",
   "build_command": "npm run build",
   "full_gate_command": "npm run lint && npm run typecheck && npm test && npm run build",
+  "smoke_command": "npm run build -- --dry-run",
+  "smallest_check_command": "npm test -- --bail",
   "main_orchestrator": "claude-code",
   "implementation_delegate": "codex-plugin",
   "research_model": "opus",

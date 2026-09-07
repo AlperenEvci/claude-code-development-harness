@@ -98,7 +98,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.18.0"
+GENERATOR_VERSION = "1.19.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -519,6 +519,9 @@ def load_profile(path: Path) -> dict[str, Any]:
             "use standard or fleet, or leave the policy at examples-only"
         )
 
+    for key in HOOK_COMMAND_KEYS:
+        data[key] = validate_hook_command(data.get(key), key)
+
     python_command = str(data.get("python_command", "python3")).strip()
     if python_command not in ALLOWED_PYTHON_COMMANDS and not Path(
         python_command
@@ -564,6 +567,8 @@ def load_profile(path: Path) -> dict[str, Any]:
         "lint_command": "",
         "build_command": "",
         "full_gate_command": "",
+        "smoke_command": "",
+        "smallest_check_command": "",
         "network_access": "deny-by-default",
         "hooks_policy": "examples-only",
         "python_command": "python3",
@@ -617,6 +622,38 @@ def load_profile(path: Path) -> dict[str, Any]:
         data["fleet_warning"] = ""
 
     return data
+
+
+#: The two profile commands a guarded harness executes without being asked:
+#: `smoke_command` at session start, `smallest_check_command` at stop. They are
+#: rendered into `.claude/settings.json` as hook arguments rather than read from
+#: the profile at runtime. Measured on 2.1.263 (`.ai/reports/0010`, probes G and
+#: H): the platform refuses to let a session edit the settings file and does not
+#: protect the profile, so settings is the one place an executed string cannot be
+#: planted by an agent that holds `Write`.
+HOOK_COMMAND_KEYS = ("smoke_command", "smallest_check_command")
+MAX_HOOK_COMMAND_CHARS = 500
+
+
+def validate_hook_command(value: Any, key: str) -> str:
+    """One line, bounded, and nothing that could carry a second command in.
+
+    The string is executed through a shell by a hook, so it is held to a shape
+    a reviewer can read at a glance. A newline would hide a second command
+    behind the first; a control character would hide anything.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        fail(f"{key} must be a string")
+    text = value.strip()
+    if not text:
+        return ""
+    if len(text) > MAX_HOOK_COMMAND_CHARS:
+        fail(f"{key} is longer than {MAX_HOOK_COMMAND_CHARS} characters")
+    if any(ch in text for ch in "\r\n\x00") or any(ord(ch) < 32 for ch in text):
+        fail(f"{key} must be a single line with no control characters")
+    return text
 
 
 def bullets(items: list[Any], empty: str) -> str:
@@ -740,6 +777,16 @@ def commands_markdown(profile: dict[str, Any]) -> str:
             rows.append(f"- **{label}:** `{value}`")
         else:
             rows.append(f"- **{label}:** not configured; discover before relying on it")
+    # The hook commands are listed only when set. An absent one renders no row,
+    # because "not configured" here would read as an instruction to discover a
+    # command that a hook would then never run.
+    for label, key, when in (
+        ("Smoke", "smoke_command", "run by the SessionStart hook"),
+        ("Smallest check", "smallest_check_command", "run by the Stop hook on a changed tree"),
+    ):
+        value = str(profile.get(key, "")).strip()
+        if value:
+            rows.append(f"- **{label}:** `{value}` ({when})")
     return "\n".join(rows)
 
 
@@ -1071,6 +1118,9 @@ HOOK_SCRIPTS = (
     "hook_session_start.py",
     # `PreCompact`: records the boundary before the transcript is truncated.
     "hook_precompact.py",
+    # `Stop`: runs the smallest check on a changed tree and refuses the stop
+    # once when it fails. Registered only when the profile names a check.
+    "hook_stop.py",
 )
 
 #: The rendered settings file that wires the hooks up. Written from the common
@@ -1987,6 +2037,56 @@ def write_session_tools(payload: Path, profile: dict[str, Any]) -> list[Path]:
     return written
 
 
+def wire_command_hooks(payload: Path, profile: dict[str, Any]) -> None:
+    """Put the profile's two commands into the settings file, as hook args.
+
+    The template registers the three hooks every guarded harness gets. This
+    adds what depends on the profile: `--smoke <command>` on the `SessionStart`
+    handler, and a `Stop` handler carrying `--check <command>`, each only when
+    the profile names one. A `Stop` hook with nothing to run would be a
+    registered event that always exits 0 - harmless, and misleading in the
+    file an operator reads to learn what fires.
+    """
+    if not hooks_are_active(profile):
+        return
+    settings = payload / HOOK_SETTINGS_PATH
+    if not settings.is_file():
+        fail(f"{HOOK_SETTINGS_PATH} was not rendered for a guarded profile")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+    interpreter = str(profile.get("python_command", "python3"))
+
+    smoke = str(profile.get("smoke_command", "")).strip()
+    if smoke:
+        for group in hooks.get("SessionStart", []):
+            for handler in group.get("hooks", []):
+                handler["args"] = [*handler["args"], "--smoke", smoke]
+
+    check = str(profile.get("smallest_check_command", "")).strip()
+    if check:
+        hooks["Stop"] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": interpreter,
+                        "args": [
+                            "${CLAUDE_PROJECT_DIR}/scripts/ai-harness/hook_stop.py",
+                            "--check",
+                            check,
+                        ],
+                        # The validator's ceiling. The hook's own budget for
+                        # the check is fifty, so a slow check is reported as
+                        # not verified rather than killed by the platform.
+                        "timeout": 60,
+                    }
+                ]
+            }
+        ]
+
+    write_generated(settings, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
 def write_hook_scripts(payload: Path, profile: dict[str, Any]) -> list[Path]:
     """Copy the hook scripts, on exactly the terms the session tooling gets.
 
@@ -2621,6 +2721,7 @@ def main() -> None:
     write_workflows(payload, profile)
     write_session_tools(payload, profile)
     write_hook_scripts(payload, profile)
+    wire_command_hooks(payload, profile)
     write_progress_ledger(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))

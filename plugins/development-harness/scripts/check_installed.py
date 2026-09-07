@@ -64,6 +64,7 @@ HOOK_REQUIRED = [
     "scripts/ai-harness/hook_guard.py",
     "scripts/ai-harness/hook_session_start.py",
     "scripts/ai-harness/hook_precompact.py",
+    "scripts/ai-harness/hook_stop.py",
 ]
 
 FLEET_REQUIRED = [
@@ -453,11 +454,10 @@ def main() -> None:
             # The settings file may be the operator's own, merged by hand after
             # the installer reported a conflict. Report what is actually wired
             # rather than assuming the rendered file survived.
-            missing = [
-                name
-                for name in ("hook_guard.py", "hook_session_start.py")
-                if name not in text
-            ]
+            wired = ["hook_guard.py", "hook_session_start.py"]
+            if str(profile.get("smallest_check_command", "")).strip():
+                wired.append("hook_stop.py")
+            missing = [name for name in wired if name not in text]
             if missing:
                 warnings.append(
                     "hooks_policy is guarded but .claude/settings.json registers "
@@ -473,7 +473,7 @@ def main() -> None:
         )
 
     if hooks_policy == "guarded":
-        for name in ("hook_guard.py", "hook_session_start.py"):
+        for name in ("hook_guard.py", "hook_session_start.py", "hook_stop.py"):
             if not (root / "scripts/ai-harness" / name).is_file():
                 errors.append(
                     f"hooks_policy is guarded but scripts/ai-harness/{name} is "

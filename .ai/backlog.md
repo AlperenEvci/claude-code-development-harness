@@ -264,7 +264,7 @@ answer questions this repository currently answers by argument - which agents a
 session actually reaches for, and whether the 1.14.0 guard fired. Cheap to carry,
 but a scope addition, so it belongs in a decision rather than a quiet extra field.
 
-### Module 6 - Loop closure (1.19.0) - measured, not started
+### Module 6 - Loop closure (1.19.0) - DONE, pending CI
 
 Measured first, against CLI 2.1.263, in `.ai/reports/0010-stop-hook-smoke-test.md`.
 Six probes: the `Stop` payload, both block channels, and the runaway in each. The

@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.19.0 - 2026-09-07
+
+### Added - the smallest check runs whether or not anyone remembers it
+
+Module 6 of the Harness 2.0 roadmap. `AGENTS.md` asks for "the smallest check that
+would fail if you got it wrong" before reporting, and that is the instruction most
+often skipped, because it arrives at the moment the work already feels finished. Two
+profile fields turn it into a mechanism:
+
+- `smoke_command` runs at session start, from `hook_session_start.py`, and prints one
+  line - `SMOKE  pass`, `SMOKE  FAIL exit N ... last: <line>`, or `SMOKE  not run` on
+  a timeout - so a session learns in its first second whether the tree it inherited
+  even runs. It is not re-run after compaction.
+- `smallest_check_command` runs at stop, from the new `hook_stop.py`, only when the
+  tree changed since the check last passed. When it fails, the stop is refused once
+  with the failing tail in front of the model.
+
+`harness_progress.py claim <id>` and `release` record the one item a session is on,
+under `.ai/runs/current-task.json`. A second claim is refused rather than replacing
+the first; `--brief` opens with the claim; `check` reports one that has stopped
+looking like work in progress. A claim is a statement, not a lock.
+
+### Three findings that changed the design
+
+Measured against CLI 2.1.263 before any of this was written, in
+`.ai/reports/0010-stop-hook-smoke-test.md`, eight probes.
+
+**`stop_hook_active` is the whole hook.** It is `false` on the first stop of a prompt
+and `true` on every stop after it, and the platform caps the block loop at nine - not
+the eight the roadmap wrote. A run that hits the cap returns an **empty** result with
+`subtype: "success"`, `is_error: false`, `stop_reason: "end_turn"`, and a real bill,
+indistinguishable in the result JSON from a clean finish except for the blank. So a
+hook that kept blocking would not fail loudly; it would turn the answer into nothing.
+The flag is checked before the profile is read or anything runs. One block per prompt.
+
+**The command is a hook argument, not a profile read.** With `Edit` explicitly
+allowed, a session's edit of `.claude/settings.json` was refused by the platform
+while the same edit of an ordinary file went through. `project-profile.json` is an
+ordinary file. Both commands are therefore rendered into the settings file as
+`--smoke` and `--check` arguments, and the validator refuses a settings file whose
+argument differs from the profile's field byte for byte. A hook that read its command
+from the profile at runtime would let any agent holding `Write` choose what runs.
+
+**A correction to 1.18.0.** `harness_session.py report` now refuses to write an
+envelope for an empty result on exit 0, because that is exactly what a run cut short
+by the loop guard returns - a success record with a cost and nothing in it.
+
+### Changed
+
+- The roadmap's `commands.smoke` / `commands.smallest_check` became flat
+  `smoke_command` / `smallest_check_command` keys: the profile has no `commands`
+  object and every other command is a flat `*_command` key.
+- A guarded settings file may register `Stop`; a handler may carry its script and at
+  most the one flag its script takes; `hook_stop.py` joins the byte-identical hook
+  set in the renderer, the validator, and the installed checker.
+- Hook commands are one line of at most 500 characters with no control characters;
+  the renderer refuses anything else. Both are optional and render no hook when absent.
+- `hook_stop.py` fails open: no git, no command, a check that cannot finish in fifty
+  seconds, each exits 0 with one line saying what was not verified.
+
 ## 1.18.0 - 2026-09-07
 
 ### Added - an envelope records what the run was billed, and the reader says so honestly

@@ -34,6 +34,8 @@ number. Each probe ran `claude -p ... --model haiku --output-format json`.
 | D | 20, exit 2 (repeat of B) | `''`, 10 turns, cost 0.0354 USD | 9 |
 | E | 1, JSON `decision: block` | `PROBE-SAW-JSON-BLOCK`, 2 turns | 2 |
 | F | 20, JSON `decision: block` | `''`, 10 turns, `subtype: success` | 9 |
+| G | edit `.claude/settings.json` with `--allowedTools Read,Edit,Write` | the `Edit` was **denied** by the platform; `permission_denials` carried it; the hook set was unchanged | 1 |
+| H | control: edit `notes.txt` with the same flags | `EDITED`; the file changed; no denial | 1 |
 
 ## Findings
 
@@ -75,6 +77,15 @@ number. Each probe ran `claude -p ... --model haiku --output-format json`.
    nothing in it. Both channels behave this way (B, D, F), and the count was stable
    across two runs.
 
+5. **The settings file is a platform-protected boundary; the profile is not.** With
+   `Edit` explicitly allowed, a session's edit of `.claude/settings.json` was refused
+   (G) while the same edit of an ordinary file went through (H). Nothing protects
+   `.ai/harness/project-profile.json` in the same way. So the command a hook executes
+   belongs in settings, as a hook argument rendered at install time. A hook that read
+   it from the profile at runtime would let any agent holding `Write` choose what runs
+   at stop. Whether a *live* edit of the settings file would be picked up mid-session
+   was not measured, because the edit could not be made.
+
 ## Consequences
 
 - **Honoring `stop_hook_active` is not a nicety, it is the whole hook.** A `Stop` hook
@@ -93,3 +104,9 @@ number. Each probe ran `claude -p ... --model haiku --output-format json`.
   the thing that catches a hook written wrong, not a budget to spend.
 - The second block channel is documented in `references/hooks.md` rather than used, so
   a maintainer choosing exit 2 later knows it was a choice.
+- **`smoke_command` and `smallest_check_command` are rendered into
+  `.claude/settings.json` as `--smoke` and `--check` arguments**, and the validator
+  refuses a settings file whose argument differs from the profile's field. The roadmap
+  wrote them as `commands.smoke` and `commands.smallest_check`; the profile has no
+  `commands` object, every other command is a flat `*_command` key, and a new shape for
+  two fields would have been a second convention for no reason.

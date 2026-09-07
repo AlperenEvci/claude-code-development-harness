@@ -405,6 +405,23 @@ def load_ledger(root: Path) -> dict[str, Any]:
     }
 
 
+def load_claim(root: Path) -> dict[str, Any] | None:
+    """The item a session claimed, or None. Read only; `harness_progress.py` owns it."""
+    path = root / ".ai" / RUNS_DIRNAME / "current-task.json"
+    data, error = load_json(path)
+    if error is not None or not isinstance(data, dict):
+        return None
+    if data.get("claim_version") != 1 or not isinstance(data.get("item"), str):
+        return None
+    return {
+        "item": data["item"],
+        "title": str(data.get("title") or ""),
+        "claimed_at": data.get("claimed_at"),
+        "session_id": data.get("session_id"),
+        "path": f".ai/{RUNS_DIRNAME}/current-task.json",
+    }
+
+
 def load_compaction(root: Path) -> dict[str, Any] | None:
     """The newest compaction boundary log, or None.
 
@@ -776,6 +793,7 @@ def build_model(root: Path) -> dict[str, Any]:
         "envelope_total": len(entries),
         "cost": cost_view(entries, units),
         "ledger": load_ledger(root),
+        "claim": load_claim(root),
         "checkpoints": checkpoints,
         "compaction": load_compaction(root),
         "context": latest_context(checkpoints),
@@ -1309,6 +1327,14 @@ def render_brief(model: dict[str, Any]) -> str:
     out.append("")
 
     ledger = model["ledger"]
+    claim = model.get("claim")
+    if claim:
+        proven = any(
+            item.get("id") == claim["item"] and item.get("passes")
+            for item in ledger.get("items", [])
+        )
+        state = "already proven; release it" if proven else f"since {claim.get('claimed_at') or '?'}"
+        out.append(f"CLAIMED  {claim['item']}  {claim['title']}  ({state})".rstrip())
     if not ledger.get("present"):
         out.append("UNPROVEN  no ledger")
     else:

