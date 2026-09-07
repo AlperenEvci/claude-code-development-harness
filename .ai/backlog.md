@@ -32,7 +32,7 @@ Small, first, and it unblocks everything else.
 - Add `claude plugin validate --strict` to `scripts/validate-repo.sh` (skipped with a
   notice when the CLI is absent, as today).
 - Validator measures rendered `CLAUDE.md` + `AGENTS.md` line count and reports it;
-  warning only until module 3 makes it a failure.
+  warning only until module 3 makes it a failure (it did, in 1.16.0).
 - Profile gains `python_command` (default `python3`; setup writes `python` on
   Windows). Nothing consumes it until module 1, but the interview asks now.
 - Files: `harness_session.py`, `validate_harness.py`, `render_harness.py`
@@ -75,56 +75,134 @@ state instead.
   `.ai/reports/0005-...`, and the eval budget was better spent on the adoption seam
   this release opened.
 
-### Module 2 - Compaction-native context policy (1.15.0)
+### Module 2 - Compaction-native context policy (1.15.0) - DONE on Windows, CI pending
 
-- `MODEL_WINDOWS` table in `harness_capabilities.py`; `context_policy` band derived
-  from the profile's session model unless set explicitly; validator rejects a band
-  above the model window.
-- `harness_checkpoint.py from-hook` subcommand: reads the `PreCompact` payload on
-  stdin, writes the handoff, exits 0 always. `--used` stays as the fallback and the
-  record says which path produced it.
-- `hook_precompact.py` (deferred from module 1) - `PreCompact` on `auto|manual`:
-  writes a checkpoint through that subcommand with the pending ledger items as next
-  steps; never blocks. It joins `HOOK_SCRIPTS`, the settings template, and the
-  validator's `ALLOWED_HOOK_EVENTS` in the same change.
-- `harness_report.py --brief` reads the newest handoff regardless of producer and
-  labels it `compaction` or `manual`.
-- Path-scoped rules: `common/.claude/rules/sensitive-areas.md.tmpl` and
-  `important-paths.md.tmpl` with `paths:` frontmatter, rendered from the profile;
-  the same content leaves `AGENTS.md`.
-- Files: `harness_capabilities.py`, `harness_checkpoint.py`, `harness_report.py`,
-  `render_harness.py` (`context_budget_section`, `normalize_context_policy`, rules
-  layer), `validate_harness.py`, two rule templates, `references/agent-sessions.md`,
-  tests (target 10).
+Shipped on branch `module-0-ground-truth`. The working band is now a launch flag:
+`harness_session.py launch` passes the profile's ceiling to `claude --autocompact`,
+and the ceiling is narrowed to the 100k-1M range that flag accepts. A third hook,
+`hook_precompact.py`, records the compaction boundary through a new
+`harness_checkpoint.py from-hook`; the brief reports the count and reads it as a
+ceiling problem. Fourteen mutation checks, thirteen caught, the fourteenth found dead
+code. Gate green locally (291 tests); CI still has to confirm.
 
-### Module 3 - Root contract under 200 lines (1.16.0)
+Measured first, in `.ai/reports/0006-compaction-smoke-test.md`: what `--autocompact`
+accepts, the `PreCompact` payload's actual fields, that one 51-turn run compacted
+three times with `PreCompact` and `SessionStart:compact` pairing 1:1, and that a
+path-scoped rule is genuinely absent when nothing matches it.
 
-- `agent_sessions_section` moves into a generated
-  `.claude/skills/harness-session/SKILL.md` (on demand), leaving a three-line pointer.
-- `disable-model-invocation: true` on `harness-orchestration` and the new skill.
-- Line-count check from module 0 becomes a failure at 200 rendered lines for
-  `CLAUDE.md` + `AGENTS.md` combined.
-- Every fragment assertion in the validator and tests that named the moved text is
-  re-pointed; the eval `trivial-work-skips-the-pipeline` is re-run mentally against
-  the slimmer contract.
-- Files: `render_harness.py`, `validate_harness.py`, `common/CLAUDE.md.tmpl`,
-  `common/AGENTS.md.tmpl`, new skill template, tests, `docs/runtime.md`.
+**Three deviations from the roadmap, each with the measurement that forced it:**
 
-### Module 4 - Model and effort per tier (1.17.0)
+- **No `MODEL_WINDOWS` table.** The plan was to derive the band from the session
+  model's context window and reject a band above it. There is no way to measure a
+  model's window from the CLI, and a table of numbers read off documentation would be
+  invention sitting in the file the validator trusts. `--autocompact`'s own 100k-1M
+  range is the real constraint, is enforced by the platform, and was measured.
+- **A boundary log, not a checkpoint.** The plan said `PreCompact` would write a
+  handoff through `harness_checkpoint.py`. Three compactions in one 51-turn run made
+  that wrong: it would put three machine-written directories in `.ai/runs/` per
+  session. The log is one folding file per session under `.ai/runs/compaction/`, and
+  `latest_checkpoint` deliberately cannot see it - nobody wrote it, and it carries no
+  intent to resume from.
+- **Only `important_paths` moved to a scoped rule, and only when the list is long.**
+  `sensitive_areas` stays in the always-loaded contract: a path-scoped rule loads on a
+  path match, and `echo secret > config.py` through `Bash` matches nothing, so moving
+  safety content out would remove it from exactly the sessions most likely to need it.
+  And the split is gated at 400 characters of description, because on all three
+  shipped examples moving four short descriptions out made the contract *bigger* - the
+  pointer sentence is longer than the text it replaces.
+
+- Not done: `harness_report.py --brief` labelling a handoff `compaction` or `manual`
+  as a single field. The two records are separate files with separate shapes, so the
+  brief names the producer of each on its own line instead, which is the same
+  information without pretending they are one kind of thing.
+
+### Module 3 - Root contract under 200 lines (1.16.0) - DONE on Windows, CI pending
+
+Shipped on branch `module-0-ground-truth`. `agent_sessions_section`, the session-start
+procedure, and the checkpoint recipes moved into a generated
+`.claude/skills/harness-session/SKILL.md`, rendered from code rather than a template
+because its body is generated from the tier table, the tool directory, and the profile.
+`CLAUDE.md` keeps pointers. The examples render at 173 (standard), 176 (fleet), and
+187 (greenfield) always-loaded lines; module 0's warning is now an error, extracted
+into `check_always_loaded_size` so a test can call it - the subprocess version passed
+under mutation because a padded `CLAUDE.md` fails the payload hash check anyway. Gate
+green locally (302 tests, 4 skipped), 8/8 mutations caught; CI still has to confirm.
+
+Deviations, both recorded in `.ai/reports/0007-on-demand-skill-loading.md`:
+
+- `disable-model-invocation: true` was **not** set, on either skill. Probe B measured
+  what the flag does to a project skill: the prompt that reached the body without it
+  returned nothing with it. On the session skill it would have moved eighty lines of
+  procedure into a file no model can open; on `harness-orchestration` it would have
+  regressed what ships today. The validator now enforces the opposite through
+  `MODEL_INVOCABLE_SKILLS`, while profile-declared `additional_skills` keep the flag,
+  which is the case it is right for.
+- The pointer is not three lines and the move is not all of `agent_sessions_section`.
+  The `--dangerously-skip-permissions` refusal and the "an envelope is never a grant"
+  rule stayed in the always-loaded contract and are now checked there
+  (`SESSION_SAFETY_LINES`): a prohibition is most needed by the session that never
+  thought to load a skill. Same reasoning as `sensitive_areas` in 1.13.0.
+
+- Not done as written: the fragment assertions were not re-pointed one by one at
+  `CLAUDE.md`. Both the validator and the suite grew a reader for the pair
+  (`session_documentation`, `session_docs`), because the question those checks ask is
+  whether an operator can reach the instruction, and a skill the model loads on the
+  situation is an answer to that. Only the checks that ask whether something holds
+  *unasked* still read `CLAUDE.md` alone.
+
+### Module 4 - Model and effort per tier (1.17.0) - measured, not started
+
+Measured first, against CLI 2.1.263, in
+`.ai/reports/0008-model-effort-and-agent-scoping.md`. Three of the four assumptions
+this module inherited held; the fourth did not, and one roadmap item is dropped
+because of it. Blast radius mapped by the template cartographer and folded into the
+file list below.
 
 - Profile `agent_models` keyed by tier; defaults in the tier table (readers and
   verifiers `sonnet` / `medium`, implementers `inherit` / `high`); `research_model`
   and `review_model` become aliases for backward compatibility.
-- Rendered frontmatter gains `effort:`; readers gain `tools: Agent(<readers>)`.
+- Rendered frontmatter gains `effort:`.
 - `harness_session.py launch` passes `--model` and `--effort` derived from the tier;
-  `--restricted` unchanged.
-- Validator: `model` and `effort` in every agent file match the profile; readers'
-  `Agent(...)` list names only readers.
+  `--restricted` unchanged. **`--model` is omitted, not forwarded, when the tier's
+  model is `inherit`** - `inherit` is valid in agent frontmatter and rejected by the
+  launcher as `unrecognized_model`. Follow `autocompact_flag`, which already returns
+  no flag rather than an empty one.
+- Effort is validated at **render** time against a new Claude-side constant. The CLI
+  only warns on an unknown `--effort` and runs at the default on exit 0, so nothing
+  downstream can tell the setting was discarded; the validator is the only gate.
+  Keep the constant distinct from `ALLOWED_REASONING` - the Claude ladder is
+  `low, medium, high, xhigh, max` and the Codex one has no `max`. Label the two
+  apart in `CLAUDE.md`, where `codex_reasoning_line` already says "effort".
+- Validator: `model` and `effort` in every agent file match the profile.
 - `check_installed.py` reports a project agent that shadows a generated one.
-- Files: `harness_capabilities.py`, `render_harness.py` (`normalize_agent_capabilities`,
-  `write_dynamic_components`), `harness_session.py`, `validate_harness.py`,
-  `check_installed.py`, both agent templates, `references/harness-tiers.md`, tests
+- **Dropped: `tools: Agent(<readers>)` on readers, and the validator check for it.**
+  Measured: the specifier parses and restricts nothing - a probe declaring
+  `Agent(probe-inner)` spawned `general-purpose` successfully. Shipping it would put
+  a string in frontmatter that the platform ignores and then gate on its presence,
+  claiming a containment property the package does not have. Same shape as module 3's
+  `disable-model-invocation` finding. Dropping it also removes the whole-list tools
+  assertions in `CapabilityTierTests` from the blast radius and retires the open
+  question of which agents count as "readers".
+  Related, for whenever reader-to-reader scoping is attempted again: the
+  available-agent-types listing does not reach a subagent, so a grant expressed only
+  in frontmatter is one the grantee cannot discover. It has to be in the prompt.
+- Files: `harness_capabilities.py` (`CAPABILITY_TIERS`, three entries),
+  `render_harness.py` (`load_profile` alias handling, `normalize_agent_capabilities`,
+  an explicit `computed_context` key - a nested `agent_models` dict does not reach
+  templates through the profile spread - the per-agent model validation, the
+  forbidden-override set, and the frontmatter emitter), `harness_session.py`
+  (`launch_argv` signature, argv assembly, `cmd_launch`, argparse),
+  `harness_agentgen.py` (synthesized agents emit the same frontmatter and must gain
+  `effort:` or a promoted agent fails the new check), `validate_harness.py`,
+  `check_installed.py`, both agent templates under `standard/`,
+  `common/CLAUDE.md.tmpl`, `references/harness-tiers.md`,
+  `references/project-profile-schema.md`, `references/questionnaire.md`,
+  `skills/setup/SKILL.md` (round 4 question changes shape), `docs/runtime.md`, the
+  three examples, the three v0.2 fixtures (the alias regression surface), tests
   (target 10).
+- Second-order: `harness_capabilities.py` and `harness_session.py` are copied
+  byte-identically into `scripts/ai-harness/`, so manifests must regenerate. Patch
+  with `write_bytes`; `write_text` emits CRLF and breaks the identity check.
 
 ### Module 5 - Envelope v3 and the cost reader (1.18.0)
 
@@ -180,6 +258,72 @@ supervisor or desktop shell, settings.json merging, and any hook that returns `a
 - `--bare` becoming the `-p` default would silently strip the contract from read-only
   lanes. Mitigation: module 0 measures and pins it before module 1 starts.
 - Windows: exec form and `python_command`; both legs of CI must run the hook tests.
+
+## After 2.0 - host portability (Claude Code, Codex, OpenCode)
+
+**Status:** accepted as direction, not scheduled. Nothing here starts before 2.0.0
+ships. Recorded now so the 2.0 modules do not quietly make it harder.
+
+**Goal:** one rendered harness that Claude Code, Codex, and OpenCode each pick up
+correctly, rather than one harness that works fully in Claude Code and partially
+everywhere else.
+
+**Where the seam already is.** Three layers exist in the generated package today, and
+they do not port equally:
+
+- *Host-neutral.* The `.ai/` tree and four of the runtime scripts - `harness_bus.py`,
+  `harness_checkpoint.py`, `harness_progress.py`, `harness_report.py` - carry no CLI
+  binding at all (checkpoint shells out to `git`, nothing more). Any host that can run
+  Python can drive them.
+- *Read by more than one host.* `AGENTS.md` is the engineering contract and Codex
+  reads it unprompted. This is the existing portability surface and it works.
+- *Claude Code only.* `harness_session.py launch` resolves the literal `claude`
+  binary (`shutil.which("claude")`, argv `["claude"]`); guarded hooks are
+  `.claude/settings.json` plus Claude's `PreToolUse` / `SessionStart` / `PreCompact`
+  events; the on-demand session skill depends on Claude's description-matched skill
+  loading; the working band is Claude's `--autocompact` flag. Everything modules 1, 2,
+  and 3 added to make guarantees fire unasked lives here.
+
+**The honest problem.** Codex delegation already ships (`implementation_delegate`:
+`codex-plugin` / `codex-cli`), but in that model Claude is always the driver and Codex
+only executes an accepted contract. Portability means something different: Codex or
+OpenCode as the *host*, with the same guarantees firing. Those hosts have their own
+configuration surfaces (`~/.codex/config.toml`, profiles, MCP) but not a
+one-to-one equivalent of hooks, skills, and subagents. So this is not a rendering
+change; it is a question about what a guarantee degrades into when the mechanism that
+enforced it is absent.
+
+**Measure before designing, same rule as every module so far.** The first unit of work
+is a report, not code: for each of Codex CLI and OpenCode, what exists today for
+(a) an always-loaded project contract, (b) a pre-tool-use deny hook, (c) a
+session-start brief, (d) on-demand instruction loading, (e) subagents with a tool
+allowlist, and (f) a compaction boundary signal. Record the version measured against.
+No table of capabilities written from documentation.
+
+**Design constraints, carried from decisions 0004 and 0001.**
+
+- A guarantee that cannot fire on a host must be *reported as absent* by
+  `check_installed.py`, never silently downgraded to prose that nobody enforces.
+- No host gets a weaker safety floor. The bypass-flag refusals and the
+  read-only-agent defaults are floors, not Claude Code implementation details.
+- Rendering stays deterministic and dry-run-first. A second host is a second set of
+  target paths, not a second installer.
+- One template tree. If per-host output means forking `common/`, the design is wrong.
+
+**Open questions to settle in the decision record, not in code.**
+
+- Is the profile's `implementation_delegate` the right axis, or does a separate
+  `hosts: [...]` field belong next to it? They answer different questions - who
+  executes versus who drives - and conflating them is how the Fleet/`codex-cli`
+  coupling happened.
+- Does a single package install for every declared host at once, or does the operator
+  render once per host? The first risks writing files a host will never read; the
+  second risks two packages drifting.
+- Does `harness_session.py` grow a host abstraction, or does each host get its own
+  launcher? The launcher is the only script with a hard CLI binding, so it is the
+  whole cost.
+
+**Blocked on:** 2.0.0 shipped and CI-confirmed. Revisit the moment module 7 closes.
 
 ## Harness v1.0 — four-phase upgrade
 
