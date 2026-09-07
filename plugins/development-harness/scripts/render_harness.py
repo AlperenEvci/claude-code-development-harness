@@ -57,6 +57,25 @@ ALLOWED_NETWORK_ACCESS = {
     "approved-for-scoped-tasks",
 }
 ALLOWED_HOOK_POLICIES = {"disabled", "examples-only", "guarded"}
+
+
+#: The tiers that install `scripts/ai-harness/`, and so the only tiers where a
+#: hook script has somewhere to land.
+HOOK_CAPABLE_TIERS = frozenset({"standard", "fleet"})
+
+
+def default_hooks_policy(tier: str) -> str:
+    """`guarded` since 2.0.0 wherever it can be installed; `examples-only` at Lite.
+
+    A default that named `guarded` at every tier would refuse every Lite profile
+    that left the field out, and a default that stayed at `examples-only` would
+    leave 2.0's mechanism opt-in, which is the 1.x state with a newer number. The
+    default follows the tier because that is what the policy's own precondition
+    does. A profile that names the policy is honored as written, at any tier.
+    """
+    return "guarded" if str(tier).lower() in HOOK_CAPABLE_TIERS else "examples-only"
+
+
 # The interpreter name generated hooks and scripts are invoked through. Bare
 # `python3` is a Microsoft Store stub on Windows, so the profile records which
 # name actually printed a version during setup. An absolute path is accepted.
@@ -98,7 +117,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "1.19.0"
+GENERATOR_VERSION = "2.0.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -501,15 +520,14 @@ def load_profile(path: Path) -> dict[str, Any]:
         fail(f"network_access must be one of {sorted(ALLOWED_NETWORK_ACCESS)}")
     data["network_access"] = network_access
 
-    hooks_policy = str(data.get("hooks_policy", "examples-only")).lower()
+    hooks_policy = str(
+        data.get("hooks_policy") or default_hooks_policy(str(data.get("harness_tier", "")))
+    ).lower()
     if hooks_policy not in ALLOWED_HOOK_POLICIES:
         fail(f"hooks_policy must be one of {sorted(ALLOWED_HOOK_POLICIES)}")
     data["hooks_policy"] = hooks_policy
 
-    if hooks_policy == "guarded" and str(data.get("harness_tier", "")) not in {
-        "standard",
-        "fleet",
-    }:
+    if hooks_policy == "guarded" and str(data.get("harness_tier", "")) not in HOOK_CAPABLE_TIERS:
         # The hooks are stdlib scripts installed under `scripts/ai-harness/`, and
         # Lite installs that directory for nothing else. Accepting the policy
         # here would render a settings file pointing at scripts that were never
@@ -570,7 +588,6 @@ def load_profile(path: Path) -> dict[str, Any]:
         "smoke_command": "",
         "smallest_check_command": "",
         "network_access": "deny-by-default",
-        "hooks_policy": "examples-only",
         "python_command": "python3",
         "git_workflow": "feature-branches",
         "agent_commit_policy": "no-commit",

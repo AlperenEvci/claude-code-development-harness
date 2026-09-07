@@ -21,13 +21,26 @@ floor under the rule.
 | `hooks_policy` | What is rendered |
 |---|---|
 | `disabled` | nothing |
-| `examples-only` | nothing executable; the default before 2.0 |
-| `guarded` | `.claude/settings.json` plus the hook scripts below |
+| `examples-only` | nothing executable; the default at Lite, and everywhere before 2.0 |
+| `guarded` | `.claude/settings.json` plus the hook scripts below; the default at Standard and Fleet since 2.0.0 |
 
 `guarded` requires Standard or Fleet. The hooks are installed under
 `scripts/ai-harness/`, and Lite installs that directory for nothing else;
 accepting the policy at Lite would render a settings file pointing at scripts
 that were never copied.
+
+The default follows the tier for the same reason: a profile that leaves
+`hooks_policy` out gets `guarded` at Standard and Fleet and `examples-only` at
+Lite. A profile that names the policy is honored as written, which is why every
+0.2 and 1.x profile - all of which name it - still renders exactly as it did.
+The renderer, the validator, and `check_installed.py` each hold their own copy of
+that rule, and a test holds the three together.
+
+After installation, `check_installed.py` re-checks the two invariants that can
+be broken by editing the copy: a handler's `--smoke` or `--check` value equals
+the profile's command byte for byte, and no installed hook script mentions a
+permission decision. Both are errors, and the remedy is to re-render, never to
+patch either file by hand.
 
 ## What is installed
 

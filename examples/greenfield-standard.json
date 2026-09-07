@@ -70,7 +70,7 @@
   "codex_reasoning": "high",
   "autonomy": "repository-write-with-approval",
   "network_access": "deny-by-default",
-  "hooks_policy": "disabled",
+  "hooks_policy": "guarded",
   "git_workflow": "feature-branches",
   "agent_commit_policy": "no-commit",
   "parallel_writes": false,

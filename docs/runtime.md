@@ -1,7 +1,7 @@
 # Runtime guide
 
-How to actually drive a 1.0 harness: capability tiers, agent sessions, the message
-bus, on-demand agent synthesis, work graphs, and the context budget.
+How to actually drive a 2.0 harness: capability tiers, agent sessions, the message
+bus, on-demand agent synthesis, work graphs, hooks, and the context budget.
 
 This is the operator-facing guide. The agent-facing version, loaded on demand by the
 generated skills, is
@@ -9,9 +9,10 @@ generated skills, is
 The measurements behind both are in
 [`.ai/reports/0001-session-substrate-smoke-test.md`](../.ai/reports/0001-session-substrate-smoke-test.md).
 
-Every claim about CLI behavior below was produced by running Claude Code 2.1.251,
-not by reading `--help`. Two of them reversed a design decision that had already
-been written down.
+Every claim about CLI behavior below was produced by running Claude Code 2.1.251
+for the session runtime and 2.1.263 for the hooks, not by reading `--help`. Five of
+them reversed a design decision that had already been written down; the reports
+under `.ai/reports/` record each one.
 
 ## What gets installed
 
@@ -255,7 +256,10 @@ that it complied.
 ## Hooks
 
 A `guarded` harness installs four command hooks and the settings file that wires
-them up. They are the floor under the rules `AGENTS.md` states in prose:
+them up. Since 2.0.0 that is the default at Standard and Fleet; set
+`hooks_policy` to `examples-only` or `disabled` to opt out, and Lite gets no hooks
+because it has nowhere to install them. They are the floor under the rules
+`AGENTS.md` states in prose:
 
 | Script | Event | Refuses or adds |
 |---|---|---|

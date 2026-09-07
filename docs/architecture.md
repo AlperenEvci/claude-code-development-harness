@@ -26,6 +26,8 @@ The setup skill is a stateful guided workflow with two entry paths:
 
 Standard and Fleet packages additionally carry the session runtime — `harness_session.py`, `harness_bus.py`, `harness_agentgen.py`, and the shared `harness_capabilities.py` — copied verbatim into `scripts/ai-harness/`. They are copies rather than templates so the installed code is the code the plugin's own suite tested; the validator rejects one that has drifted from its original.
 
+A Standard or Fleet harness also installs four command hooks and the `.claude/settings.json` that registers them - `PreToolUse` guard, `SessionStart` brief and smoke line, `PreCompact` checkpoint, and a `Stop` check that refuses once on a failing tree. `guarded` is the default at those tiers since 2.0.0. The hooks are the plugin's own output, copied byte-identical like the runtime; a hook found in a scanned repository is evidence and is never adopted. They only deny or add context, exec-form only, and every one honors `HARNESS_HOOKS_DISABLE=1`. The commands the two hooks execute are rendered into the settings file as arguments, because the platform protects that file from a session's edits and does not protect the profile; the validator holds the two equal before installation and `check_installed.py` re-checks after it. `references/hooks.md` is the full account.
+
 Capability tiers are enforced at two levels. The frontmatter of an agent file declares its tier, and the launch flags recorded alongside it hand that tier to the process: `--tools` removes a tool rather than gating it, and the removal reaches subagents, so an agent cannot escape its tier by delegating. Dispatch mode follows from the tier, because `claude --bg` refuses `--print`: a writing tier can run detached and report by posting a bus envelope, while a read-only tier has no `Write` tool to post one with and must run in the foreground where its structured output can be read.
 
 Greenfield setup never installs dependencies, initializes Git, scaffolds application code, or invokes an implementation delegate. `context-only` produces durable briefs; `ready-to-build` additionally produces a first reviewed contract for a later explicit execution turn.
@@ -99,3 +101,4 @@ The LLM decides the project profile; scripts render and validate the filesystem.
 - Installation is dry-run first, symlink-safe, and conflict-aware.
 - The implementation delegate receives a self-contained spec rather than the original Claude conversation.
 - Delegate completion is independently verified.
+- Generated hooks deny or add context and never allow; the command a hook runs comes from the platform-protected settings file, not from repository text read at runtime.
