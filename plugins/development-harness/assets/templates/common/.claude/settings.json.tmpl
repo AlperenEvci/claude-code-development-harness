@@ -16,6 +16,21 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{python_command}}",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/scripts/ai-harness/hook_precompact.py"
+            ],
+            "timeout": 20
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|compact",

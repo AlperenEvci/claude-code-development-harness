@@ -73,6 +73,12 @@ PROFILE_PATH = ".ai/harness/project-profile.json"
 LEDGER_PATH = ".ai/progress.json"
 RUNS_DIRNAME = "runs"
 
+#: Where the PreCompact hook writes its boundary logs. Spelled the same way in
+#: `harness_checkpoint.py`; a test pins the two, because a record written under
+#: one name and read under another is a record that silently never appears.
+COMPACTION_DIRNAME = "compaction"
+BOUNDARY_VERSION = 1
+
 #: Key names whose string values are replaced wholesale rather than scanned. The
 #: word boundaries matter: `key` must match `key` and `aws_access_key` without
 #: matching `monkey` or `keyboard`.
@@ -399,6 +405,35 @@ def load_ledger(root: Path) -> dict[str, Any]:
     }
 
 
+def load_compaction(root: Path) -> dict[str, Any] | None:
+    """The newest compaction boundary log, or None.
+
+    A boundary log is not a checkpoint and is deliberately kept out of
+    `load_checkpoints`: nobody wrote it, it carries no intent, and letting it
+    into the checkpoint list would mean a session resumed from a machine-written
+    record that says only "the transcript was truncated here". What it does carry
+    is a count, and the count is the finding - a session that compacted four
+    times against a declared ceiling was given work that ceiling was too small
+    for.
+    """
+    base = root / ".ai" / RUNS_DIRNAME / COMPACTION_DIRNAME
+    if not base.is_dir():
+        return None
+
+    best: dict[str, Any] | None = None
+    for path in sorted(base.glob("*.json")):
+        data, error = load_json(path)
+        if error is not None or not isinstance(data, dict):
+            continue
+        if data.get("boundary_version") != BOUNDARY_VERSION:
+            continue
+        if best is None or str(data.get("last_seen") or "") > str(best.get("last_seen") or ""):
+            record = dict(data)
+            record["path"] = f".ai/{RUNS_DIRNAME}/{COMPACTION_DIRNAME}/{path.name}"
+            best = record
+    return best
+
+
 def load_checkpoints(root: Path) -> list[dict[str, Any]]:
     base = root / ".ai" / RUNS_DIRNAME
     if not base.is_dir():
@@ -538,6 +573,7 @@ def build_model(root: Path) -> dict[str, Any]:
         "envelope_total": len(entries),
         "ledger": load_ledger(root),
         "checkpoints": checkpoints,
+        "compaction": load_compaction(root),
         "context": latest_context(checkpoints),
         "graphs": [
             graph_view(raw, index) for index, raw in enumerate(profile.get("graphs") or [])
@@ -967,7 +1003,13 @@ def render_brief(model: dict[str, Any]) -> str:
         # `load_checkpoints` sorts newest first, and the stamped directory names
         # sort lexicographically in time order.
         latest = readable[0]
-        out.append(f"RESUME  {latest.get('path')}  ({latest.get('created_at') or '?'})")
+        # Saying who wrote it is not decoration. A handoff someone typed and a
+        # boundary a hook recorded deserve different amounts of trust, and the
+        # brief is read by a model that cannot tell them apart otherwise.
+        out.append(
+            f"RESUME  {latest.get('path')}  ({latest.get('created_at') or '?'})  "
+            "written by hand"
+        )
         intent = str(latest.get("intent") or "").strip()
         if intent:
             out.append(f"  intent: {intent}")
@@ -981,6 +1023,22 @@ def render_brief(model: dict[str, Any]) -> str:
             out.append("  next: none recorded")
     else:
         out.append("RESUME  no checkpoint recorded")
+
+    compaction = model.get("compaction")
+    if compaction:
+        count = compaction.get("compactions")
+        ceiling = (compaction.get("policy") or {}).get("ceiling_tokens")
+        out.append(
+            f"COMPACTED  {count} time(s) this session, last {compaction.get('last_seen') or '?'}  "
+            f"({compaction.get('path')}, written by the PreCompact hook)"
+        )
+        if isinstance(count, int) and count > 1:
+            # The number is the whole point of keeping the log. Repeat compaction
+            # is not a fact about the platform; it is a fact about the ceiling.
+            out.append(
+                f"  the working ceiling is {ceiling} tokens and the session passed "
+                "it more than once: split the work or raise the band"
+            )
     out.append("")
 
     ledger = model["ledger"]

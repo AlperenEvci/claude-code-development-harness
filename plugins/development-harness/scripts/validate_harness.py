@@ -21,7 +21,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
+from harness_capabilities import (
+    AUTOCOMPACT_MAX_TOKENS,
+    AUTOCOMPACT_MIN_TOKENS,  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
     EDIT_ACCEPTING_MODES,
 )
@@ -43,6 +45,40 @@ FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 FENCED_BLOCK = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
 GENERATION_MARKER = ".development-harness-generated.json"
 ALLOWED_CEILING_ACTIONS = {"compact", "checkpoint-and-handoff", "stop-and-ask"}
+
+#: The generated path-scoped rule that carries what each important path is for.
+#: Copied from render_harness rather than imported, for the reason stated above
+#: SESSION_TOOL_SCRIPTS, and pinned to it by a test.
+IMPORTANT_PATHS_RULE = "harness-important-paths"
+PATH_TOKEN_PATTERN = re.compile(r"\A[A-Za-z0-9._][A-Za-z0-9._/-]*\Z")
+IMPORTANT_PATHS_SPLIT_CHARS = 400
+
+
+def split_important_path(entry: str) -> tuple[str | None, str]:
+    """Split `src/lib - domain logic` into a glob-able path and its description."""
+    text = str(entry).strip()
+    if not text:
+        return None, ""
+    head, sep, tail = text.partition(" - ")
+    if not sep:
+        head, sep, tail = text.partition(" \u2014 ")
+    candidate = head.strip().strip("`").rstrip("/")
+    if not sep or not PATH_TOKEN_PATTERN.match(candidate):
+        return None, text
+    return candidate, tail.strip()
+
+
+def important_path_globs(profile: dict[str, Any]) -> list[str]:
+    """Every important path as a matcher, directory and contents alike."""
+    globs: list[str] = []
+    for entry in profile.get("important_paths", []):
+        path, _ = split_important_path(entry)
+        if path is None:
+            continue
+        for glob in (path, f"{path}/**"):
+            if glob not in globs:
+                globs.append(glob)
+    return globs
 # Flags that hand an agent authority nothing else in the harness can take back.
 # Ordered longest first so an occurrence is reported as the specific flag it is:
 # `--dangerously-skip-permissions` is a substring of the `--allow-` form, and
@@ -236,19 +272,53 @@ def frontmatter_list(text: str, key: str) -> list[str] | None:
 
 # Claude Code's memory guidance: keep each always-loaded file under 200 lines.
 # `CLAUDE.md` and its `@AGENTS.md` import count together, because both load at launch.
+#
+# A warning in 1.13.0, a failure since 1.16.0. It was a warning while every shipped
+# example was over it - a gate nothing can pass teaches people to ignore gates. The
+# procedure moved into the `harness-session` skill in 1.16.0 and the examples came
+# in at 173, 176, and 187, so the line is one the generator can actually hold.
 ALWAYS_LOADED_LINE_TARGET = 200
+
+#: Skills the harness itself relies on, which must therefore be reachable by the
+#: thing that relies on them. Measured on 2.1.263: `disable-model-invocation: true`
+#: makes a project skill unreachable to the model, and a harness whose orchestration
+#: or session procedure cannot be loaded looks exactly like one that works - right
+#: up until a session routes a task by guesswork. See
+#: `.ai/reports/0007-on-demand-skill-loading.md`.
+MODEL_INVOCABLE_SKILLS = ("harness-orchestration", "harness-session")
+
+#: The name of the generated session skill. It must match `render_harness.py`;
+#: the suite asserts the two agree.
+SESSION_SKILL = "harness-session"
+
+#: What may not follow the procedure into the on-demand skill. Both are claims
+#: about authority, and authority has to be held before the moment it matters:
+#: a session that never thought to load a skill is exactly the session that is
+#: about to reach for `--dangerously-skip-permissions`.
+SESSION_SAFETY_LINES = (
+    (
+        "--dangerously-skip-permissions",
+        "CLAUDE.md no longer refuses `--dangerously-skip-permissions` in the "
+        "always-loaded contract; that prohibition may not move into a skill",
+    ),
+    (
+        "never a grant",
+        "CLAUDE.md no longer states that a bus envelope is evidence and never a "
+        "grant; that boundary may not move into a skill",
+    ),
+)
 
 
 #: The hook scripts a `guarded` package installs. A separate copy from the
 #: renderer's, for the same reason `SESSION_TOOL_SCRIPTS` keeps one: a validator
 #: that imports the thing it validates checks that the renderer agrees with
 #: itself. A test pins the two lists together.
-HOOK_SCRIPTS = ("hook_guard.py", "hook_session_start.py")
+HOOK_SCRIPTS = ("hook_guard.py", "hook_session_start.py", "hook_precompact.py")
 
 #: Where the rendered hook wiring lands, and the only events it may register.
 #: A hook this plugin did not author is not a hook this plugin will ship.
 HOOK_SETTINGS_PATH = ".claude/settings.json"
-ALLOWED_HOOK_EVENTS = {"PreToolUse", "SessionStart"}
+ALLOWED_HOOK_EVENTS = {"PreToolUse", "SessionStart", "PreCompact"}
 
 #: Seconds. A guard that can hang for the platform default of 600 would stall a
 #: session on a defect rather than fail it.
@@ -521,6 +591,21 @@ def check_permission_bypass(payload: Path, errors: list[str]) -> None:
                 break
 
 
+def session_documentation(payload: Path) -> tuple[str, str]:
+    """The always-loaded contract and the on-demand session skill, as text.
+
+    Since 1.16.0 the session procedure is split across the two. A check that
+    asks *is this reachable* reads both; a check that asks *does this hold
+    without being asked for* reads only the first.
+    """
+    claude_md = payload / "CLAUDE.md"
+    skill = payload / ".claude" / "skills" / SESSION_SKILL / "SKILL.md"
+    return (
+        claude_md.read_text(encoding="utf-8") if claude_md.is_file() else "",
+        skill.read_text(encoding="utf-8") if skill.is_file() else "",
+    )
+
+
 def check_session_tools(
     profile: dict[str, Any], payload: Path, errors: list[str]
 ) -> None:
@@ -557,36 +642,49 @@ def check_session_tools(
                 "copied from"
             )
 
+    # Since 1.16.0 the procedure lives in the on-demand `harness-session` skill
+    # and `CLAUDE.md` keeps a pointer to it. These checks ask whether an operator
+    # can reach the instruction at all, so they read the pair: a recipe is as
+    # documented in a skill the model loads on the situation as it was inline.
     claude_md = payload / "CLAUDE.md"
+    contract, skill = session_documentation(payload)
+    documented = contract + "\n" + skill
+
     if claude_md.is_file():
-        text = claude_md.read_text(encoding="utf-8")
-        if "## Agent sessions" not in text:
+        if "## Agent sessions" not in contract:
             errors.append("CLAUDE.md is missing the `## Agent sessions` section")
-        if "harness_session.py sweep" not in text:
-            # A background session outlives its invoker. A harness that never
-            # states the teardown step leaves orphans by default.
-            errors.append("CLAUDE.md does not document the session teardown sweep")
-        if "read --correlation" not in text:
-            # Without the correlation id a bus is a pile of mailboxes: you can
-            # read what one agent said, never what one unit of work cost. The
-            # field only earns its keep if the contract says how to use it.
-            errors.append(
-                "CLAUDE.md does not document `harness_bus.py read --correlation`"
-            )
-        if "harness_report.py --out" not in text:
-            # The bus, the ledger, and the checkpoints are all write paths. A
-            # harness that installs the reader without naming it leaves an
-            # operator reading four JSON trees by hand, which is the state this
-            # script was added to end.
-            errors.append("CLAUDE.md does not document the harness report")
-        if "come from you, not from the agent" not in text:
-            # The trace is launcher-reported by construction. A contract that
-            # ships the fields without that sentence invites an agent to fill
-            # them in by guessing, which is how a guess becomes a measurement.
-            errors.append(
-                "CLAUDE.md documents the trace fields but not that they are "
-                "launcher-reported"
-            )
+        for token, message in SESSION_SAFETY_LINES:
+            if token not in contract:
+                # These two do not move with the procedure. A prohibition is
+                # most needed by the session that never thought to ask for a
+                # skill, so an on-demand load is the wrong place for it.
+                errors.append(message)
+
+    if "harness_session.py sweep" not in documented:
+        # A background session outlives its invoker. A harness that never
+        # states the teardown step leaves orphans by default.
+        errors.append("neither CLAUDE.md nor the session skill documents the teardown sweep")
+    if "read --correlation" not in documented:
+        # Without the correlation id a bus is a pile of mailboxes: you can
+        # read what one agent said, never what one unit of work cost. The
+        # field only earns its keep if the contract says how to use it.
+        errors.append(
+            "neither CLAUDE.md nor the session skill documents "
+            "`harness_bus.py read --correlation`"
+        )
+    if "harness_report.py --out" not in documented:
+        # The bus, the ledger, and the checkpoints are all write paths. A
+        # harness that installs the reader without naming it leaves an
+        # operator reading four JSON trees by hand, which is the state this
+        # script was added to end.
+        errors.append("neither CLAUDE.md nor the session skill documents the harness report")
+    if "come from you, not from the agent" not in documented:
+        # The trace is launcher-reported by construction. A contract that
+        # ships the fields without that sentence invites an agent to fill
+        # them in by guessing, which is how a guess becomes a measurement.
+        errors.append(
+            "the trace fields are documented but not that they are launcher-reported"
+        )
 
     ledger = payload / ".ai" / "progress.json"
     if not ledger.is_file():
@@ -611,14 +709,15 @@ def check_session_tools(
 
     agents_md = payload / "AGENTS.md"
     if agents_md.is_file():
-        text = agents_md.read_text(encoding="utf-8")
-        if "harness_checkpoint.py status" not in text:
+        budget = agents_md.read_text(encoding="utf-8")
+        if "harness_checkpoint.py status" not in budget + skill:
             # The whole point of shipping the tool is that the band stops being
             # prose. A contract that installs it without saying how to run it
-            # leaves the policy exactly as unenforceable as before.
+            # leaves the policy exactly as unenforceable as before. The recipe
+            # moved into the skill in 1.16.0; the band itself stayed here.
             errors.append(
-                "AGENTS.md installs the checkpoint tool but does not document "
-                "`harness_checkpoint.py status`"
+                "the checkpoint tool is installed but neither AGENTS.md nor the "
+                "session skill documents `harness_checkpoint.py status`"
             )
 
 
@@ -857,6 +956,152 @@ def check_workflows(
                 errors.append(f"{name}.js is not valid JavaScript: {syntax_error}")
 
 
+def check_always_loaded_size(payload: Path, errors: list[str]) -> None:
+    """Measure the contract that loads on every session and fail it if it is big.
+
+    `CLAUDE.md` imports `AGENTS.md`, and an `@import` loads at launch, so the
+    always-loaded contract is the sum of the two, not either alone. The
+    platform's stated target is under 200 lines, and since 1.16.0 crossing it
+    fails the package. The count prints even when it passes, because the number
+    is what makes the next contract addition a decision rather than an accident.
+    """
+    loaded: dict[str, int] = {}
+    for rel in ("CLAUDE.md", "AGENTS.md"):
+        path = payload / rel
+        if path.is_file():
+            loaded[rel] = path.read_text(encoding="utf-8").count("\n") + 1
+    if not loaded:
+        return
+    total = sum(loaded.values())
+    parts = " + ".join(f"{rel} {count}" for rel, count in loaded.items())
+    print(
+        f"INFO: always-loaded contract is {total} lines ({parts}); "
+        f"target is under {ALWAYS_LOADED_LINE_TARGET}",
+        file=sys.stderr,
+    )
+    if total >= ALWAYS_LOADED_LINE_TARGET:
+        errors.append(
+            f"always-loaded contract is {total} lines ({parts}); the platform "
+            f"target is under {ALWAYS_LOADED_LINE_TARGET}. Move procedure into "
+            "an on-demand skill rather than trimming the rules: what is left "
+            "in the contract is what holds in a session that never thinks to "
+            "ask for it"
+        )
+
+
+def check_model_invocable_skills(
+    profile: dict[str, Any],
+    payload: Path,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """A skill the harness depends on must be one the model can actually open.
+
+    This is the invariant with the quietest failure. `disable-model-invocation`
+    is a legitimate flag - profile-declared `additional_skills` default to it,
+    because an operator adding a procedure means to invoke it themselves. On a
+    skill the harness routes through, it is a deletion that leaves the file in
+    place, and nothing about the rendered package would otherwise look wrong.
+    """
+    for name in MODEL_INVOCABLE_SKILLS:
+        path = payload / ".claude" / "skills" / name / "SKILL.md"
+        if not path.is_file():
+            continue
+        match = FRONTMATTER.match(path.read_text(encoding="utf-8"))
+        if match is None:
+            errors.append(f"{name}/SKILL.md has no frontmatter")
+            continue
+        for line in match.group(1).splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() != "disable-model-invocation":
+                continue
+            if value.strip().lower() in {"true", "yes", "on"}:
+                errors.append(
+                    f"{name}/SKILL.md sets disable-model-invocation, which makes it "
+                    "unreachable to the model; the harness routes through this skill"
+                )
+
+
+def check_important_paths_rule(
+    profile: dict[str, Any],
+    payload: Path,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """The map stays in the contract; the detail moves to a rule that must exist.
+
+    Splitting a section across two files is the kind of change that half-lands:
+    the contract loses its descriptions, the rule is not written, and nothing is
+    obviously broken because both files still parse. What is lost is the answer to
+    "what is this directory for", and it is lost silently.
+
+    A path-scoped rule is also the one artifact class whose failure mode is
+    silence. A malformed matcher does not error; the rule simply never loads. So
+    the frontmatter is checked against the profile rather than trusted.
+    """
+    paths = [str(item).strip() for item in profile.get("important_paths", []) if str(item).strip()]
+    rule = payload / ".claude" / "rules" / f"{IMPORTANT_PATHS_RULE}.md"
+    agents = payload / "AGENTS.md"
+
+    expected = important_path_globs(profile)
+    described = sum(
+        len(description)
+        for _, description in (split_important_path(entry) for entry in paths)
+        if description
+    )
+    if not expected or described < IMPORTANT_PATHS_SPLIT_CHARS:
+        if rule.is_file():
+            errors.append(
+                f"{IMPORTANT_PATHS_RULE}.md was rendered for a profile whose "
+                "important-path list is short enough to stay whole in AGENTS.md, or "
+                "has no globbable path at all; either way the rule costs more than "
+                "it saves"
+            )
+        return
+
+    if not rule.is_file():
+        errors.append(
+            f".claude/rules/{IMPORTANT_PATHS_RULE}.md is missing; AGENTS.md points "
+            "at it for what each important path is for"
+        )
+        return
+
+    text = rule.read_text(encoding="utf-8")
+    if not text.startswith("---\npaths:\n"):
+        errors.append(
+            f"{IMPORTANT_PATHS_RULE}.md must open with `paths:` frontmatter, or it "
+            "loads for every session instead of the ones that touch these paths"
+        )
+    for glob in expected:
+        if f'"{glob}"' not in text:
+            errors.append(
+                f"{IMPORTANT_PATHS_RULE}.md does not scope {glob!r}, which the "
+                "profile lists as an important path"
+            )
+    for entry in paths:
+        path, description = split_important_path(entry)
+        if path is not None and description and description not in text:
+            errors.append(
+                f"{IMPORTANT_PATHS_RULE}.md dropped the description of {path!r}; "
+                "it left AGENTS.md and has to land somewhere"
+            )
+
+    if agents.is_file():
+        contract = agents.read_text(encoding="utf-8")
+        if f".claude/rules/{IMPORTANT_PATHS_RULE}.md" not in contract:
+            errors.append(
+                "AGENTS.md keeps the important-path names but no longer says where "
+                "their descriptions went"
+            )
+        for entry in paths:
+            path, _ = split_important_path(entry)
+            if path is not None and f"`{path}`" not in contract:
+                errors.append(
+                    f"AGENTS.md no longer names the important path {path!r}; the map "
+                    "stays in the always-loaded contract even though the detail moved"
+                )
+
+
 def check_context_policy(
     profile: dict[str, Any],
     payload: Path,
@@ -883,6 +1128,19 @@ def check_context_policy(
     if floor >= ceiling:
         errors.append("context_policy.working_band.floor_tokens must be below ceiling_tokens")
         return
+
+    # Since 1.15.0 `harness_session.py` passes the ceiling to `claude --autocompact`,
+    # which refuses anything outside 100k-1M at argument parsing. A package that
+    # validated with a ceiling outside that range would install cleanly and then be
+    # unable to open a session, so the range is checked here as well as in the
+    # renderer: this is the gate a package passes through, and the renderer is not
+    # the only thing that can produce one.
+    if ceiling < AUTOCOMPACT_MIN_TOKENS or ceiling > AUTOCOMPACT_MAX_TOKENS:
+        errors.append(
+            "context_policy.working_band.ceiling_tokens must be between "
+            f"{AUTOCOMPACT_MIN_TOKENS} and {AUTOCOMPACT_MAX_TOKENS}: it is passed "
+            "to `claude --autocompact`, which refuses anything outside that range"
+        )
 
     if str(policy.get("on_ceiling", "")) not in ALLOWED_CEILING_ACTIONS:
         errors.append(
@@ -943,17 +1201,20 @@ def check_session_surface(
         errors.append(f"session_surface must be inproc or orca, not {surface!r}")
         return
 
-    claude = payload / "CLAUDE.md"
-    if not claude.is_file():
+    contract, skill = session_documentation(payload)
+    if not contract:
         return
-    text = claude.read_text(encoding="utf-8")
+    # The surface guidance renders wherever the launch procedure renders: in the
+    # `harness-session` skill where there is one, in `CLAUDE.md` for a tier with
+    # no session tooling. Reading the pair keeps the check indifferent to which.
+    text = contract + "\n" + skill
     present = ORCA_SECTION in text
 
     if surface == "orca":
         if not present:
             errors.append(
-                "session_surface is orca but CLAUDE.md has no "
-                f"{ORCA_SECTION!r} section"
+                "session_surface is orca but neither CLAUDE.md nor the session "
+                f"skill has a {ORCA_SECTION!r} section"
             )
             return
         for clause in ORCA_REQUIRED_CLAUSES:
@@ -964,7 +1225,7 @@ def check_session_surface(
                 )
     elif present:
         errors.append(
-            f"CLAUDE.md documents {ORCA_SECTION!r} but session_surface is "
+            f"the harness documents {ORCA_SECTION!r} but session_surface is "
             f"{surface!r}"
         )
 
@@ -1241,6 +1502,8 @@ def main() -> None:
             warnings.append("fleet worktree helper is not executable")
 
     check_context_policy(profile, payload, errors, warnings)
+    check_important_paths_rule(profile, payload, errors, warnings)
+    check_model_invocable_skills(profile, payload, errors, warnings)
     check_session_surface(profile, payload, errors, warnings)
     check_workflows(profile, payload, errors, warnings)
     check_permission_bypass(payload, errors)
@@ -1248,30 +1511,7 @@ def main() -> None:
     check_hooks(profile, payload, errors, warnings)
     check_read_only_agents_are_not_detached(payload, errors)
 
-    # `CLAUDE.md` imports `AGENTS.md`, and an `@import` loads at launch, so the
-    # always-loaded contract is the sum of the two, not either alone. The
-    # platform's stated target is under 200 lines. A warning here is the
-    # measurement 2.0 will turn into a failure; it is reported even when under
-    # the line so the number is visible on every run.
-    loaded: dict[str, int] = {}
-    for rel in ("CLAUDE.md", "AGENTS.md"):
-        path = payload / rel
-        if path.is_file():
-            loaded[rel] = path.read_text(encoding="utf-8").count("\n") + 1
-    if loaded:
-        total = sum(loaded.values())
-        parts = " + ".join(f"{rel} {count}" for rel, count in loaded.items())
-        print(
-            f"INFO: always-loaded contract is {total} lines ({parts}); "
-            f"target is under {ALWAYS_LOADED_LINE_TARGET}",
-            file=sys.stderr,
-        )
-        if total >= ALWAYS_LOADED_LINE_TARGET:
-            warnings.append(
-                f"always-loaded contract is {total} lines ({parts}); the platform "
-                f"target is under {ALWAYS_LOADED_LINE_TARGET}, and adherence "
-                "drops as it grows"
-            )
+    check_always_loaded_size(payload, errors)
 
     for item in warnings:
         print(f"WARNING: {item}", file=sys.stderr)

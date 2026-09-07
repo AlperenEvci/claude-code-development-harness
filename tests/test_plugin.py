@@ -100,6 +100,41 @@ def write_lf(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+SESSION_SKILL_PATH = ".claude/skills/harness-session/SKILL.md"
+
+
+def session_docs(payload: Path) -> str:
+    """`CLAUDE.md` plus the on-demand session skill, as one string.
+
+    Use this where the assertion is *an operator can reach this instruction*.
+    Where the assertion is *this holds without anyone asking for it*, read
+    `CLAUDE.md` alone: since 1.16.0 the two are not the same claim.
+    """
+    skill = payload / SESSION_SKILL_PATH
+    return (payload / "CLAUDE.md").read_text(encoding="utf-8") + "\n" + (
+        skill.read_text(encoding="utf-8") if skill.is_file() else ""
+    )
+
+
+def rewrite_session_docs(payload: Path, old: str, new: str) -> int:
+    """Replace a fragment wherever the session documentation carries it.
+
+    Returns how many files changed, so a test can assert the fragment was
+    somewhere to begin with rather than passing on a typo.
+    """
+    changed = 0
+    for rel in ("CLAUDE.md", "AGENTS.md", SESSION_SKILL_PATH):
+        path = payload / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if old not in text:
+            continue
+        write_lf(path, text.replace(old, new))
+        changed += 1
+    return changed
+
+
 def run_installer(
     installer: Path, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
@@ -1054,7 +1089,9 @@ class RendererTests(unittest.TestCase):
     def test_context_policy_custom_values_render(self) -> None:
         data = profile("standard")
         data["context_policy"] = {
-            "working_band": {"floor_tokens": 60000, "ceiling_tokens": 90000},
+            # The ceiling is passed to `claude --autocompact`, which accepts
+            # 100k-1M, so a custom band still has to land inside that range.
+            "working_band": {"floor_tokens": 90000, "ceiling_tokens": 120000},
             "on_ceiling": "stop-and-ask",
             "isolate_when": ["Schema migration surveys"],
             "always": ["Prefer a spec over a transcript."],
@@ -1069,7 +1106,7 @@ class RendererTests(unittest.TestCase):
             run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
 
             agents = (output / "payload" / "AGENTS.md").read_text()
-            self.assertIn("60k-90k tokens", agents)
+            self.assertIn("90k-120k tokens", agents)
             self.assertIn("stop and ask the operator", agents)
             self.assertIn("Prefer a spec over a transcript.", agents)
             self.assertNotIn("150k-200k tokens", agents)
@@ -1086,6 +1123,17 @@ class RendererTests(unittest.TestCase):
             ),
             ({"working_band": {"floor_tokens": "150000"}}, "must be an integer"),
             ({"working_band": {"floor_tokens": 10}}, "must be between"),
+            # Valid before 1.15.0, and a session that could never open after it:
+            # `claude --autocompact` refuses a ceiling below 100k at argument
+            # parsing. See `.ai/reports/0006-compaction-smoke-test.md`.
+            (
+                {"working_band": {"floor_tokens": 60000, "ceiling_tokens": 90000}},
+                "ceiling_tokens must be between",
+            ),
+            (
+                {"working_band": {"floor_tokens": 150000, "ceiling_tokens": 1_500_000}},
+                "ceiling_tokens must be between",
+            ),
             ({"on_ceiling": "ignore-it"}, "on_ceiling must be one of"),
             ("not-an-object", "context_policy must be an object"),
             ({"isolate_when": "not-a-list"}, "isolate_when must be an array"),
@@ -2145,7 +2193,7 @@ class OrcaSurfaceRenderTests(unittest.TestCase):
     def test_the_section_renders_only_when_the_surface_is_configured(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             payload = self.render(Path(temp), "orca")
-            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            text = session_docs(payload)
             self.assertIn("### Watching a session in Orca", text)
             self.assertIn("--surface orca", text)
 
@@ -2157,16 +2205,20 @@ class OrcaSurfaceRenderTests(unittest.TestCase):
     def test_the_validator_rejects_a_harness_that_lost_the_section(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             payload = self.render(Path(temp), "orca")
-            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
-            write_lf(
-                payload / "CLAUDE.md",
-                text.replace("### Watching a session in Orca", "### Watching"),
+            self.assertEqual(
+                rewrite_session_docs(
+                    payload, "### Watching a session in Orca", "### Watching"
+                ),
+                1,
             )
             data = profile("standard")
             data["session_surface"] = "orca"
             errors: list[str] = []
             VALIDATOR.check_session_surface(data, payload, errors, [])
-            self.assertTrue(any("no '### Watching" in item for item in errors), errors)
+            self.assertTrue(
+                any("'### Watching a session in Orca' section" in item for item in errors),
+                errors,
+            )
 
     def test_the_validator_rejects_guidance_the_profile_never_asked_for(self) -> None:
         """Drift in the other direction points operators at an unchosen tool."""
@@ -2179,8 +2231,9 @@ class OrcaSurfaceRenderTests(unittest.TestCase):
     def test_the_validator_requires_the_rules_the_launcher_enforces(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             payload = self.render(Path(temp), "orca")
-            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
-            write_lf(payload / "CLAUDE.md", text.replace("never parsed", "summarized"))
+            self.assertEqual(
+                rewrite_session_docs(payload, "never parsed", "summarized"), 1
+            )
             data = profile("standard")
             data["session_surface"] = "orca"
             errors: list[str] = []
@@ -2372,12 +2425,15 @@ class SessionToolingRenderTests(unittest.TestCase):
 
     def test_claude_md_states_the_dispatch_split_and_the_teardown(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            output = self.render(Path(temp), "standard")
-            text = (output / "payload/CLAUDE.md").read_text(encoding="utf-8")
-            self.assertIn("## Agent sessions", text)
-            self.assertIn("harness_session.py sweep", text)
-            self.assertIn("claude agents --json --cwd .", text)
-            self.assertIn("--allow-dangerously-skip-permissions", text)
+            payload = self.render(Path(temp), "standard") / "payload"
+            contract = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            # The claims that must hold in a session that never loads a skill.
+            self.assertIn("## Agent sessions", contract)
+            self.assertIn("claude agents --json --cwd .", contract)
+            self.assertIn("--allow-dangerously-skip-permissions", contract)
+            # The procedure is reachable, and reachable is where it belongs.
+            self.assertIn("harness_session.py sweep", session_docs(payload))
+            self.assertNotIn("harness_session.py sweep", contract)
 
     def test_the_validator_and_the_renderer_agree_on_the_tool_list(self) -> None:
         """The validator deliberately keeps its own list; a test keeps them equal."""
@@ -2413,12 +2469,11 @@ class SessionToolingRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             output = self.render(Path(temp), "standard")
             payload = output / "payload"
-            claude_md = payload / "CLAUDE.md"
-            write_lf(
-                claude_md,
-                claude_md.read_text(encoding="utf-8").replace(
-                    "harness_session.py sweep", "harness_session.py list"
+            self.assertEqual(
+                rewrite_session_docs(
+                    payload, "harness_session.py sweep", "harness_session.py list"
                 ),
+                1,
             )
             errors: list[str] = []
             VALIDATOR.check_session_tools(profile("standard"), payload, errors)
@@ -3129,12 +3184,16 @@ class CheckpointContractTests(unittest.TestCase):
 
     def test_the_contract_documents_the_status_command(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            output = self.render(Path(temp), "standard")
-            agents = (output / "payload/AGENTS.md").read_text(encoding="utf-8")
-            self.assertIn("harness_checkpoint.py status", agents)
-            self.assertIn("harness_checkpoint.py write", agents)
-            # The honest limit belongs in the contract, not only in the source.
-            self.assertIn("token count is yours to supply", agents)
+            payload = self.render(Path(temp), "standard") / "payload"
+            agents = (payload / "AGENTS.md").read_text(encoding="utf-8")
+            skill = (payload / SESSION_SKILL_PATH).read_text(encoding="utf-8")
+            # The band stays always-loaded; the commands moved to the skill in
+            # 1.16.0, which is where someone about to run one will be reading.
+            self.assertIn("The band is data, not advice", agents)
+            self.assertIn("harness_checkpoint.py status", skill)
+            self.assertIn("harness_checkpoint.py write", skill)
+            # The honest limit belongs beside the command it qualifies.
+            self.assertIn("token count is yours to supply", skill)
 
     def test_lite_documents_no_checkpoint_tool_it_does_not_install(self) -> None:
         """Lite ships no session tooling, so a command for it would be a lie."""
@@ -3148,10 +3207,11 @@ class CheckpointContractTests(unittest.TestCase):
         """The check has to bind, or the documentation can drift back to prose."""
         with tempfile.TemporaryDirectory() as temp:
             output = self.render(Path(temp), "standard")
-            agents = output / "payload/AGENTS.md"
-            text = agents.read_text(encoding="utf-8")
-            self.assertIn("harness_checkpoint.py status", text)
-            write_lf(agents, text.replace("harness_checkpoint.py status", "REMOVED"))
+            payload = output / "payload"
+            self.assertEqual(
+                rewrite_session_docs(payload, "harness_checkpoint.py status", "REMOVED"),
+                1,
+            )
 
             errors: list[str] = []
             VALIDATOR.check_session_tools(
@@ -3307,13 +3367,14 @@ class ProgressRenderTests(unittest.TestCase):
 
     def test_the_session_start_checklist_names_both_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            output = self.render(Path(temp), "standard")
-            claude = (output / "payload/CLAUDE.md").read_text(encoding="utf-8")
+            payload = self.render(Path(temp), "standard") / "payload"
+            claude = (payload / "CLAUDE.md").read_text(encoding="utf-8")
             self.assertIn("## Session start", claude)
-            self.assertIn("harness_checkpoint.py resume", claude)
-            self.assertIn("harness_progress.py list --pending", claude)
-            # The invariant a reader most needs, stated where they will read it.
+            # The invariant a reader most needs holds without loading anything.
             self.assertIn("evidence and never authority", claude)
+            docs = session_docs(payload)
+            self.assertIn("harness_checkpoint.py resume", docs)
+            self.assertIn("harness_progress.py list --pending", docs)
 
     def test_lite_says_the_record_is_manual_rather_than_naming_absent_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -3486,14 +3547,18 @@ class TraceDocumentationTests(unittest.TestCase):
 
     def test_the_contract_documents_reading_by_correlation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            claude_md = (
-                self.render(Path(temp), "standard") / "payload/CLAUDE.md"
-            ).read_text(encoding="utf-8")
-            self.assertIn("--correlation", claude_md)
-            self.assertIn("read --correlation", claude_md)
-            self.assertIn("--duration-ms", claude_md)
+            payload = self.render(Path(temp), "standard") / "payload"
+            docs = session_docs(payload)
+            self.assertIn("--correlation", docs)
+            self.assertIn("read --correlation", docs)
+            self.assertIn("--duration-ms", docs)
             # The point of the field: one unit of work, not one mailbox.
-            self.assertIn("come from you, not from the agent", claude_md)
+            self.assertIn("come from you, not from the agent", docs)
+            # The authority boundary does not follow the procedure out.
+            self.assertIn(
+                "never a grant",
+                (payload / "CLAUDE.md").read_text(encoding="utf-8"),
+            )
 
     def test_lite_documents_no_trace_for_a_bus_it_does_not_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -3507,9 +3572,10 @@ class TraceDocumentationTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output = self.render(Path(temp), "standard")
-            claude_md = output / "payload/CLAUDE.md"
-            text = claude_md.read_text(encoding="utf-8")
-            write_lf(claude_md, text.replace("read --correlation", "read"))
+            self.assertEqual(
+                rewrite_session_docs(output / "payload", "read --correlation", "read"),
+                1,
+            )
 
             errors: list[str] = []
             VALIDATOR.check_session_tools(
@@ -3528,11 +3594,13 @@ class TraceDocumentationTests(unittest.TestCase):
         """Ship the fields without that sentence and an agent fills them in."""
         with tempfile.TemporaryDirectory() as temp:
             output = self.render(Path(temp), "standard")
-            claude_md = output / "payload/CLAUDE.md"
-            text = claude_md.read_text(encoding="utf-8")
-            write_lf(
-                claude_md,
-                text.replace("come from you, not from the agent", "are recorded"),
+            self.assertEqual(
+                rewrite_session_docs(
+                    output / "payload",
+                    "come from you, not from the agent",
+                    "are recorded",
+                ),
+                1,
             )
 
             errors: list[str] = []
@@ -4136,16 +4204,18 @@ class ReportTests(unittest.TestCase):
             run(PYTHON, str(SCRIPTS / "render_harness.py"),
                 "--config", str(config), "--output", str(output))
 
-            text = (output / "payload/CLAUDE.md").read_text(encoding="utf-8")
-            self.assertIn("harness_report.py --out", text)
-
-            claude_md = output / "payload/CLAUDE.md"
-            write_lf(claude_md, text.replace("harness_report.py --out",
-                                             "harness_report.py --json"))
+            payload = output / "payload"
+            self.assertIn("harness_report.py --out", session_docs(payload))
+            self.assertEqual(
+                rewrite_session_docs(
+                    payload, "harness_report.py --out", "harness_report.py --json"
+                ),
+                1,
+            )
             errors: list[str] = []
-            VALIDATOR.check_session_tools(profile("standard"), output / "payload", errors)
+            VALIDATOR.check_session_tools(profile("standard"), payload, errors)
             self.assertTrue(
-                any("does not document the harness report" in item for item in errors),
+                any("documents the harness report" in item for item in errors),
                 errors,
             )
 
@@ -4165,9 +4235,9 @@ class ReportTests(unittest.TestCase):
                 "--config", str(config), "--output", str(output))
             payload = output / "payload"
 
-            text = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            text = session_docs(payload)
             documented = re.findall(r"harness_report\.py --out (\S+)", text)
-            self.assertTrue(documented, "CLAUDE.md documents no --out path")
+            self.assertTrue(documented, "the harness documents no --out path")
             for path in documented:
                 with self.subTest(path=path):
                     self.assertTrue(
@@ -4646,13 +4716,16 @@ class SessionBriefTests(unittest.TestCase):
                 "--config", str(REPO / "examples" / "standard-codex-plugin.json"),
                 "--output", str(output),
             )
-            claude = (output / "payload" / "CLAUDE.md").read_text(encoding="utf-8")
+            payload = output / "payload"
+            claude = (payload / "CLAUDE.md").read_text(encoding="utf-8")
 
-        self.assertIn("harness_report.py --brief", claude)
-        # The two it replaced still exist and are still named, because one of
-        # them alone is sometimes the right call.
-        self.assertIn("harness_checkpoint.py resume", claude)
-        self.assertIn("harness_progress.py list --pending", claude)
+            self.assertIn("harness_report.py --brief", claude)
+            # The two it replaced still exist and are still named, because one
+            # of them alone is sometimes the right call. They moved into the
+            # skill in 1.16.0; the one command a resuming session needs did not.
+            docs = session_docs(payload)
+            self.assertIn("harness_checkpoint.py resume", docs)
+            self.assertIn("harness_progress.py list --pending", docs)
 
 
 class GroundTruthTests(unittest.TestCase):
@@ -4970,7 +5043,9 @@ class GuardedHookTests(unittest.TestCase):
             settings = payload / ".claude/settings.json"
             self.assertTrue(settings.is_file())
             data = json.loads(settings.read_text(encoding="utf-8"))
-            self.assertEqual(sorted(data["hooks"]), ["PreToolUse", "SessionStart"])
+            self.assertEqual(
+                sorted(data["hooks"]), ["PreCompact", "PreToolUse", "SessionStart"]
+            )
             for name in RENDERER.HOOK_SCRIPTS:
                 installed = payload / "scripts/ai-harness" / name
                 self.assertTrue(installed.is_file(), name)
@@ -5067,3 +5142,617 @@ class GuardedHookTests(unittest.TestCase):
             self.assertNotIn("permissionDecision", text, name)
             self.assertNotIn('"allow"', text, name)
             self.assertIn("HARNESS_HOOKS_DISABLE", text, name)
+
+
+class CompactionTests(unittest.TestCase):
+    """Module 2: the working band stops being advice.
+
+    Every assertion here stands on a measurement rather than a reading of the
+    help text. `.ai/reports/0006-compaction-smoke-test.md` records the runs: what
+    `--autocompact` accepts, what a `PreCompact` payload carries, that a 51-turn
+    run compacted three times, and that a path-scoped rule is genuinely absent
+    when nothing matches it.
+    """
+
+    HOOK = SCRIPTS / "hook_precompact.py"
+
+    def payload(self, root: Path, **overrides) -> str:
+        record = {
+            "session_id": "39a15a30-3162-4313-aaa9-a4b248be8411",
+            "transcript_path": str(root / "transcript.jsonl"),
+            "cwd": str(root),
+            "hook_event_name": "PreCompact",
+            "trigger": "auto",
+            "custom_instructions": None,
+        }
+        record.update(overrides)
+        return json.dumps(record)
+
+    def harnessed(self, root: Path, *, ceiling: int = 200_000) -> Path:
+        (root / ".ai" / "harness").mkdir(parents=True, exist_ok=True)
+        (root / ".ai" / "harness" / "project-profile.json").write_text(
+            json.dumps(
+                {
+                    "context_policy": {
+                        "working_band": {"floor_tokens": 150_000, "ceiling_tokens": ceiling},
+                        "on_ceiling": "checkpoint-and-handoff",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root
+
+    # ------------------------------------------------- the band becomes a flag
+
+    def test_the_autocompact_range_is_the_one_the_cli_accepts(self) -> None:
+        """Measured on 2.1.263: `50000` and `2000000` are refused at argument
+        parsing with "It must be 'auto', or between 100k and 1M"."""
+        self.assertEqual(CAPABILITIES.AUTOCOMPACT_MIN_TOKENS, 100_000)
+        self.assertEqual(CAPABILITIES.AUTOCOMPACT_MAX_TOKENS, 1_000_000)
+        for accepted in (100_000, 200_000, 1_000_000):
+            self.assertEqual(
+                CAPABILITIES.autocompact_flag(accepted),
+                ["--autocompact", str(accepted)],
+            )
+        for refused in (99_999, 1_000_001, 0, -1):
+            self.assertEqual(CAPABILITIES.autocompact_flag(refused), [], refused)
+
+    def test_a_json_true_ceiling_produces_no_flag(self) -> None:
+        """`true` in a hand-edited profile is an int in Python, and a naive path
+        would render `--autocompact True`. Asserted end to end, from the profile
+        to the argv, because that is the only place the claim is observable: the
+        range check alone is enough to stop it, so a separate type guard would be
+        code no test could distinguish."""
+        self.assertEqual(CAPABILITIES.autocompact_flag(True), [])
+        self.assertEqual(CAPABILITIES.autocompact_flag(None), [])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".ai" / "harness").mkdir(parents=True)
+            (root / ".ai" / "harness" / "project-profile.json").write_text(
+                json.dumps({"context_policy": {"working_band": {"ceiling_tokens": True}}}),
+                encoding="utf-8",
+            )
+            argv = SESSION.launch_argv(
+                "reader", "map it", autocompact_tokens=SESSION.declared_ceiling(root)
+            )
+            self.assertNotIn("--autocompact", argv)
+
+    def test_the_launcher_passes_the_declared_ceiling(self) -> None:
+        argv = SESSION.launch_argv("reader", "map it", autocompact_tokens=200_000)
+        self.assertIn("--autocompact", argv)
+        self.assertEqual(argv[argv.index("--autocompact") + 1], "200000")
+
+    def test_a_harness_without_a_ceiling_still_opens_a_session(self) -> None:
+        """The flag is an improvement, not a precondition. A profile written
+        before 1.15.0 narrowed the range must not produce a session that cannot
+        start; it produces one whose band is prose, as it always was."""
+        argv = SESSION.launch_argv("reader", "map it")
+        self.assertNotIn("--autocompact", argv)
+        argv = SESSION.launch_argv("reader", "map it", autocompact_tokens=90_000)
+        self.assertNotIn("--autocompact", argv)
+
+    def test_the_ceiling_is_read_from_the_installed_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp), ceiling=250_000)
+            self.assertEqual(SESSION.declared_ceiling(root), 250_000)
+
+    def test_an_unreadable_profile_yields_no_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.assertIsNone(SESSION.declared_ceiling(root))
+            (root / ".ai" / "harness").mkdir(parents=True)
+            (root / ".ai" / "harness" / "project-profile.json").write_text(
+                "{not json", encoding="utf-8"
+            )
+            self.assertIsNone(SESSION.declared_ceiling(root))
+            (root / ".ai" / "harness" / "project-profile.json").write_text(
+                json.dumps({"context_policy": {"working_band": {"ceiling_tokens": "200000"}}}),
+                encoding="utf-8",
+            )
+            self.assertIsNone(SESSION.declared_ceiling(root))
+
+    def test_the_validator_refuses_a_ceiling_the_launcher_cannot_pass(self) -> None:
+        """A package that validates and then cannot open a session is worse than
+        one that fails the gate, because the failure arrives in someone else's
+        repository.
+
+        The renderer refuses such a profile too, so the only way to reach this
+        check is to hand the validator one directly - which is exactly the case
+        it exists for: a package the renderer did not produce.
+        """
+        for ceiling, ok in ((90_000, False), (200_000, True), (1_500_000, False)):
+            errors: list[str] = []
+            VALIDATOR.check_context_policy(
+                {
+                    "context_policy": {
+                        "working_band": {"floor_tokens": 60_000, "ceiling_tokens": ceiling},
+                        "on_ceiling": "checkpoint-and-handoff",
+                    }
+                },
+                Path(tempfile.gettempdir()) / "no-such-payload",
+                errors,
+                [],
+            )
+            named = [e for e in errors if "ceiling_tokens must be between" in e]
+            self.assertEqual(bool(named), not ok, f"{ceiling}: {errors}")
+
+    # ------------------------------------------------------- the boundary log
+
+    def test_repeat_compaction_folds_into_one_record(self) -> None:
+        """The finding that shaped the design: one 51-turn run compacted three
+        times. A checkpoint directory per boundary would bury the record a human
+        wrote under a pile of machine-written ones."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            for _ in range(3):
+                result = run(
+                    PYTHON, str(SCRIPTS / "harness_checkpoint.py"), "--root", str(root),
+                    "from-hook", "--no-git", check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            logs = sorted((root / ".ai/runs/compaction").glob("*.json"))
+            self.assertEqual(len(logs), 1, "one file per session, not one per boundary")
+            record = json.loads(logs[0].read_text(encoding="utf-8"))
+            self.assertEqual(record["compactions"], 3)
+            self.assertEqual(len(record["boundaries"]), 3)
+            self.assertEqual(record["produced_by"], "compaction")
+
+    def test_a_boundary_log_is_not_a_checkpoint(self) -> None:
+        """`resume` and the brief's RESUME line must not offer a record nobody
+        wrote as the thing to resume from."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            proc = subprocess.run(
+                [PYTHON, str(SCRIPTS / "harness_checkpoint.py"), "--root", str(root),
+                 "from-hook", "--no-git"],
+                input=self.payload(root), capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIsNone(CHECKPOINT.latest_checkpoint(root))
+
+    def test_the_log_refuses_to_overwrite_a_file_it_did_not_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            target = root / ".ai/runs/compaction/39a15a30-3162-4313-aaa9-a4b248be8411.json"
+            target.parent.mkdir(parents=True)
+            target.write_text('{"something": "else"}', encoding="utf-8")
+
+            proc = subprocess.run(
+                [PYTHON, str(SCRIPTS / "harness_checkpoint.py"), "--root", str(root),
+                 "from-hook", "--no-git"],
+                input=self.payload(root), capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), '{"something": "else"}')
+            self.assertIn("not a boundary log", proc.stderr)
+
+    def test_a_session_id_cannot_escape_the_directory(self) -> None:
+        """It becomes a filename. The platform supplies it; that is not a reason
+        to write it into a path unchecked."""
+        for hostile in ("../../etc/passwd", "a/b", "", None, "x" * 200, ".hidden"):
+            self.assertEqual(
+                CHECKPOINT.safe_session_id(hostile), "unknown-session", repr(hostile)
+            )
+        self.assertEqual(CHECKPOINT.safe_session_id("abc-123"), "abc-123")
+
+    def test_the_pending_ledger_becomes_the_next_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            (root / ".ai").mkdir(exist_ok=True)
+            (root / ".ai/progress.json").write_text(
+                json.dumps({"progress_version": 1, "items": [
+                    {"id": "ci", "title": "gate green on CI", "passes": False},
+                    {"id": "done", "title": "already proven", "passes": True},
+                ]}),
+                encoding="utf-8",
+            )
+            pending = CHECKPOINT.pending_items(root)
+            self.assertEqual([item["id"] for item in pending], ["ci"])
+
+    def test_a_missing_ledger_is_not_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(CHECKPOINT.pending_items(Path(temp)), [])
+
+    def test_the_runs_directory_is_spelled_the_same_in_both_readers(self) -> None:
+        """A record written under one name and read under another never appears,
+        and nothing says so."""
+        self.assertEqual(CHECKPOINT.RUNS_DIRNAME, REPORT.RUNS_DIRNAME)
+        self.assertEqual(CHECKPOINT.COMPACTION_DIRNAME, REPORT.COMPACTION_DIRNAME)
+        self.assertEqual(CHECKPOINT.BOUNDARY_VERSION, REPORT.BOUNDARY_VERSION)
+
+    # -------------------------------------------------------------- the hook
+
+    def test_the_hook_never_blocks(self) -> None:
+        """`PreCompact` cannot stop a compaction that is already necessary, and a
+        non-zero exit would put an error in front of the operator at the moment
+        the session is least able to explain itself."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            for stdin in (self.payload(root), "not json", "", "[]"):
+                proc = subprocess.run(
+                    [PYTHON, str(self.HOOK)], input=stdin, cwd=str(root),
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, 0, f"{stdin[:20]!r}: {proc.stderr}")
+
+    def test_the_hook_says_nothing_outside_an_installed_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            proc = subprocess.run(
+                [PYTHON, str(self.HOOK)], input=self.payload(root),
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+            self.assertFalse((root / ".ai").exists())
+
+    def test_the_hook_honors_the_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            env = dict(os.environ, HARNESS_HOOKS_DISABLE="1")
+            proc = subprocess.run(
+                [PYTHON, str(self.HOOK)], input=self.payload(root), env=env,
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertFalse((root / ".ai/runs").exists())
+
+    def test_nothing_in_the_compaction_path_opens_the_transcript(self) -> None:
+        """The payload names the transcript file. That file holds whatever the
+        session read, and copying it into a durable artifact is the exfiltration
+        this harness spends most of its rules preventing.
+
+        Asserted against the access forms rather than the string, because both
+        files discuss the field on purpose: a rule this consequential is worth
+        writing down beside the code that obeys it, and a test that forbade the
+        word would delete the explanation to keep itself passing.
+        """
+        for name in ("hook_precompact.py", "harness_checkpoint.py"):
+            source = (SCRIPTS / name).read_text(encoding="utf-8")
+            for access in (
+                'get("transcript_path"',
+                '["transcript_path"]',
+                "get('transcript_path'",
+                "['transcript_path']",
+            ):
+                self.assertNotIn(access, source, f"{name} reads {access}")
+
+    def test_the_boundary_record_carries_no_invented_summary(self) -> None:
+        """The payload has no summary in it. A record that guesses what the
+        session was doing is worse than one that says only what it knows."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            proc = subprocess.run(
+                [PYTHON, str(SCRIPTS / "harness_checkpoint.py"), "--root", str(root),
+                 "from-hook", "--no-git"],
+                input=self.payload(root), capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            record = json.loads(
+                (root / ".ai/runs/compaction/39a15a30-3162-4313-aaa9-a4b248be8411.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertNotIn("intent", record)
+            self.assertNotIn("summary", record)
+
+    # ------------------------------------------------------------- the brief
+
+    def test_the_brief_names_who_wrote_the_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            subprocess.run(
+                [PYTHON, str(SCRIPTS / "harness_checkpoint.py"), "--root", str(root),
+                 "from-hook", "--no-git"],
+                input=self.payload(root), capture_output=True, text=True, check=True,
+            )
+            brief = REPORT.render_brief(REPORT.build_model(root))
+            self.assertIn("COMPACTED  1 time(s)", brief)
+            self.assertIn("written by the PreCompact hook", brief)
+            self.assertNotIn("split the work or raise the band", brief)
+
+    def test_repeat_compaction_is_reported_as_a_ceiling_problem(self) -> None:
+        """The count is the finding. A session that passed its ceiling more than
+        once was given work the band was set too small for, and saying so is the
+        only reason to keep the log."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.harnessed(Path(temp))
+            for _ in range(3):
+                subprocess.run(
+                    [PYTHON, str(SCRIPTS / "harness_checkpoint.py"), "--root", str(root),
+                     "from-hook", "--no-git"],
+                    input=self.payload(root), capture_output=True, text=True, check=True,
+                )
+            brief = REPORT.render_brief(REPORT.build_model(root))
+            self.assertIn("COMPACTED  3 time(s)", brief)
+            self.assertIn("split the work or raise the band", brief)
+
+    # ------------------------------------------------------ the rendered wiring
+
+    def test_the_precompact_hook_is_wired_in_exec_form(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            data = profile("standard")
+            data["hooks_policy"] = "guarded"
+            data["python_command"] = "python"
+            config = Path(temp) / "guarded.json"
+            output = Path(temp) / "generated"
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+
+            settings = json.loads(
+                (output / "payload/.claude/settings.json").read_text(encoding="utf-8")
+            )
+            entry = settings["hooks"]["PreCompact"][0]
+            self.assertEqual(entry["matcher"], "auto|manual")
+            handler = entry["hooks"][0]
+            self.assertEqual(handler["type"], "command")
+            self.assertEqual(handler["command"], "python")
+            self.assertEqual(
+                handler["args"],
+                ["${CLAUDE_PROJECT_DIR}/scripts/ai-harness/hook_precompact.py"],
+            )
+            installed = output / "payload/scripts/ai-harness/hook_precompact.py"
+            self.assertEqual(
+                installed.read_bytes().replace(b"\r\n", b"\n"),
+                (SCRIPTS / "hook_precompact.py").read_bytes().replace(b"\r\n", b"\n"),
+            )
+
+    # ---------------------------------------------------- path-scoped rules
+
+    def test_the_validator_copy_of_the_path_split_matches_the_renderer(self) -> None:
+        """The validator must not import the renderer it validates, so it carries
+        a copy. This is the join the code cannot make."""
+        self.assertEqual(VALIDATOR.IMPORTANT_PATHS_RULE, RENDERER.IMPORTANT_PATHS_RULE)
+        self.assertEqual(
+            VALIDATOR.IMPORTANT_PATHS_SPLIT_CHARS, RENDERER.IMPORTANT_PATHS_SPLIT_CHARS
+        )
+        self.assertEqual(
+            VALIDATOR.PATH_TOKEN_PATTERN.pattern, RENDERER.PATH_TOKEN_PATTERN.pattern
+        )
+        for entry in (
+            "src/app - application routes",
+            "no-separator-here",
+            "some path with spaces - description",
+            "tests/ - automated verification",
+        ):
+            self.assertEqual(
+                VALIDATOR.split_important_path(entry),
+                RENDERER.split_important_path(entry),
+                entry,
+            )
+
+    def test_a_short_path_list_stays_whole(self) -> None:
+        """The split was written first and measured second, and the measurement
+        said no for a short list: the pointer sentence that replaces the
+        descriptions is longer than the descriptions."""
+        data = profile("standard")
+        data["important_paths"] = ["src/app - routes", "tests - checks"]
+        self.assertFalse(RENDERER.important_paths_are_split(data))
+        section = RENDERER.important_paths_section(data, False)
+        self.assertIn("src/app - routes", section)
+        self.assertNotIn(RENDERER.IMPORTANT_PATHS_RULE, section)
+
+    def test_a_long_path_list_splits_and_the_map_stays(self) -> None:
+        data = profile("standard")
+        data["important_paths"] = [
+            f"src/area{index} - " + ("a long description of this area " * 5)
+            for index in range(4)
+        ]
+        self.assertTrue(RENDERER.important_paths_are_split(data))
+        section = RENDERER.important_paths_section(data, False)
+        for index in range(4):
+            self.assertIn(f"`src/area{index}`", section)
+        self.assertIn(RENDERER.IMPORTANT_PATHS_RULE, section)
+        self.assertNotIn("a long description", section)
+
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "long.json"
+            output = Path(temp) / "generated"
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+
+            rule = (
+                output / "payload/.claude/rules"
+                / f"{RENDERER.IMPORTANT_PATHS_RULE}.md"
+            ).read_text(encoding="utf-8")
+            self.assertTrue(rule.startswith("---\npaths:\n"))
+            for index in range(4):
+                self.assertIn(f'"src/area{index}"', rule)
+                self.assertIn(f'"src/area{index}/**"', rule)
+            self.assertIn("a long description", rule)
+
+    def test_the_validator_catches_a_rule_that_lost_a_path(self) -> None:
+        """A malformed matcher is the one failure mode that is silent: the rule
+        simply never loads, and nothing reports it."""
+        data = profile("standard")
+        data["important_paths"] = [
+            f"src/area{index} - " + ("a long description of this area " * 5)
+            for index in range(4)
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "long.json"
+            output = Path(temp) / "generated"
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+                "--output", str(output))
+
+            rule = output / "payload/.claude/rules" / f"{RENDERER.IMPORTANT_PATHS_RULE}.md"
+            rule.write_text(
+                rule.read_text(encoding="utf-8").replace('  - "src/area3/**"\n', ""),
+                encoding="utf-8",
+            )
+            result = run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output),
+                         check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not scope", result.stdout + result.stderr)
+
+
+class OnDemandSessionSkillTests(unittest.TestCase):
+    """1.16.0: the procedure moved out of the always-loaded contract.
+
+    `.ai/reports/0007-on-demand-skill-loading.md` measured three things on
+    2.1.263: a project skill is reached from its description alone, its body is
+    genuinely absent until then, and `disable-model-invocation: true` makes it
+    unreachable. The first two are why the move is worth making; the third is
+    why the roadmap's instruction to set that flag was rejected.
+    """
+
+    def render(self, temp_path: Path, tier: str = "standard") -> Path:
+        config = temp_path / "profile.json"
+        output = temp_path / "generated"
+        write_lf(config, json.dumps(profile(tier), indent=2) + chr(10))
+        run(PYTHON, str(SCRIPTS / "render_harness.py"), "--config", str(config),
+            "--output", str(output))
+        return output / "payload"
+
+    def test_the_renderer_and_the_validator_agree_on_the_skill_name(self) -> None:
+        """Two spellings of one path would make the invariant unenforceable."""
+        self.assertEqual(RENDERER.SESSION_SKILL, VALIDATOR.SESSION_SKILL)
+        self.assertIn(RENDERER.SESSION_SKILL, VALIDATOR.MODEL_INVOCABLE_SKILLS)
+        self.assertIn(RENDERER.SESSION_SKILL, RENDERER.CORE_COMPONENT_NAMES)
+
+    def test_standard_renders_the_skill_with_a_situational_description(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            skill = payload / SESSION_SKILL_PATH
+            self.assertTrue(skill.is_file())
+            body = skill.read_text(encoding="utf-8")
+            match = VALIDATOR.FRONTMATTER.match(body)
+            self.assertIsNotNone(match, "the skill has no frontmatter")
+            front = match.group(1)
+            self.assertIn(f"name: {RENDERER.SESSION_SKILL}", front)
+            # The description is the only part that stays always-loaded, so it
+            # has to name situations rather than repeat the skill's own name.
+            self.assertIn("Use when", front)
+            self.assertNotIn("disable-model-invocation", front)
+
+    def test_lite_renders_no_session_skill(self) -> None:
+        """Lite installs no session tooling, so it has no procedure to move."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), "lite")
+            self.assertFalse((payload / SESSION_SKILL_PATH).exists())
+
+    def test_the_procedure_is_in_the_skill_and_not_in_the_contract(self) -> None:
+        """The saving is only real if the body actually left."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            contract = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            skill = (payload / SESSION_SKILL_PATH).read_text(encoding="utf-8")
+            for recipe in (
+                "harness_session.py launch",
+                "harness_session.py sweep",
+                "harness_bus.py read --correlation",
+                "harness_agentgen.py emit",
+                "harness_report.py --out",
+            ):
+                with self.subTest(recipe=recipe):
+                    self.assertIn(recipe, skill)
+                    self.assertNotIn(recipe, contract)
+            self.assertIn(RENDERER.SESSION_SKILL, contract)
+
+    def test_the_prohibitions_do_not_follow_the_procedure_out(self) -> None:
+        """A rule is most needed by the session that never thought to ask."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            contract = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            for token, _ in VALIDATOR.SESSION_SAFETY_LINES:
+                with self.subTest(token=token):
+                    self.assertIn(token, contract)
+
+    def test_the_validator_catches_a_prohibition_that_moved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            for token, _ in VALIDATOR.SESSION_SAFETY_LINES:
+                contract = payload / "CLAUDE.md"
+                original = contract.read_text(encoding="utf-8")
+                write_lf(contract, original.replace(token, "REDACTED"))
+                errors: list[str] = []
+                VALIDATOR.check_session_tools(profile("standard"), payload, errors)
+                write_lf(contract, original)
+                with self.subTest(token=token):
+                    self.assertTrue(
+                        any("may not move into a skill" in item for item in errors),
+                        errors,
+                    )
+
+    def test_a_disabled_session_skill_is_a_failure(self) -> None:
+        """The flag would turn the move into a deletion that still lints clean."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            skill = payload / SESSION_SKILL_PATH
+            body = skill.read_text(encoding="utf-8")
+            write_lf(skill, body.replace("---\n\n#", "disable-model-invocation: true\n---\n\n#", 1))
+            errors: list[str] = []
+            VALIDATOR.check_model_invocable_skills(profile("standard"), payload, errors, [])
+            self.assertTrue(
+                any("unreachable to the model" in item for item in errors), errors
+            )
+
+    def test_a_disabled_orchestration_skill_is_a_failure(self) -> None:
+        """It ships reachable today; disabling it would be a silent regression."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            skill = payload / ".claude/skills/harness-orchestration/SKILL.md"
+            body = skill.read_text(encoding="utf-8")
+            self.assertNotIn("disable-model-invocation", body)
+            write_lf(skill, body.replace("---\n\n#", "disable-model-invocation: yes\n---\n\n#", 1))
+            errors: list[str] = []
+            VALIDATOR.check_model_invocable_skills(profile("standard"), payload, errors, [])
+            self.assertTrue(
+                any("harness-orchestration" in item for item in errors), errors
+            )
+
+    def test_an_operator_declared_skill_may_still_be_manual_only(self) -> None:
+        """The flag is not banned; it is banned on the skills the harness uses.
+
+        A profile-declared `additional_skills` entry defaults to manual-only
+        because an operator adding a procedure means to invoke it themselves.
+        The check must not have grown into a blanket rule.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            extra = payload / ".claude/skills/operator-runbook"
+            extra.mkdir(parents=True)
+            write_lf(
+                extra / "SKILL.md",
+                "---\nname: operator-runbook\n"
+                "disable-model-invocation: true\n---\n\n# Runbook\n",
+            )
+            errors: list[str] = []
+            VALIDATOR.check_model_invocable_skills(profile("standard"), payload, errors, [])
+            self.assertEqual(errors, [])
+
+    def test_every_shipped_example_is_under_the_line(self) -> None:
+        """The gate is only honest if the generator's own output passes it."""
+        for example in sorted((REPO / "examples").glob("*.json")):
+            with self.subTest(example=example.name), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "generated"
+                run(PYTHON, str(SCRIPTS / "render_harness.py"),
+                    "--config", str(example), "--output", str(output))
+                payload = output / "payload"
+                total = sum(
+                    (payload / rel).read_text(encoding="utf-8").count("\n") + 1
+                    for rel in ("CLAUDE.md", "AGENTS.md")
+                )
+                self.assertLess(total, VALIDATOR.ALWAYS_LOADED_LINE_TARGET)
+
+    def test_an_oversized_contract_fails_rather_than_warns(self) -> None:
+        """1.13.0 measured it and warned. A warning nothing ever hits is noise."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp))
+            errors: list[str] = []
+            VALIDATOR.check_always_loaded_size(payload, errors)
+            self.assertEqual(errors, [], "the rendered contract is already over")
+
+            contract = payload / "CLAUDE.md"
+            padding = "\n".join(f"padding line {index}" for index in range(200))
+            write_lf(contract, contract.read_text(encoding="utf-8") + padding)
+            errors = []
+            VALIDATOR.check_always_loaded_size(payload, errors)
+            self.assertTrue(
+                any("always-loaded contract is" in item for item in errors), errors
+            )
