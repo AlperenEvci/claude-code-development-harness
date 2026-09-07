@@ -48,7 +48,7 @@ Create one normalized JSON object from project evidence plus the user's confirme
 
   "autonomy": "repository-write-with-approval",
   "network_access": "deny-by-default",
-  "hooks_policy": "examples-only",
+  "hooks_policy": "guarded",
   "git_workflow": "feature-branches",
   "agent_commit_policy": "no-commit",
   "parallel_writes": false,
@@ -180,9 +180,10 @@ Create one normalized JSON object from project evidence plus the user's confirme
 - `hooks_policy`: `disabled`, `examples-only`, `guarded`. `disabled` and
   `examples-only` render nothing executable. `guarded` renders
   `.claude/settings.json` and copies the hook scripts, and requires Standard or
-  Fleet because the scripts land under `scripts/ai-harness/`. See
-  `references/hooks.md` before choosing it.
-- `python_command`: `python3` (default), `python`, or an absolute interpreter path. Optional; the name that printed a version when setup resolved the interpreter. Bare `python3` is a Microsoft Store stub on Windows, so setup records `python` there. Nothing consumes it yet; it is the interpreter generated hooks will be invoked through.
+  Fleet because the scripts land under `scripts/ai-harness/`. Optional since
+  2.0.0: when absent it is `guarded` at Standard and Fleet and `examples-only`
+  at Lite. Name it to opt out. See `references/hooks.md` before choosing.
+- `python_command`: `python3` (default), `python`, or an absolute interpreter path. Optional; the name that printed a version when setup resolved the interpreter. Bare `python3` is a Microsoft Store stub on Windows, so setup records `python` there. It is the interpreter the generated hooks are invoked through.
 - `agent_commit_policy`: `no-commit`, `commit-locally`. Setup itself never commits.
 - `risk_level`: `low`, `normal`, `high`, `regulated`.
 - `generated_language`: `English` in version 0.2.

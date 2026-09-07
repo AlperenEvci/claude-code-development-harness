@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 1.19.0](https://img.shields.io/badge/Version-1.19.0-7C3AED?style=flat-square)
+![Version 2.0.0](https://img.shields.io/badge/Version-2.0.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -514,7 +514,7 @@ It reports findings without modifying the project.
 - no secret-value reads,
 - no network access by default,
 - no permission or sandbox bypasses — `--dangerously-skip-permissions` and `--allow-dangerously-skip-permissions` must never appear in generated output, and the validator scans every runnable block in every generated Markdown file,
-- no active hooks,
+- no hook that allows: a Standard or Fleet harness installs deny-only command hooks by default since 2.0.0, every one honors `HARNESS_HOOKS_DISABLE=1`, and Lite installs none,
 - no dependency installation or application scaffolding,
 - no automatic Git initialization, commit, push, pull request, deploy, or migration,
 - no silent overwrite of existing project instructions,
@@ -538,9 +538,9 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 344 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 355 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
-**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds eight cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, a hostile `.claude/settings.json` found in the scanned repository is a finding rather than a starting point, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
+**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds ten cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, a hostile `.claude/settings.json` found in the scanned repository is a finding rather than a starting point, an installed hook edited to return `allow` and a Stop-hook command that drifted from the profile are both findings the audit reports and never repairs, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 
 Two honest caveats. `claude plugin eval` is in early access and enabled per organization, so on most accounts — including this project's CI — it will not run; the cases are still parsed and schema-checked on every push so they cannot rot unnoticed. And **they have not yet been executed against a live model**, so treat them as a stated contract rather than a passing result.
 
@@ -548,7 +548,7 @@ The number worth watching when they do run is not the score but the **delta** ag
 
 ## Requirements
 
-- Claude Code `2.1.196+` for setup and audit; the 1.0 session runtime was exercised against `2.1.251`
+- Claude Code `2.1.196+` for setup and audit; the 1.0 session runtime was exercised against `2.1.251` and the 2.0 hooks against `2.1.263`
 - Python `3.10+`
 - Git recommended; required for Fleet/worktrees
 - Codex optional

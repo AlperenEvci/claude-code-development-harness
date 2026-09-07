@@ -75,6 +75,97 @@ FLEET_REQUIRED = [
 ]
 
 
+HOOK_CAPABLE_TIERS = frozenset({"standard", "fleet"})
+
+#: The one flag each hook script takes, and the profile key its value must equal.
+#: A separate copy of the validator's table: this is the only gate after the copy.
+HOOK_COMMAND_ARGS = {
+    "hook_session_start.py": ("--smoke", "smoke_command"),
+    "hook_stop.py": ("--check", "smallest_check_command"),
+}
+
+
+def default_hooks_policy(tier: str) -> str:
+    """Mirrors `render_harness.default_hooks_policy`; see the note there."""
+    return "guarded" if str(tier).lower() in HOOK_CAPABLE_TIERS else "examples-only"
+
+
+def hook_handler_args(settings_text: str) -> dict[str, list[str]] | None:
+    """Map each registered harness hook script to the arguments after it.
+
+    None when the file is not a JSON object with a `hooks` mapping. The shape is
+    read loosely on purpose: this is the operator's file, possibly merged by hand,
+    and the question is what it would run, not whether it is well-formed.
+    """
+    try:
+        data = json.loads(settings_text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("hooks"), dict):
+        return None
+    found: dict[str, list[str]] = {}
+    for groups in data["hooks"].values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            for handler in handlers or []:
+                if not isinstance(handler, dict):
+                    continue
+                args = handler.get("args")
+                if not isinstance(args, list) or not args:
+                    continue
+                script = str(args[0]).replace("\\", "/").rsplit("/", 1)[-1]
+                if script.startswith("hook_") and script.endswith(".py"):
+                    found[script] = [str(item) for item in args[1:]]
+    return found
+
+
+def check_hook_integrity(
+    root: Path, profile: dict[str, Any], settings_text: str, errors: list[str]
+) -> None:
+    """The two hook invariants that survive installation, checked after it.
+
+    The package validator proves them once, before the copy. Both the settings
+    file and the scripts can be edited afterwards, and a hook runs before the
+    permission check without asking the model, so what is on disk is what
+    matters. Two things are checked, both errors:
+
+    - a settings handler's flag value equals the profile's command byte for
+      byte. `hook_stop.py --check` runs its value through a shell; a settings
+      file and a profile that disagree mean one of them was changed after the
+      operator approved the other, and the audit cannot tell which.
+    - no installed hook script mentions a permission decision. A generated
+      hook denies or adds context; one that allows is the untrusted-text rule
+      broken by the one mechanism that runs unasked.
+    """
+    handlers = hook_handler_args(settings_text)
+    if handlers is not None:
+        for script, (flag, key) in HOOK_COMMAND_ARGS.items():
+            if script not in handlers:
+                continue
+            extra = handlers[script]
+            expected = str(profile.get(key, "")).strip()
+            if not extra and not expected:
+                continue
+            if extra != [flag, expected] or not expected:
+                errors.append(
+                    f".claude/settings.json runs {script} with {extra}, but the "
+                    f"profile's {key} is {expected!r}; one of the two was edited "
+                    "after installation, and a hook may run only the command the "
+                    "profile names - re-render rather than repair either by hand"
+                )
+    for name in HOOK_REQUIRED:
+        if not name.endswith(".py"):
+            continue
+        text = read_text(root / name)
+        if '"allow"' in text or "permissionDecision" in text:
+            errors.append(
+                f"{name} mentions a permission decision; a generated hook may deny, "
+                "never allow - this copy was edited or replaced after installation"
+            )
+
+
 def read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -307,7 +398,8 @@ def main() -> None:
         required.extend(FLEET_REQUIRED)
         if delegate != "codex-cli":
             errors.append("fleet harness requires implementation_delegate=codex-cli")
-    if str(profile.get("hooks_policy", "")) == "guarded":
+    hooks_policy = str(profile.get("hooks_policy") or default_hooks_policy(tier))
+    if hooks_policy == "guarded":
         required.extend(HOOK_REQUIRED)
     required.extend(dynamic)
 
@@ -444,7 +536,6 @@ def main() -> None:
     elif surface != "inproc":
         errors.append(f"unknown session_surface: {surface}")
 
-    hooks_policy = str(profile.get("hooks_policy", "examples-only"))
     settings_path = root / ".claude/settings.json"
     if settings_path.exists():
         text = read_text(settings_path)
@@ -466,6 +557,7 @@ def main() -> None:
                 )
             else:
                 info.append("Harness hooks are wired in .claude/settings.json")
+            check_hook_integrity(root, profile, text, errors)
     elif hooks_policy == "guarded":
         errors.append(
             "hooks_policy is guarded but .claude/settings.json is absent; the "

@@ -1,7 +1,7 @@
 # Decision 0004: Harness 2.0 architecture
 
 Date: 2026-09-06
-Status: accepted
+Status: accepted; shipped in 2.0.0 on 2026-09-07 (see the amendments in place)
 
 ## Context
 
@@ -51,9 +51,20 @@ Invariants, each enforced by the validator and `check_installed.py`:
   of their own repository.
 - Stop hooks read `stop_hook_active`, run only when the working tree changed since the
   turn began, and expect the platform's eight-block cap.
+  *(Amended 2026-09-07, measured in `.ai/reports/0010-stop-hook-smoke-test.md`: the
+  cap is nine, and a capped run returns an empty result with `subtype: success`, so
+  honoring the flag is the whole hook and the launcher refuses to record an empty
+  result. The tree comparison is against the fingerprint the check last passed on,
+  not against the start of the turn.)*
 
 `guarded` becomes the default in 2.0.0. That default change, not a schema break, is
 what makes 2.0 a major version.
+*(Shipped 2026-09-07: the default follows the tier, `guarded` at Standard and Fleet
+and `examples-only` at Lite, because `guarded` is refused at Lite and a default the
+renderer would refuse is not a default. A named policy is honored at any tier. The
+frozen fixtures name theirs, so they render unchanged. `check_installed.py` re-checks
+after installation that a handler's flag value equals the profile's command and that
+no installed hook script mentions a permission decision.)*
 
 ### 2. Context policy is compaction-native
 
@@ -95,7 +106,11 @@ ratio, the one number Anthropic says to treat like uptime.
 
 ### 6. The loop closes at both ends
 
-The profile gains `commands.smoke` and `commands.smallest_check`. `SessionStart`
+The profile gains `commands.smoke` and `commands.smallest_check` *(shipped in 1.19.0
+as the flat keys `smoke_command` and `smallest_check_command`, matching every other
+`*_command` key; the commands are rendered into `.claude/settings.json` as hook
+arguments rather than read from the profile at runtime, because the platform protects
+the settings file from a session's edits and does not protect the profile)*. `SessionStart`
 runs the smoke command and reports one line; `Stop` runs the smallest check when the
 tree changed. `harness_progress.py claim` records the one item a session is working
 on under `.ai/runs/`, and `--brief` shows it, so one task per session is a recorded
@@ -104,7 +119,9 @@ fact rather than advice.
 ### 7. Delivery shape
 
 Each module ships as its own minor release on `main`, repository green between
-modules, one feature branch per module, no commits by the agent. 2.0.0 is the release
+modules, one feature branch per module, no commits by the agent *(the operator later
+authorized the agent to commit, push, and merge each module's branch; CI on ubuntu and
+windows stayed the gate between modules)*. 2.0.0 is the release
 that flips the `hooks_policy` default and declares the compaction-native policy. All
 schema additions are optional and defaulted, so every 0.2 and 1.x profile still renders
 and validates; this is asserted by the frozen fixtures, as it was for 1.0.

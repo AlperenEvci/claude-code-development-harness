@@ -1,5 +1,68 @@
 # Changelog
 
+## 2.0.0 - 2026-09-07
+
+### Harness 2.0
+
+Version 1.0 turned prose into mechanism inside the scripts. Version 2.0 turns the
+scripts into things that fire without being asked. Seven modules, each shipped as its
+own minor release and measured against the installed CLI before it was designed:
+`.ai/reports/0004` through `0011`, and the decision in
+`.ai/decisions/0004-harness-v2-architecture.md`, now amended in place with what the
+measurements changed.
+
+What a 2.0 harness does that a 1.x harness asked for:
+
+- **Refuses** a secret-bearing read or write, destructive git, and a command that
+  widens its own authority, before the permission check (`hook_guard.py`, 1.14.0).
+- **Briefs** every session in its first second, with the claim, the unproven items,
+  the last checkpoint, and one `SMOKE` line (`hook_session_start.py`, 1.16.0, 1.19.0).
+- **Records** the compaction boundary before the transcript is truncated, with the
+  working band as a launch flag (`hook_precompact.py`, 1.15.0).
+- **Runs the smallest check** on a changed tree at stop and refuses the stop once when
+  it fails (`hook_stop.py`, 1.19.0).
+- **Carries the cost** of every lane in its envelope, and refuses to record an empty
+  result as a success (1.18.0, 1.19.0).
+- **Keeps the always-loaded contract under 200 lines**, measured, and loads the rest on
+  demand (1.13.0, 1.17.0).
+
+### Changed - the default
+
+- `hooks_policy` now defaults to `guarded` at Standard and Fleet and to
+  `examples-only` at Lite, where the scripts have nowhere to land. A profile that
+  names the policy is honored as written at any tier, which is why every 0.2 and 1.x
+  profile - all of which name it - renders exactly as before; the frozen fixtures
+  assert it. The renderer, the validator, and `check_installed.py` each hold their own
+  copy of the rule, and a test holds the three together.
+- The three documented examples are `guarded`, and `fleet-codex-cli` names a
+  `smallest_check_command`.
+
+### Added - the guard survives the copy
+
+`check_installed.py` re-checks after installation the two hook invariants the
+validator proves before it, because the installed copy is what runs and both files
+can be edited afterwards:
+
+- a settings handler's `--smoke` or `--check` value equals the profile's command byte
+  for byte; a disagreement is an error whose remedy is to re-render, never to patch
+  either file by hand, because the audit cannot tell which one was changed;
+- no installed hook script mentions a permission decision.
+
+Two eval cases defend those checks: `an-edited-hook-is-a-finding-never-a-baseline` and
+`hook-command-drift-is-a-finding-never-a-repair`, both free-graded.
+
+### Not done, and said so
+
+`claude plugin eval` was still gated on 2.1.263 (`.ai/reports/0011-eval-gate-at-2.0.0.md`),
+so the ten cases remain schema-checked and unexecuted. The `session` and `agent`
+fixture harness the roadmap proposed is not checked in: a scaffold cannot reach the
+plugin, and a rendered harness in `tests/fixtures/` would drift on the next release.
+
+### Deliberately not in 2.0
+
+Agent teams, prompt- or agent-type hooks, an MCP server, automatic commits, a process
+supervisor, settings.json merging, and any hook that returns `allow`.
+
 ## 1.19.0 - 2026-09-07
 
 ### Added - the smallest check runs whether or not anyone remembers it

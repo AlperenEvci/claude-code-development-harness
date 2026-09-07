@@ -317,6 +317,20 @@ SESSION_SAFETY_LINES = (
 #: itself. A test pins the two lists together.
 HOOK_SCRIPTS = ("hook_guard.py", "hook_session_start.py", "hook_precompact.py", "hook_stop.py")
 
+HOOK_CAPABLE_TIERS = frozenset({"standard", "fleet"})
+
+
+def default_hooks_policy(tier: str) -> str:
+    """Mirrors `render_harness.default_hooks_policy`, a separate copy on purpose.
+
+    The rendered profile always carries the policy the renderer resolved, so this
+    decides only for a profile edited by hand after rendering. It must agree with
+    the renderer: a validator that defaulted differently would pass a payload
+    the renderer would have built the other way.
+    """
+    return "guarded" if str(tier).lower() in HOOK_CAPABLE_TIERS else "examples-only"
+
+
 #: The only arguments a handler may carry after its script, and the profile key
 #: each must match. A hook executes what is here, so the settings file may not
 #: name a command the profile did not - that would be the settings file, which
@@ -351,7 +365,9 @@ def check_hooks(
     else - no allow decision, no shell string, no event this plugin did not
     author, no script that is not the byte-identical original.
     """
-    policy = str(profile.get("hooks_policy", "examples-only"))
+    policy = str(
+        profile.get("hooks_policy") or default_hooks_policy(str(profile.get("harness_tier", "")))
+    )
     settings = payload / ".claude" / "settings.json"
     tool_dir = payload / "scripts" / "ai-harness"
     source_dir = Path(__file__).resolve().parent

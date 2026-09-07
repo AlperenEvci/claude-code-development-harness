@@ -264,7 +264,7 @@ answer questions this repository currently answers by argument - which agents a
 session actually reaches for, and whether the 1.14.0 guard fired. Cheap to carry,
 but a scope addition, so it belongs in a decision rather than a quiet extra field.
 
-### Module 6 - Loop closure (1.19.0) - DONE, pending CI
+### Module 6 - Loop closure (1.19.0) - DONE, CI-confirmed
 
 Measured first, against CLI 2.1.263, in `.ai/reports/0010-stop-hook-smoke-test.md`.
 Six probes: the `Stop` payload, both block channels, and the runaway in each. The
@@ -303,7 +303,14 @@ thing about it.
   `harness_session.py`, the two hook scripts, `skills/setup/SKILL.md`,
   `references/questionnaire.md`, `references/hooks.md`, tests (target 8).
 
-### Module 7 - Evals and release (2.0.0)
+### Module 7 - Evals and release (2.0.0) - DONE, pending CI
+
+Shipped on branch `module-7-release`. `claude plugin eval` was still gated on 2.1.263
+(`.ai/reports/0011-eval-gate-at-2.0.0.md`), so no scored run exists; two cases from
+modules 1 and 6 were added and schema-checked, `check_installed.py` gained the hook
+integrity checks they rely on, the default flipped tier-aware, and the three examples
+are guarded. The `session`/`agent` fixture harness stays open: a scaffold cannot reach
+the plugin, and a checked-in rendered harness would go stale every release.
 
 - Request `claude plugin eval` access; when it lands, `RUN_PLUGIN_EVAL=1` runs with
   `--max-cost-usd` and ablation on; record the first scored run as a report.
