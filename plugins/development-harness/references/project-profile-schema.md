@@ -30,6 +30,8 @@ Create one normalized JSON object from project evidence plus the user's confirme
   "lint_command": "npm run lint",
   "build_command": "npm run build",
   "full_gate_command": "npm run lint && npm run typecheck && npm test && npm run build",
+  "smoke_command": "npm run smoke",
+  "smallest_check_command": "npm test -- --bail",
 
   "context_policy": {
     "working_band": { "floor_tokens": 150000, "ceiling_tokens": 200000 },
@@ -359,6 +361,8 @@ Never install a companion plugin, log into Codex, initialize Git, run a package 
 - `risk_level`
 
 Commands may be empty only when genuinely unknown. Existing-project commands must come from repository evidence or explicit user confirmation. Greenfield commands may be approved plans but must not be described as already verified.
+
+`smoke_command` and `smallest_check_command` are executed by hooks under `hooks_policy: guarded` - the smoke at session start, the check at stop on a changed tree - and are rendered into `.claude/settings.json` as hook arguments. Each is one line of at most 500 characters with no control characters; the renderer refuses anything else. Both are optional and render no hook when absent.
 
 ## Project-specific extensions
 

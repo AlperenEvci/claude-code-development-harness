@@ -760,6 +760,17 @@ def report_envelope(
 
     payload = result.get("structured_output")
     if not isinstance(payload, dict):
+        if not str(result.get("result") or "").strip():
+            # Measured on 2.1.263 (`.ai/reports/0010-stop-hook-smoke-test.md`):
+            # a run cut short by the Stop-hook loop guard returns an empty
+            # result with subtype "success", is_error false, and a real bill.
+            # The only signal is the blank, and it is refused here so a
+            # success record with nothing in it is never written.
+            return None, (
+                "the run returned an empty result on exit 0; that is what a run "
+                "cut short by the Stop-hook loop guard looks like, and it reports "
+                "subtype success"
+            )
         return None, "the run's JSON carried no structured_output object"
 
     tokens_in, tokens_out = usage_tokens(result)

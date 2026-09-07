@@ -51,6 +51,16 @@ EXIT_PENDING = 3
 
 ID_PATTERN = re.compile(r"\A[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
+#: The one item a session is working on. Under `.ai/runs/` because it is
+#: transient orchestration state: a claim outlives nothing, and committing it
+#: would commit the fact that someone was busy on a Tuesday.
+CLAIM_PATH = ".ai/runs/current-task.json"
+CLAIM_VERSION = 1
+
+#: A claim older than this is reported as stale by `check`. A session does not
+#: run for a day; a claim that has is one nobody released.
+STALE_CLAIM_HOURS = 24
+
 
 class ProgressError(ValueError):
     """A ledger operation that cannot be performed as asked."""
@@ -150,6 +160,51 @@ def write_ledger(root: Path, data: dict[str, Any]) -> Path:
         newline="\n",
     )
     return path
+
+
+def claim_path(root: Path) -> Path:
+    return root / ".ai" / "runs" / "current-task.json"
+
+
+def read_claim(root: Path) -> dict[str, Any] | None:
+    """The current claim, or None. A malformed file is None with no repair."""
+    path = claim_path(root)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("claim_version") != CLAIM_VERSION:
+        return None
+    if not isinstance(data.get("item"), str):
+        return None
+    return data
+
+
+def claim_age_hours(claim: dict[str, Any]) -> float | None:
+    try:
+        stamp = datetime.strptime(str(claim.get("claimed_at")), "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    delta = datetime.now(timezone.utc) - stamp.replace(tzinfo=timezone.utc)
+    return delta.total_seconds() / 3600
+
+
+def stale_reason(claim: dict[str, Any], data: dict[str, Any]) -> str | None:
+    """Why a claim no longer describes work in progress, or None while it does."""
+    item_id = str(claim.get("item"))
+    found = next((item for item in data["items"] if item["id"] == item_id), None)
+    if found is None:
+        return f"item {item_id!r} is no longer in the ledger"
+    if found["passes"]:
+        return f"item {item_id!r} is already proven; release the claim"
+    age = claim_age_hours(claim)
+    if age is None:
+        return "claimed_at is unreadable"
+    if age > STALE_CLAIM_HOURS:
+        return f"claimed {age:.0f}h ago; a session does not run that long"
+    return None
 
 
 def find_item(data: dict[str, Any], item_id: str) -> dict[str, Any]:
@@ -282,12 +337,77 @@ def command_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_claim(args: argparse.Namespace) -> int:
+    """Record the one item this session is working on.
+
+    One at a time: a second claim is refused rather than replacing the first,
+    because a claim that can be overwritten in passing records nothing. Release
+    first. The claim is a statement of intent, not a lock - nothing here stops
+    another session from editing the same files, and a file that pretended to
+    would be worse than one that says only what it knows.
+    """
+    root = Path(args.root).resolve()
+    data = read_ledger(root)
+    item = find_item(data, args.id)
+    if item["passes"]:
+        raise ProgressError(
+            f"item {args.id!r} is already proven; there is nothing to claim"
+        )
+    existing = read_claim(root)
+    if existing is not None and existing.get("item") != args.id:
+        raise ProgressError(
+            f"item {existing['item']!r} is already claimed "
+            f"(since {existing.get('claimed_at')}); release it first"
+        )
+    path = claim_path(root)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ProgressError(f"refusing to write through a symlink: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "claim_version": CLAIM_VERSION,
+        "item": args.id,
+        "title": item["title"],
+        "claimed_at": now_text(),
+        "session_id": args.session or None,
+    }
+    path.write_text(
+        json.dumps(record, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"claimed {args.id}: {item['title']}")
+    return 0
+
+
+def command_release(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    claim = read_claim(root)
+    if claim is None:
+        raise ProgressError("nothing is claimed")
+    path = claim_path(root)
+    if path.is_symlink():
+        raise ProgressError(f"refusing to remove a symlink: {path}")
+    path.unlink()
+    print(f"released {claim['item']}")
+    return 0
+
+
 def command_check(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     data = read_ledger(root)
     pending = [item for item in data["items"] if not item["passes"]]
     total = len(data["items"])
     print(f"{total - len(pending)}/{total} proven")
+    claim = read_claim(root)
+    if claim is not None:
+        reason = stale_reason(claim, data)
+        if reason is None:
+            print(f"  claimed: {claim['item']} (since {claim.get('claimed_at')})")
+        else:
+            # Reported, not acted on. Only the session that made the claim knows
+            # whether it is still working; this one can say only that the record
+            # has stopped looking like work in progress.
+            print(f"  stale claim: {claim['item']} - {reason}")
     if pending:
         for item in pending:
             print(f"  unproven: {item['id']}")
@@ -333,6 +453,16 @@ def main() -> None:
     failing.add_argument("--exit-code", type=int, default=1)
     failing.add_argument("--reason", help="Why it is not passing.")
     failing.set_defaults(handler=command_fail)
+
+    claiming = sub.add_parser(
+        "claim", help=f"Record the one item this session is working on, in {CLAIM_PATH}."
+    )
+    claiming.add_argument("--id", required=True)
+    claiming.add_argument("--session", help="The session id, when known.")
+    claiming.set_defaults(handler=command_claim)
+
+    releasing = sub.add_parser("release", help="Remove the current claim.")
+    releasing.set_defaults(handler=command_release)
 
     listing = sub.add_parser("list", help="Show the ledger.")
     listing.add_argument("--pending", action="store_true", help="Only unproven items.")

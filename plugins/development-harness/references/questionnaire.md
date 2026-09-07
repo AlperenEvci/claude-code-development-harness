@@ -61,6 +61,11 @@ Prefer inspecting manifests and project files over asking the user to remember e
 
 27. What exact commands install dependencies, run locally, lint, typecheck, test, and build?
 28. Which command is the minimum fast gate? Which command is the full release gate?
+    Under `hooks_policy: guarded` the fast gate becomes `smallest_check_command`, run
+    by the Stop hook on a changed tree, so it must finish in under fifty seconds.
+28a. Is there a smoke command that proves the tree runs at all, in a few seconds?
+    It becomes `smoke_command`, run once at session start. Propose both from the
+    inspector's `commands_detected`; never invent either.
 29. Are tests reliable? Which important behaviors lack coverage?
 30. Are there database, browser, mobile, infrastructure, or external-service tests requiring special setup?
 

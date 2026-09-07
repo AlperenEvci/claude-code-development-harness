@@ -36,8 +36,9 @@ that were never copied.
 | `hook_guard.py` | `PreToolUse` on `Read\|Write\|Edit\|NotebookEdit\|Bash` | denies a secret-bearing path, destructive git, and a command that would widen its own authority |
 | `hook_session_start.py` | `SessionStart` on `startup\|resume\|compact` | prints `harness_report.py --brief` into the session's context |
 | `hook_precompact.py` | `PreCompact` on `auto\|manual` | records the compaction boundary through `harness_checkpoint.py from-hook` |
+| `hook_stop.py` | `Stop`, registered only when the profile sets `smallest_check_command` | runs the check on a changed tree and refuses the stop once when it fails |
 
-Both are copied byte-identical from the plugin, exactly as the session tooling
+All four are copied byte-identical from the plugin, exactly as the session tooling
 is, and the validator rejects a package whose copy has drifted. A hook runs
 without being asked, in someone else's repository; an edited copy is an
 unreviewed guard.
@@ -57,7 +58,14 @@ rendered package and watching the validator refuse:
   file that has to behave identically on both.
 - **The interpreter is the profile's.** `python_command`, resolved at setup,
   because the bare name `python3` is a Microsoft Store stub on Windows.
-- **Only events this generator authors.** `PreToolUse`, `SessionStart`, and `PreCompact`.
+- **Only events this generator authors.** `PreToolUse`, `SessionStart`,
+  `PreCompact`, and `Stop`.
+- **A handler carries its script and at most the one flag its script takes**, and
+  the flag's value equals the profile's command byte for byte: `--smoke` on
+  `hook_session_start.py` is `smoke_command`, `--check` on `hook_stop.py` is
+  `smallest_check_command`. The hook runs that string through a shell, so a
+  settings file that disagreed with the profile would execute something the
+  operator never approved.
 - **Hooks and nothing else.** A generated settings file carries no `permissions`,
   no `env`, no `model`. Those belong to the operator.
 - **Bounded timeouts.** One to sixty seconds. The platform default is 600, which
@@ -112,6 +120,36 @@ honestly do:
 The count is the finding. `harness_report.py --brief` prints it, and says plainly
 what more than one compaction means: the ceiling was set below the work.
 
+## The Stop hook
+
+Measured on 2.1.263 before it was written (`.ai/reports/0010-stop-hook-smoke-test.md`),
+and the measurement decided three things:
+
+- **`stop_hook_active` is checked first**, before the profile is read or anything
+  runs. It is `false` on the first stop of a prompt and `true` on every stop after.
+  The platform caps the block loop at nine, and a run that hits the cap returns an
+  *empty* result with `subtype: "success"`, `is_error: false`, and a real bill - so
+  a hook that blocked while the flag was set would not fail loudly, it would turn
+  the session's answer into nothing. One block per prompt; then the answer stands.
+- **The command is a hook argument, not a profile read.** The platform refuses to
+  let a session edit `.claude/settings.json` (probe G) and allows an edit of any
+  other file (probe H). `project-profile.json` is any other file. A hook that read
+  its command from the profile at runtime would let an agent holding `Write` choose
+  what runs at stop.
+- **Exit 2 with the reason on stderr** was chosen over the equivalent JSON
+  `{"decision": "block", "reason": ...}` form because `hook_guard.py` already uses
+  it, so the two hooks share one failure path. The JSON form also carries
+  `systemMessage`; it is available if a later hook needs it.
+
+The hook fingerprints the uncommitted tree - status, diff, untracked sizes - and
+records the fingerprint the check last passed on under `.ai/runs/stop-hook/`, so a
+second stop on an unchanged tree runs nothing. `.ai/runs/` itself is excluded from
+the fingerprint, or the hook's own record would count as a change.
+
+It fails open: no git, no command, a check that cannot finish in fifty seconds,
+each exits 0 with one line saying what was *not verified*. `HARNESS_HOOKS_DISABLE=1`
+applies as everywhere.
+
 ## Installing over an existing settings file
 
 The installer treats an existing `.claude/settings.json` as a conflict: it is
@@ -133,7 +171,7 @@ Anything new lands in four places at once, or it is not shipped:
 2. `HOOK_SCRIPTS` in `render_harness.py` **and** in `validate_harness.py` - two
    copies on purpose, so a validator that imports the thing it validates cannot
    confirm the renderer agrees with itself;
-3. `ALLOWED_HOOK_EVENTS` if it registers a new event, plus `HOOK_REQUIRED` in
-   `check_installed.py`;
+3. `ALLOWED_HOOK_EVENTS` if it registers a new event, `HOOK_COMMAND_ARGS` if
+   it takes a flag, plus `HOOK_REQUIRED` in `check_installed.py`;
 4. a test, and a mutation check that breaks the new guarantee at its source and
    watches the test fail.

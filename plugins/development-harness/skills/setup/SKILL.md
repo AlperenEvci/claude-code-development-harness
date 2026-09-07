@@ -201,7 +201,7 @@ Use this branch for **Adopt** or **Upgrade**.
 Infer everything supported by repository evidence or `$ARGUMENTS`. Do not ask the user to repeat known information. Ask no more than five questions in one message. Resolve only material unknowns, usually:
 
 1. product purpose, users, stage, and risk,
-2. exact fast and full verification commands that cannot be proven from the repository,
+2. exact fast and full verification commands that cannot be proven from the repository - and, when `hooks_policy` will be `guarded`, which of them is the `smallest_check_command` the Stop hook runs and whether a seconds-long `smoke_command` exists; propose both from `commands_detected`,
 3. implementation transport and available model tiers,
 4. autonomy, network, sensitive-area, Git, and commit boundaries,
 5. recurring agent failures or workflows worth encoding.

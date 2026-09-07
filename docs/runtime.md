@@ -254,14 +254,46 @@ that it complied.
 
 ## Hooks
 
-A `guarded` harness installs two command hooks and the settings file that wires
+A `guarded` harness installs four command hooks and the settings file that wires
 them up. They are the floor under the rules `AGENTS.md` states in prose:
 
 | Script | Event | Refuses or adds |
 |---|---|---|
 | `hook_guard.py` | `PreToolUse` | a secret-bearing read or write, destructive git, a command that widens its own authority |
-| `hook_session_start.py` | `SessionStart` | prints the session brief into context |
+| `hook_session_start.py` | `SessionStart` | prints the session brief into context, then one `SMOKE` line if the profile names a `smoke_command` |
 | `hook_precompact.py` | `PreCompact` | records the boundary before the transcript is truncated |
+| `hook_stop.py` | `Stop` | runs `smallest_check_command` on a changed tree and refuses the stop once when it fails |
+
+### Closing the loop
+
+`AGENTS.md` asks for "the smallest check that would fail if you got it wrong" before
+reporting. That is the instruction most often skipped, because it arrives at the moment
+the work already feels finished. Two profile fields make it a mechanism:
+
+```json
+"smoke_command": "npm run smoke",
+"smallest_check_command": "npm test -- --bail"
+```
+
+The smoke runs at session start and prints one line - `SMOKE  pass`, `SMOKE  FAIL exit N
+... last: <line>`, or `SMOKE  not run` on a timeout - so a session learns in its first
+second whether the tree it inherited even runs. The check runs at stop, only when the
+tree changed since it last passed, and when it fails the stop is refused **once** with
+the failing tail in front of the model.
+
+Once is the design, not a limit. Measured on 2.1.263
+(`.ai/reports/0010-stop-hook-smoke-test.md`): `stop_hook_active` is false on the first
+stop of a prompt and true after, the platform caps the block loop at nine, and a run
+that hits the cap returns an empty result with `subtype: "success"` and a real bill. A
+hook that kept blocking would not fail loudly; it would turn the answer into nothing.
+So the flag is honored before anything else, and the launcher refuses to write an
+envelope for an empty result on exit 0.
+
+Both commands are rendered into `.claude/settings.json` as hook arguments rather than
+read from the profile at runtime. The platform refuses a session's edit of the
+settings file and allows one of any other file, and the profile is any other file.
+The validator holds the two in step: a settings file naming a command the profile does
+not is refused.
 
 Measured against Claude Code 2.1.263 rather than read from the help text: a
 `Read` of `.env` in a guarded repository is denied, the reason reaches the model,
@@ -675,6 +707,20 @@ the command that was run and the exit status it returned:
 python scripts/ai-harness/harness_progress.py pass \
   --id retry-idempotency --command "npm test" --exit-code 0
 ```
+
+A session says which item it is on:
+
+```bash
+python scripts/ai-harness/harness_progress.py claim --id retry-idempotency
+python scripts/ai-harness/harness_progress.py release
+```
+
+One claim at a time, under `.ai/runs/current-task.json`; a second claim is refused
+rather than replacing the first. `--brief` opens with it, and `check` reports a claim
+that has stopped looking like work in progress - the item is already proven, or the
+claim is a day old. A claim is a statement, not a lock: nothing stops another session
+from editing the same files, and a file that pretended to would be worse than one that
+says only what it knows.
 
 A non-zero exit code is refused rather than recorded, so there is no route to marking an
 item done by asserting it. Hand-editing does not open one either: the ledger is validated

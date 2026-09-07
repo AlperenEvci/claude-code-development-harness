@@ -315,12 +315,21 @@ SESSION_SAFETY_LINES = (
 #: renderer's, for the same reason `SESSION_TOOL_SCRIPTS` keeps one: a validator
 #: that imports the thing it validates checks that the renderer agrees with
 #: itself. A test pins the two lists together.
-HOOK_SCRIPTS = ("hook_guard.py", "hook_session_start.py", "hook_precompact.py")
+HOOK_SCRIPTS = ("hook_guard.py", "hook_session_start.py", "hook_precompact.py", "hook_stop.py")
+
+#: The only arguments a handler may carry after its script, and the profile key
+#: each must match. A hook executes what is here, so the settings file may not
+#: name a command the profile did not - that would be the settings file, which
+#: an installer writes, carrying an instruction nobody reviewed in the profile.
+HOOK_COMMAND_ARGS = {
+    "hook_session_start.py": ("--smoke", "smoke_command"),
+    "hook_stop.py": ("--check", "smallest_check_command"),
+}
 
 #: Where the rendered hook wiring lands, and the only events it may register.
 #: A hook this plugin did not author is not a hook this plugin will ship.
 HOOK_SETTINGS_PATH = ".claude/settings.json"
-ALLOWED_HOOK_EVENTS = {"PreToolUse", "SessionStart", "PreCompact"}
+ALLOWED_HOOK_EVENTS = {"PreToolUse", "SessionStart", "PreCompact", "Stop"}
 
 #: Seconds. A guard that can hang for the platform default of 600 would stall a
 #: session on a defect rather than fail it.
@@ -495,6 +504,7 @@ def check_hooks(
                         "not in the payload"
                     )
                 seen_scripts.add(name)
+                check_hook_args(name, [str(item) for item in args[1:]], profile, errors)
                 timeout = handler.get("timeout")
                 if not isinstance(timeout, int) or not 1 <= timeout <= MAX_HOOK_TIMEOUT:
                     errors.append(
@@ -502,11 +512,55 @@ def check_hooks(
                         f"not an integer between 1 and {MAX_HOOK_TIMEOUT} seconds"
                     )
 
+    check = str(profile.get("smallest_check_command", "")).strip()
+    if check and "hook_stop.py" not in seen_scripts:
+        errors.append(
+            f"the profile names a smallest_check_command but {HOOK_SETTINGS_PATH} "
+            "registers no Stop handler, so it would never run"
+        )
+    if not check:
+        # A Stop hook with nothing to run is not registered, by design.
+        seen_scripts.add("hook_stop.py")
+
     missing = [name for name in HOOK_SCRIPTS if name not in seen_scripts]
     if missing:
         warnings.append(
             f"{HOOK_SETTINGS_PATH} installs {', '.join(missing)} but registers "
             "no event for it"
+        )
+
+
+def check_hook_args(
+    name: str, extra: list[str], profile: dict[str, Any], errors: list[str]
+) -> None:
+    """A handler carries its script, and at most the one flag its script takes.
+
+    The flag's value must equal the profile's command byte for byte. The hook
+    runs that value through a shell, so a settings file that disagreed with the
+    profile would execute something the operator never saw in the profile they
+    approved.
+    """
+    allowed = HOOK_COMMAND_ARGS.get(name)
+    if not extra:
+        if allowed and str(profile.get(allowed[1], "")).strip():
+            flag, key = allowed
+            errors.append(
+                f"{HOOK_SETTINGS_PATH}: {name} carries no {flag} but the profile "
+                f"sets {key}, so the hook would never run it"
+            )
+        return
+    if allowed is None:
+        errors.append(
+            f"{HOOK_SETTINGS_PATH}: {name} takes no arguments; found {extra}"
+        )
+        return
+    flag, key = allowed
+    expected = str(profile.get(key, "")).strip()
+    if extra != [flag, expected] or not expected:
+        errors.append(
+            f"{HOOK_SETTINGS_PATH}: {name} arguments {extra} are not "
+            f"[{flag!r}, the profile's {key}]; a hook may run only the command "
+            "the profile names"
         )
 
 
