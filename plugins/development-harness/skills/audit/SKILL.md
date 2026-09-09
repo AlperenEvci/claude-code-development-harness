@@ -99,7 +99,12 @@ Read:
     contradicts it is. Two edits are worth naming when you see them: a per-command
     table under `bash` in `opencode.json`, which is schema-valid and enforces nothing
     under `opencode run`, and an OpenCode agent missing `edit: deny` or `write: deny`,
-    which is the line that makes it read-only on that host.
+    which is the line that makes it read-only on that host. On a `codex` host the
+    equivalent pair is a `.codex/config.toml` whose `sandbox_mode` is wider than the
+    profile's autonomy implies - that file needs no flag and no trust prompt, so a
+    widened floor hands every session in the repository more authority than the
+    contract claims - and an `[agents.<name>]` role table, which reads like a read-only
+    boundary and binds nothing on that host.
 12. **Repository shape** — the `shape_signals` block from the scan. Depth, directory
     fan-out, oversized source files, and directories no test names change what a harness
     can honestly promise, and the harness cannot fix any of them. Quote the measurement

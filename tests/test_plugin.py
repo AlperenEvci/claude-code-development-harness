@@ -7054,6 +7054,356 @@ class HostPortabilityTests(unittest.TestCase):
         )
 
 
+class CodexEnforcementTests(unittest.TestCase):
+    """2.3.0: the one thing a repository can enforce on Codex, enforced.
+
+    Measured in `.ai/reports/0015-codex-enforcement-surface.md` against Codex
+    CLI 0.153.4. Two findings shape every assertion here. A project-level
+    `.codex/config.toml` sets the session sandbox with no command-line flag and
+    no trust prompt, and the sandbox is enforced by the operating system - so
+    the floor is a mechanism. And an `[agents.<name>]` role's `sandbox_mode`
+    binds nothing in either direction while its `instructions` never reach the
+    agent - so the read-only catalog is not translated for this host, and a role
+    table that appears by hand is refused.
+
+    The same file can widen a sandbox as easily as narrow one, which is why the
+    checker reads the installed file back rather than trusting what was
+    rendered: a cloned repository could otherwise hand the next `codex exec`
+    more authority than its own contract claims.
+    """
+
+    CONFIG = ".codex/config.toml"
+
+    def render(self, temp_path: Path, tier: str = "standard", **overrides) -> Path:
+        data = profile(tier)
+        data.update(overrides)
+        for key, value in list(overrides.items()):
+            if value is None:
+                data.pop(key, None)
+        temp_path.mkdir(parents=True, exist_ok=True)
+        config = temp_path / "codex-profile.json"
+        output = temp_path / "gen"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        run(PYTHON, str(SCRIPTS / "render_harness.py"),
+            "--config", str(config), "--output", str(output))
+        return output
+
+    def validate(self, package: Path) -> subprocess.CompletedProcess:
+        return run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(package),
+                   check=False)
+
+    def check_json(self, root: Path) -> dict:
+        proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                   "--root", str(root), "--json", check=False)
+        return json.loads(proc.stdout)
+
+    def installed(self, temp_path: Path, **overrides) -> Path:
+        output = self.render(temp_path, **overrides)
+        root = temp_path / "installed"
+        shutil.copytree(output / "payload", root)
+        return root
+
+    def floor(self, payload: Path) -> str:
+        return (payload / self.CONFIG).read_text(encoding="utf-8")
+
+    # --- what is rendered, and when ----------------------------------------
+
+    def test_a_harness_without_a_codex_host_has_no_codex_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp)) / "payload"
+            self.assertFalse((payload / self.CONFIG).exists())
+
+    def test_the_sandbox_mode_follows_the_declared_autonomy(self) -> None:
+        """The floor cannot disagree with the contract it ships beside."""
+        expected = {
+            "read-only": "read-only",
+            "approval-required": "read-only",
+            "repository-write-with-approval": "workspace-write",
+            "isolated-auto": "workspace-write",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            for autonomy, mode in expected.items():
+                payload = self.render(
+                    Path(temp) / autonomy.replace("-", "_"),
+                    hosts=["claude-code", "codex"],
+                    autonomy=autonomy,
+                ) / "payload"
+                self.assertIn(f'sandbox_mode = "{mode}"', self.floor(payload), autonomy)
+
+    def test_an_approval_policy_rounds_down_rather_than_up(self) -> None:
+        """Codex has no enforceable ask: a project config asking for
+        `on-request` still reports `approval: never` under `codex exec`. A
+        policy that means "ask first" therefore becomes the mode that cannot
+        write, never the one that can."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), hosts=["claude-code", "codex"], autonomy="approval-required"
+            ) / "payload"
+            text = self.floor(payload)
+            self.assertIn('sandbox_mode = "read-only"', text)
+            self.assertNotIn("approval_policy", text)
+
+    def test_the_network_switch_follows_the_network_policy(self) -> None:
+        expected = {
+            "deny-by-default": "network_access = false",
+            "ask-before-network": "network_access = false",
+            "approved-for-scoped-tasks": "network_access = true",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            for policy, line in expected.items():
+                payload = self.render(
+                    Path(temp) / policy.replace("-", "_"),
+                    hosts=["claude-code", "codex"],
+                    autonomy="isolated-auto",
+                    network_access=policy,
+                ) / "payload"
+                text = self.floor(payload)
+                self.assertIn("[sandbox_workspace_write]", text)
+                self.assertIn(line, text, policy)
+
+    def test_a_read_only_floor_states_nothing_about_the_network(self) -> None:
+        """`network_access` lives inside the workspace-write sandbox. Stating it
+        for a mode it does not apply to would be a claim with no mechanism."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), hosts=["claude-code", "codex"], autonomy="read-only"
+            ) / "payload"
+            self.assertNotIn("network_access", self.floor(payload))
+
+    def test_no_profile_renders_a_role_table_or_an_agent_file(self) -> None:
+        """The measured reason the read-only catalog does not cross to Codex."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), "fleet", hosts=["claude-code", "codex"]
+            ) / "payload"
+            self.assertNotIn("[agents.", self.floor(payload))
+            self.assertFalse((payload / ".codex" / "agents").exists())
+
+    def test_no_profile_renders_the_full_access_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            for tier in ("lite", "standard", "fleet"):
+                for autonomy in ("read-only", "approval-required",
+                                 "repository-write-with-approval", "isolated-auto"):
+                    payload = self.render(
+                        Path(temp) / f"{tier}_{autonomy}",
+                        tier,
+                        hosts=["claude-code", "codex"],
+                        autonomy=autonomy,
+                    ) / "payload"
+                    self.assertNotIn("danger-full-access", self.floor(payload))
+
+    def test_the_floor_is_hashed_in_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "codex"])
+            manifest = json.loads(
+                (output / "harness-manifest.json").read_text(encoding="utf-8")
+            )
+            names = {entry["path"] for entry in manifest["files"]}
+            self.assertIn(self.CONFIG, names)
+
+    # --- what the validator refuses ----------------------------------------
+
+    def test_a_missing_floor_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "codex"])
+            (output / "payload" / self.CONFIG).unlink()
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("sandbox floor would be prose", proc.stdout + proc.stderr)
+
+    def test_a_floor_with_no_declared_host_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp))
+            target = output / "payload" / self.CONFIG
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('sandbox_mode = "read-only"\n', encoding="utf-8")
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("no codex host is declared", proc.stdout + proc.stderr)
+
+    def test_a_widened_floor_is_refused_and_named_as_widening(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "codex"], autonomy="read-only")
+            target = output / "payload" / self.CONFIG
+            target.write_text(
+                target.read_text(encoding="utf-8").replace(
+                    'sandbox_mode = "read-only"', 'sandbox_mode = "danger-full-access"'
+                ),
+                encoding="utf-8",
+            )
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("danger-full-access", proc.stdout + proc.stderr)
+
+    def test_a_floor_that_opens_the_network_against_policy_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(
+                Path(temp), hosts=["claude-code", "codex"], autonomy="isolated-auto",
+                network_access="deny-by-default",
+            )
+            target = output / "payload" / self.CONFIG
+            target.write_text(
+                target.read_text(encoding="utf-8").replace(
+                    "network_access = false", "network_access = true"
+                ),
+                encoding="utf-8",
+            )
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("network", proc.stdout + proc.stderr)
+
+    def test_a_role_table_in_the_floor_is_refused(self) -> None:
+        """Measured inert, and a rendered one would read like a boundary."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "codex"])
+            target = output / "payload" / self.CONFIG
+            target.write_text(
+                target.read_text(encoding="utf-8")
+                + '\n[agents.harness_reader]\ndescription = "read only"\n'
+                + 'sandbox_mode = "read-only"\n',
+                encoding="utf-8",
+            )
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("binds nothing", proc.stdout + proc.stderr)
+
+    # --- what the installed harness reports --------------------------------
+
+    def test_the_guarantee_report_names_the_installed_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code", "codex"])
+            rows = self.check_json(root)["hosts"]["codex"]
+            self.assertEqual(rows["permission floor"], "present (workspace-write)")
+            # Unchanged by this release, and still measured absences.
+            self.assertTrue(rows["pre-tool-use guard"].startswith("absent"))
+            self.assertTrue(rows["read-only agent catalog"].startswith("absent"))
+
+    def test_a_missing_installed_floor_is_reported_absent_and_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code", "codex"])
+            (root / self.CONFIG).unlink()
+            rows = self.check_json(root)["hosts"]["codex"]
+            self.assertTrue(rows["permission floor"].startswith("absent"),
+                            rows["permission floor"])
+            proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                       "--root", str(root), check=False)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn(self.CONFIG, proc.stdout + proc.stderr)
+
+    def test_a_widened_installed_floor_is_an_error(self) -> None:
+        """The whole reason the installed file is read back rather than trusted."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(
+                Path(temp), hosts=["claude-code", "codex"], autonomy="read-only"
+            )
+            target = root / self.CONFIG
+            target.write_text(
+                target.read_text(encoding="utf-8").replace(
+                    'sandbox_mode = "read-only"', 'sandbox_mode = "danger-full-access"'
+                ),
+                encoding="utf-8",
+            )
+            proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                       "--root", str(root), check=False)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("wider", proc.stdout + proc.stderr)
+
+    def test_an_installed_floor_that_opens_the_network_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code", "codex"])
+            target = root / self.CONFIG
+            target.write_text(
+                target.read_text(encoding="utf-8").replace(
+                    "network_access = false", "network_access = true"
+                ),
+                encoding="utf-8",
+            )
+            proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                       "--root", str(root), check=False)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("network", proc.stdout + proc.stderr)
+
+    def test_an_installed_role_table_is_a_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code", "codex"])
+            target = root / self.CONFIG
+            target.write_text(
+                target.read_text(encoding="utf-8")
+                + '\n[agents.harness_reader]\ndescription = "read only"\n',
+                encoding="utf-8",
+            )
+            report = self.check_json(root)
+            self.assertTrue(
+                any("agents.harness_reader" in item for item in report["warnings"]),
+                report["warnings"],
+            )
+
+    def test_claude_code_reports_no_settings_floor_of_its_own(self) -> None:
+        """Claude Code's authority comes from the tier's launch flags, and the
+        harness deliberately pre-approves nothing in settings. Saying `present`
+        here would credit a mechanism that does not exist."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code"])
+            row = self.check_json(root)["hosts"]["claude-code"]["permission floor"]
+            self.assertTrue(row.startswith("absent"), row)
+
+    # --- the bypass flags of every host ------------------------------------
+
+    def test_no_tier_may_launch_with_another_hosts_bypass(self) -> None:
+        capabilities = load_script("harness_capabilities.py", "capabilities_for_codex")
+        for flag in (
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "--auto",
+        ):
+            self.assertIn(flag, capabilities.FORBIDDEN_LAUNCH_FLAGS)
+
+    def test_the_launcher_still_passes_autocompact(self) -> None:
+        """`--auto` is refused by exact match, so the flag the harness itself
+        passes must survive. A substring rule here would break every launch."""
+        capabilities = load_script("harness_capabilities.py", "capabilities_autocompact")
+        self.assertNotIn("--autocompact", capabilities.FORBIDDEN_LAUNCH_FLAGS)
+        self.assertEqual(
+            capabilities.autocompact_flag(200_000), ["--autocompact", "200000"]
+        )
+
+    def test_the_python_guard_refuses_every_bypass_flag(self) -> None:
+        for command in (
+            "codex exec --dangerously-bypass-approvals-and-sandbox 'do it'",
+            "codex exec --dangerously-bypass-hook-trust 'do it'",
+            "opencode run --auto 'do it'",
+        ):
+            proc = subprocess.run(
+                [PYTHON, str(SCRIPTS / "hook_guard.py")],
+                input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                text=True, capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 2, command)
+            self.assertIn("harness guard", proc.stderr)
+
+    def test_the_python_guard_allows_the_harnesss_own_autocompact(self) -> None:
+        proc = subprocess.run(
+            [PYTHON, str(SCRIPTS / "hook_guard.py")],
+            input=json.dumps(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "claude --autocompact 200000 -p 'go'"},
+                }
+            ),
+            text=True, capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_the_two_guards_refuse_the_same_widening_tokens(self) -> None:
+        guard = load_script("hook_guard.py", "hook_guard_for_codex_parity")
+        text = (PLUGIN / "assets" / "opencode" / "harness-guard.js").read_text(
+            encoding="utf-8"
+        )
+        for token in guard.WIDENING_TOKENS:
+            self.assertIn(f'"{token}"', text, f"{token} is missing from the JS guard")
+        self.assertIn("--auto(", text)
+
+
 class OpenCodeEnforcementTests(unittest.TestCase):
     """2.2.0: what OpenCode can enforce, enforced - and nothing else claimed.
 

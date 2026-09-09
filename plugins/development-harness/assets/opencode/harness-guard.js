@@ -90,10 +90,19 @@ const RM_PATTERN = /\brm\s+(-\S+\s+)*-\S*[rR]\S*f|\brm\s+(-\S+\s+)*-\S*f\S*[rR]/
 
 const RM_TARGETS = [" /", " ~", " .git", " ..", " $HOME", " /*"]
 
+// Kept in step with `hook_guard.WIDENING_TOKENS` by a test. Two of these are
+// Codex's own bypasses, and they are refused here because a repository that
+// declares more than one host is one shell away from either binary.
 const WIDENING_TOKENS = [
   "--dangerously-skip-permissions",
   "--permission-mode bypassPermissions",
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--dangerously-bypass-hook-trust",
 ]
+
+// `--auto` needs a boundary: `--autocompact` is a flag the harness itself
+// passes, and a substring match would refuse the launcher's own command.
+const AUTO_FLAG = /--auto(\s|$)/
 
 /** A refusal this file meant to make, as opposed to a defect in it. */
 class HarnessDeny extends Error {
@@ -183,6 +192,13 @@ const guardBash = (command, policy) => {
     if (flat.includes(token)) {
       deny(`refusing a command carrying ${token}: a session may not widen its own authority`)
     }
+  }
+
+  if (AUTO_FLAG.test(flat)) {
+    deny(
+      "refusing a command carrying --auto: it auto-approves every permission " +
+        "that is not explicitly denied",
+    )
   }
 }
 

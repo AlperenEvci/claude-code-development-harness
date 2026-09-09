@@ -344,8 +344,9 @@ extended on 2026-09-09 by `0013-skill-frontmatter-across-hosts.md` and
 `0014-opencode-enforcement-surface.md`; design accepted in
 `.ai/decisions/0005-host-portability.md` on 2026-09-09 and in delivery. Module plan:
 2.1.0 `hosts` field and portable contract (shipped); 2.2.0 OpenCode guard and
-permission floor (shipped); 2.3.0 Codex agents and forbidden flags; 2.4.0 launcher
-host table. The measured answers to (a)-(f) are in the reports.
+permission floor (shipped); 2.3.0 Codex sandbox floor and forbidden flags (shipped,
+and the agent-file half was dropped on measurement); 2.4.0 launcher host table. The
+measured answers to (a)-(f) are in the reports.
 
 **Goal:** one rendered harness that Claude Code, Codex, and OpenCode each pick up
 correctly, rather than one harness that works fully in Claude Code and partially
@@ -464,7 +465,43 @@ The guard was exercised against a real `opencode run` before it was wired into t
 renderer: a `.env` read, `git commit` under a `no-commit` policy, and `git push` were
 each refused with the reason quoted back by the model, and a control command ran.
 
-### Module 10 - Codex agents and forbidden flags (2.3.0)
+### Module 10 - Codex sandbox floor and forbidden flags (2.3.0) - DONE, pending CI
+
+Shipped on branch `module-10-codex-floor`. The module was designed on paper as
+`.codex/agents/*.toml` read-only agents; the measurement in
+`.ai/reports/0015-codex-enforcement-surface.md` contradicted that and the release is
+what survived. On Codex CLI 0.153.4: that path is not read at all, and the roles
+Codex does have live in `[agents.<name>]` in configuration, where a declared name is
+validated by `spawn_agent` but the role's `instructions` never reach the agent and its
+`sandbox_mode` binds nothing in either direction - a role declaring `read-only` wrote a
+file under a `workspace-write` parent, and one declaring `workspace-write` was still
+refused under a `read-only` parent. What is real is the session sandbox, and a project
+`.codex/config.toml` sets it with no command-line flag and no trust prompt.
+
+- `.codex/config.toml`: `sandbox_mode` from `autonomy`, and
+  `[sandbox_workspace_write] network_access` from `network_access` where that mode
+  applies. A `read-only` floor made a shell write fail with an operating-system access
+  error; the network switch was measured as a pair, "cannot reach the remote server"
+  with `false` and `200` with `true`. Documented as a default rather than a ceiling:
+  `codex exec -s workspace-write` overrides it.
+- The widening direction is checked, not assumed. A project config declaring
+  `danger-full-access` removed the sandbox with no prompt, so `check_installed.py`
+  reads the installed file back and reports a floor wider than the profile as an error,
+  and the validator refuses a rendered one that disagrees with the profile.
+- No agent file and no role table for Codex, and the guarantee table now says why
+  rather than "not yet rendered".
+- `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`, and
+  OpenCode's `--auto` join `FORBIDDEN_LAUNCH_FLAGS` and both guards. `--auto` is
+  matched with a boundary so `--autocompact` still passes.
+- Codex hooks stay absent: a project `.codex/hooks.json` on `PreToolUse` and
+  `SessionStart` was never invoked, reproducing report 0012 on the same binary.
+
+The rendered floors were exercised against a real `codex exec` before the module was
+called done: the read-only floor denied a write at the operating system with the file
+absent afterwards, and the workspace-write floor allowed the write inside the workspace
+while the network request failed.
+
+### Module 11 - launcher host table (2.4.0)
 
 ### Module 11 - launcher host table (2.4.0)
 
