@@ -204,7 +204,15 @@ Infer everything supported by repository evidence or `$ARGUMENTS`. Do not ask th
 2. exact fast and full verification commands that cannot be proven from the repository - and, when `hooks_policy` will be `guarded`, which of them is the `smallest_check_command` the Stop hook runs and whether a seconds-long `smoke_command` exists; propose both from `commands_detected`,
 3. implementation transport and available model tiers,
 4. autonomy, network, sensitive-area, Git, and commit boundaries,
-5. recurring agent failures or workflows worth encoding.
+5. recurring agent failures or workflows worth encoding,
+6. whether anyone opens this repository in Codex or OpenCode as well as Claude Code
+   (`hosts`). Ask only where there is a reason to - a `.codex/` or `.opencode/`
+   directory in the repository, or the user saying so. The default is
+   `["claude-code"]` alone, and a wrong extra host costs files nobody reads while a
+   missing one costs Codex its skills. Say plainly what a second host does and does
+   not get: the contract and the skills port, the hooks, the agent catalog, and the
+   manual-only skill flag do not, and `check_installed.py` will report exactly that
+   per host after installation.
 
 Use conservative defaults and state them. Never invent commands, architecture rules, or security constraints.
 

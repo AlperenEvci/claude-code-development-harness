@@ -339,9 +339,10 @@ supervisor or desktop shell, settings.json merging, and any hook that returns `a
 
 ## After 2.0 - host portability (Claude Code, Codex, OpenCode)
 
-**Status:** measured on 2026-09-07 (`.ai/reports/0012-host-portability-smoke-test.md`);
-design proposed in `.ai/decisions/0005-host-portability.md`, awaiting the operator's
-acceptance before any code. Module plan: 2.1.0 `hosts` field and portable contract;
+**Status:** measured on 2026-09-07 (`.ai/reports/0012-host-portability-smoke-test.md`),
+extended on 2026-09-09 by `.ai/reports/0013-skill-frontmatter-across-hosts.md`; design
+accepted in `.ai/decisions/0005-host-portability.md` on 2026-09-09 and in delivery.
+Module plan: 2.1.0 `hosts` field and portable contract;
 2.2.0 OpenCode guard and permission floor; 2.3.0 Codex agents and forbidden flags;
 2.4.0 launcher host table. The measured answers to (a)-(f) are in the report.
 
@@ -404,7 +405,40 @@ No table of capabilities written from documentation.
   launcher? The launcher is the only script with a hard CLI binding, so it is the
   whole cost.
 
-**Blocked on:** decision 0005 accepted.
+**Delivery.** Decision 0005 is accepted; the four modules below are the unit of work,
+one feature branch and one minor release each, CI-confirmed between them.
+
+### Module 8 - hosts, the portable contract, and Codex skills (2.1.0) - DONE, CI pending
+
+Shipped on branch `module-8-hosts`. Measured first, in
+`.ai/reports/0013-skill-frontmatter-across-hosts.md`: both other hosts list and load a
+skill carrying Claude Code's frontmatter, neither enforces `disable-model-invocation`,
+and OpenCode reads `.agents/skills/` as well as `.claude/skills/` and dedupes by name,
+so byte-identical copies do not double either catalog. Suite 375 tests, 15 of 15
+mutations caught - one survived the first pass, the validator's absent-mirror branch,
+and the test that pins it was written before the release shipped.
+
+What did not change, deliberately: no host gets its own template layer, no host gets a
+second package, and no guarantee moved from a mechanism into prose. The absences on
+Codex and OpenCode are reported per host by `check_installed.py`, which is the whole
+point of the release - the harness now says what it cannot do somewhere rather than
+implying it can.
+
+- Profile gains `hosts` (array, default `["claude-code"]`, values `claude-code`,
+  `codex`, `opencode`), optional and defaulted so every existing profile renders
+  what 2.0.0 rendered.
+- The host-neutral half of `CLAUDE.md` moves into `AGENTS.md`, which every host reads;
+  `CLAUDE.md` keeps `@AGENTS.md` and what is Claude Code's alone.
+- A `codex` host gets byte-identical copies of every generated skill under
+  `.agents/skills/`, manifest-hashed and validated the way the runtime copies are.
+- `check_installed.py` reports each guarantee per declared host as present, absent, or
+  unmeasured.
+
+### Module 9 - OpenCode guard and permission floor (2.2.0)
+
+### Module 10 - Codex agents and forbidden flags (2.3.0)
+
+### Module 11 - launcher host table (2.4.0)
 
 ## Harness v1.0 — four-phase upgrade
 

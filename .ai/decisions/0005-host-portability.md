@@ -1,7 +1,7 @@
 # Decision 0005: Host portability - one harness, three hosts
 
 Date: 2026-09-07
-Status: proposed
+Status: accepted (2026-09-09)
 
 ## Context
 
@@ -44,7 +44,10 @@ agent catalog, the hooks it registers.
 `.claude/skills/` is read by Claude Code and OpenCode. Codex reads `.agents/skills/`
 and nothing else, so a Codex host gets byte-identical copies there, guarded by the
 same manifest and validated the same way the runtime copies are. The frontmatter
-stays Claude Code's; the extra keys are measured against each host before this ships.
+stays Claude Code's; the extra keys were measured on 2026-09-09 in
+`.ai/reports/0013-skill-frontmatter-across-hosts.md`: both hosts list and load a skill
+carrying them, and neither enforces `disable-model-invocation`, so manual-only
+invocation joins the guarantees reported as absent per host.
 
 ### 5. Per-host guards, same rules, and absence is reported
 

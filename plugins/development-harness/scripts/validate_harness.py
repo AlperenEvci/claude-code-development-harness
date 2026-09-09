@@ -279,6 +279,17 @@ def frontmatter_list(text: str, key: str) -> list[str] | None:
 # example was over it - a gate nothing can pass teaches people to ignore gates. The
 # procedure moved into the `harness-session` skill in 1.16.0 and the examples came
 # in at 173, 176, and 187, so the line is one the generator can actually hold.
+#: The host vocabulary, copied from `render_harness.py`. The validator is the
+#: last automated gate before a package is installable, so it re-derives what
+#: the renderer decided instead of trusting the profile it shipped with.
+ALLOWED_HOSTS = ("claude-code", "codex", "opencode")
+DEFAULT_HOSTS = ("claude-code",)
+
+#: Codex truncates the `AGENTS.md` hierarchy at `project_doc_max_bytes`, which
+#: is 32 KiB by default (`.ai/reports/0012`). Past that the contract is silently
+#: cut mid-file on that host, so the byte size is a check and not a note.
+CODEX_DOC_MAX_BYTES = 32 * 1024
+
 ALWAYS_LOADED_LINE_TARGET = 200
 
 #: Skills the harness itself relies on, which must therefore be reachable by the
@@ -1120,6 +1131,110 @@ def check_workflows(
                 errors.append(f"{name}.js is not valid JavaScript: {syntax_error}")
 
 
+def hosts_of(profile: dict[str, Any]) -> list[str]:
+    value = profile.get("hosts")
+    if isinstance(value, list) and value:
+        return [str(item).strip().lower() for item in value]
+    return list(DEFAULT_HOSTS)
+
+
+def check_hosts(profile: dict[str, Any], errors: list[str]) -> None:
+    """The declared hosts must be a known, deduplicated set including Claude Code."""
+    value = profile.get("hosts")
+    if value is None:
+        return
+    if not isinstance(value, list) or not value:
+        errors.append("hosts must be a non-empty array of host names")
+        return
+    names = [str(item).strip().lower() for item in value]
+    for name in names:
+        if name not in ALLOWED_HOSTS:
+            errors.append(f"unknown host in profile: {name!r}")
+    if len(set(names)) != len(names):
+        errors.append("hosts lists the same host twice")
+    if "claude-code" not in names:
+        errors.append("hosts must include claude-code; the package always renders it")
+
+
+def check_codex_contract_size(
+    profile: dict[str, Any], payload: Path, errors: list[str], warnings: list[str]
+) -> None:
+    """On a Codex host, `AGENTS.md` past the byte cap is a truncated contract.
+
+    Claude Code and OpenCode have no such cap, so this is reported only for the
+    host that has one, and it is measured in bytes because that is the unit
+    `project_doc_max_bytes` counts.
+    """
+    agents = payload / "AGENTS.md"
+    if "codex" not in hosts_of(profile) or not agents.is_file():
+        return
+    size = agents.stat().st_size
+    if size >= CODEX_DOC_MAX_BYTES:
+        errors.append(
+            f"AGENTS.md is {size} bytes and this profile declares a codex host; "
+            f"Codex reads at most {CODEX_DOC_MAX_BYTES} bytes of the AGENTS.md "
+            "hierarchy, so the rest of the contract would be silently dropped"
+        )
+    elif size > CODEX_DOC_MAX_BYTES * 3 // 4:
+        warnings.append(
+            f"AGENTS.md is {size} bytes, within a quarter of the Codex "
+            f"{CODEX_DOC_MAX_BYTES}-byte cap on the AGENTS.md hierarchy"
+        )
+
+
+def check_codex_skill_mirror(
+    profile: dict[str, Any], payload: Path, errors: list[str]
+) -> None:
+    """`.agents/skills/` exists exactly when a Codex host is declared, byte for byte.
+
+    Same rule as the runtime scripts: a copy that is not identical to the file
+    the suite tested is an untested variant, and here it would be one the two
+    hosts disagree about, which is worse than an absent file.
+    """
+    source_root = payload / ".claude" / "skills"
+    mirror_root = payload / ".agents" / "skills"
+    declared = "codex" in hosts_of(profile)
+
+    if not declared:
+        if mirror_root.exists():
+            errors.append(
+                "no codex host is declared but .agents/skills/ is present; it "
+                "would be a second copy of every skill that nothing keeps current"
+            )
+        return
+
+    if not mirror_root.is_dir():
+        errors.append(
+            "profile declares a codex host but .agents/skills/ is missing; "
+            "Codex reads that path and never reads .claude/skills/"
+        )
+        return
+
+    expected = {
+        path.relative_to(source_root).as_posix()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+    actual = {
+        path.relative_to(mirror_root).as_posix()
+        for path in mirror_root.rglob("*")
+        if path.is_file()
+    }
+    for rel in sorted(expected - actual):
+        errors.append(f"codex skill mirror is missing .agents/skills/{rel}")
+    for rel in sorted(actual - expected):
+        errors.append(
+            f".agents/skills/{rel} has no counterpart under .claude/skills/; "
+            "the mirror is a copy, not a place to add files"
+        )
+    for rel in sorted(expected & actual):
+        if sha256(source_root / rel) != sha256(mirror_root / rel):
+            errors.append(
+                f".agents/skills/{rel} differs from .claude/skills/{rel}; the "
+                "two hosts would read different instructions from one harness"
+            )
+
+
 def check_always_loaded_size(payload: Path, errors: list[str]) -> None:
     """Measure the contract that loads on every session and fail it if it is big.
 
@@ -1323,15 +1438,11 @@ def check_context_policy(
                 f"AGENTS.md does not state the configured working band {expected_band!r}"
             )
 
-    claude = payload / "CLAUDE.md"
-    if claude.is_file():
-        text = claude.read_text(encoding="utf-8")
+        # 2.1.0 moved the discipline out of `CLAUDE.md`, which only Claude Code
+        # reads, into the one file every host loads. Both sections are checked
+        # on the same text for that reason.
         if "## Context discipline" not in text:
-            errors.append("CLAUDE.md is missing the Context discipline section")
-        elif expected_band not in text:
-            errors.append(
-                f"CLAUDE.md does not state the configured working band {expected_band!r}"
-            )
+            errors.append("AGENTS.md is missing the Context discipline section")
 
 
 ORCA_SECTION = "### Watching a session in Orca"
@@ -1667,6 +1778,9 @@ def main() -> None:
         if helper.is_file() and not (helper.stat().st_mode & 0o111):
             warnings.append("fleet worktree helper is not executable")
 
+    check_hosts(profile, errors)
+    check_codex_contract_size(profile, payload, errors, warnings)
+    check_codex_skill_mirror(profile, payload, errors)
     check_context_policy(profile, payload, errors, warnings)
     check_important_paths_rule(profile, payload, errors, warnings)
     check_model_invocable_skills(profile, payload, errors, warnings)

@@ -48,7 +48,12 @@ Everything in this guide has a shorter form inside the installed repository, and
 since 1.16.0 it is in two places rather than one.
 
 `CLAUDE.md` and the `AGENTS.md` it imports are the **always-loaded contract**. Both
-load at launch, into every session, before anything is asked. That makes them
+load at launch, into every session, before anything is asked. On Claude Code, that
+is; since 2.1.0 the split between them is also the split between what every host
+reads and what only Claude Code executes. `AGENTS.md` carries the working model, the
+project knowledge map, the context budget and the context discipline, because Codex
+and OpenCode load it and never load `CLAUDE.md`. `CLAUDE.md` carries the role table,
+the work graphs, and the session commands, which nothing else can run. That makes them
 expensive and makes them reliable, and the two facts pull against each other: the
 platform's guidance is to keep an always-loaded file under 200 lines, and every tier
 this generator shipped through 1.15.0 was over it at 250-264. `validate_harness.py`
@@ -82,6 +87,37 @@ package where `harness-session` or `harness-orchestration` carries
 routes through it. That flag keeps its use on `additional_skills` you declare in the
 profile - an operator adding a procedure is describing something they mean to invoke
 themselves.
+
+### Hosts, and what a guarantee degrades into
+
+The profile's `hosts` field names who may open a session in the repository:
+`claude-code` by default, optionally `codex` and `opencode`. It is not
+`implementation_delegate`, which names who executes an accepted contract - a Claude
+Code session delegating to Codex is one host, a repository somebody opens in Codex is
+two.
+
+Declaring a host does not make the Claude Code mechanisms work there, and the harness
+does not pretend otherwise. Every guarantee is reported per host by
+`check_installed.py` as present, absent, or unmeasured, with the reason:
+
+| Guarantee | Claude Code | Codex | OpenCode |
+|---|---|---|---|
+| always-loaded contract | present | present | present |
+| on-demand skills | present | present with `.agents/skills/` | present |
+| manual-only skills | present | absent | absent |
+| pre-tool-use guard | present when guarded | absent | absent today |
+| session-start brief | present when guarded | absent | absent |
+| stop check | present when guarded | absent | absent |
+| compaction boundary | present when guarded | absent | unmeasured |
+| read-only agent catalog | present at Standard and Fleet | absent | absent |
+
+Every absence in that table was measured, not assumed. Codex documents Claude Code's
+hook surface name for name and fired none of it in six forms under `codex exec`;
+OpenCode has a real deny hook but no blocking stop event and no session-start
+injection; neither honors `disable-model-invocation`, so a manual-only skill is
+model-reachable on both. The runs are in `.ai/reports/0012-host-portability-smoke-test.md`
+and `0013-skill-frontmatter-across-hosts.md` of the plugin repository. The rows that
+say absent today are the next releases' work, not a permanent verdict.
 
 ## The commands that wrap all of this
 

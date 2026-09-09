@@ -24,6 +24,15 @@ floor under the rule.
 | `examples-only` | nothing executable; the default at Lite, and everywhere before 2.0 |
 | `guarded` | `.claude/settings.json` plus the hook scripts below; the default at Standard and Fleet since 2.0.0 |
 
+These hooks are Claude Code's, and only Claude Code's. A profile that declares a
+`codex` or `opencode` host still renders exactly this and nothing more: measured on
+2026-09-07, Codex documents the same four events under the same names and fired none
+of them in six forms under `codex exec`, and OpenCode has a deny hook in JavaScript
+but no blocking stop event (`.ai/reports/0012-host-portability-smoke-test.md`). So on
+a second host the deny rules below are prose again, and `check_installed.py` says so
+per host rather than letting the settings file imply otherwise. The OpenCode guard is
+2.2.0's work; Codex hooks ship if and only if a run shows one firing.
+
 `guarded` requires Standard or Fleet. The hooks are installed under
 `scripts/ai-harness/`, and Lite installs that directory for nothing else;
 accepting the policy at Lite would render a settings file pointing at scripts

@@ -75,6 +75,20 @@ FLEET_REQUIRED = [
 ]
 
 
+#: The host vocabulary, the third copy of it. The renderer decides, the
+#: validator re-derives before a package ships, and this one answers for a
+#: repository somebody already installed and has since edited.
+ALLOWED_HOSTS = ("claude-code", "codex", "opencode")
+DEFAULT_HOSTS = ("claude-code",)
+HOST_LABELS = {
+    "claude-code": "Claude Code",
+    "codex": "Codex",
+    "opencode": "OpenCode",
+}
+
+#: Codex truncates the AGENTS.md hierarchy here (`project_doc_max_bytes`).
+CODEX_DOC_MAX_BYTES = 32 * 1024
+
 HOOK_CAPABLE_TIERS = frozenset({"standard", "fleet"})
 
 #: The one flag each hook script takes, and the profile key its value must equal.
@@ -88,6 +102,78 @@ HOOK_COMMAND_ARGS = {
 def default_hooks_policy(tier: str) -> str:
     """Mirrors `render_harness.default_hooks_policy`; see the note there."""
     return "guarded" if str(tier).lower() in HOOK_CAPABLE_TIERS else "examples-only"
+
+
+def hosts_of(profile: dict[str, Any]) -> list[str]:
+    value = profile.get("hosts")
+    if isinstance(value, list) and value:
+        names = [str(item).strip().lower() for item in value]
+        return [name for name in ALLOWED_HOSTS if name in names] or list(DEFAULT_HOSTS)
+    return list(DEFAULT_HOSTS)
+
+
+def host_guarantees(
+    root: Path, profile: dict[str, Any], host: str
+) -> list[tuple[str, str]]:
+    """Say, for one host, which of this harness's guarantees actually fire there.
+
+    Three values and no fourth: `present` means a mechanism on this machine
+    enforces it, `absent` means nothing does, `unmeasured` means the host
+    documents something the plugin has not yet exercised against a real run.
+    A guarantee that a host cannot fire is reported, never rewritten as prose
+    that nobody enforces - the rule decision 0005 carried from `.ai/reports/0012`.
+
+    Evidence for the absences: `.ai/reports/0012-host-portability-smoke-test.md`
+    (Codex hooks documented but never fired; OpenCode has no blocking stop event
+    and no session-start injection) and `0013-skill-frontmatter-across-hosts.md`
+    (neither other host honors `disable-model-invocation`), both in the plugin
+    repository.
+    """
+    tier = str(profile.get("harness_tier", "standard")).lower()
+    hooks_policy = str(profile.get("hooks_policy") or default_hooks_policy(tier))
+    guarded = hooks_policy == "guarded" and (root / ".claude/settings.json").is_file()
+    has_stop = guarded and bool(str(profile.get("smallest_check_command", "")).strip())
+
+    if host == "claude-code":
+        agents = "present" if tier in HOOK_CAPABLE_TIERS else "absent (tier installs none)"
+        return [
+            ("always-loaded contract", "present"),
+            ("on-demand skills", "present"),
+            ("manual-only skills", "present"),
+            ("pre-tool-use guard", "present" if guarded else "absent (hooks not guarded)"),
+            ("session-start brief", "present" if guarded else "absent (hooks not guarded)"),
+            ("stop check", "present" if has_stop else "absent (no smallest check command)"),
+            ("compaction boundary", "present" if guarded else "absent (hooks not guarded)"),
+            ("read-only agent catalog", agents),
+        ]
+
+    if host == "codex":
+        skills = (
+            "present"
+            if (root / ".agents/skills").is_dir()
+            else "absent (.agents/skills is missing; Codex never reads .claude/skills)"
+        )
+        return [
+            ("always-loaded contract", "present"),
+            ("on-demand skills", skills),
+            ("manual-only skills", "absent (not enforced on this host)"),
+            ("pre-tool-use guard", "absent (no hook fired in six measured forms)"),
+            ("session-start brief", "absent (no hook fired in six measured forms)"),
+            ("stop check", "absent (no hook fired in six measured forms)"),
+            ("compaction boundary", "absent (no hook fired in six measured forms)"),
+            ("read-only agent catalog", "absent (not yet rendered for this host)"),
+        ]
+
+    return [
+        ("always-loaded contract", "present"),
+        ("on-demand skills", "present"),
+        ("manual-only skills", "absent (not enforced on this host)"),
+        ("pre-tool-use guard", "absent (no guard plugin is installed)"),
+        ("session-start brief", "absent (this host has no session-start injection)"),
+        ("stop check", "absent (this host has no blocking stop event)"),
+        ("compaction boundary", "unmeasured (documented, not exercised)"),
+        ("read-only agent catalog", "absent (not yet rendered for this host)"),
+    ]
 
 
 def hook_handler_args(settings_text: str) -> dict[str, list[str]] | None:
@@ -398,6 +484,12 @@ def main() -> None:
         required.extend(FLEET_REQUIRED)
         if delegate != "codex-cli":
             errors.append("fleet harness requires implementation_delegate=codex-cli")
+    hosts = hosts_of(profile)
+    for name in profile.get("hosts") or []:
+        if str(name).strip().lower() not in ALLOWED_HOSTS:
+            errors.append(f"unknown host in project profile: {name!r}")
+    if "codex" in hosts:
+        required.append(".agents/skills/harness-orchestration/SKILL.md")
     hooks_policy = str(profile.get("hooks_policy") or default_hooks_policy(tier))
     if hooks_policy == "guarded":
         required.extend(HOOK_REQUIRED)
@@ -536,6 +628,45 @@ def main() -> None:
     elif surface != "inproc":
         errors.append(f"unknown session_surface: {surface}")
 
+    host_status: dict[str, dict[str, str]] = {}
+    for host in hosts:
+        rows = host_guarantees(root, profile, host)
+        host_status[host] = dict(rows)
+        info.append(
+            f"host {HOST_LABELS.get(host, host)}: "
+            + "; ".join(f"{name} {state}" for name, state in rows)
+        )
+
+    agents_md = root / "AGENTS.md"
+    if "codex" in hosts and agents_md.is_file():
+        size = agents_md.stat().st_size
+        if size >= CODEX_DOC_MAX_BYTES:
+            errors.append(
+                f"AGENTS.md is {size} bytes and a codex host is declared; Codex "
+                f"reads at most {CODEX_DOC_MAX_BYTES} bytes of the AGENTS.md "
+                "hierarchy, so the rest of the contract is dropped there"
+            )
+
+    # The mirror is only useful while it still says what the original says. An
+    # installed repository has no path back to the plugin, so this compares the
+    # two installed copies against each other rather than against a source.
+    if "codex" in hosts:
+        source_root = root / ".claude/skills"
+        mirror_root = root / ".agents/skills"
+        if source_root.is_dir() and mirror_root.is_dir():
+            for source in sorted(source_root.rglob("*")):
+                if not source.is_file():
+                    continue
+                rel = source.relative_to(source_root).as_posix()
+                mirror = mirror_root / rel
+                if not mirror.is_file():
+                    errors.append(f"codex skill mirror is missing .agents/skills/{rel}")
+                elif mirror.read_bytes() != source.read_bytes():
+                    errors.append(
+                        f".agents/skills/{rel} no longer matches .claude/skills/{rel}; "
+                        "the two hosts read different instructions from one harness"
+                    )
+
     settings_path = root / ".claude/settings.json"
     if settings_path.exists():
         text = read_text(settings_path)
@@ -584,6 +715,7 @@ def main() -> None:
         "root": str(root),
         "mode": mode,
         "tier": tier,
+        "hosts": host_status,
         "errors": errors,
         "warnings": warnings,
         "info": info,
