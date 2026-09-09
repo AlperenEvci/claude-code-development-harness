@@ -30,9 +30,34 @@ Repository shape: `{{repository_shape}}`
 
 {{do_not_rules_markdown}}
 
+## Working model
+
+Route by what you cannot answer, not by how large the task feels:
+
+- **Direct** - you can name the files and will change them yourself. Read, change, run the smallest check that would fail if you got it wrong, report. Most tasks land here.
+- **Standard** - you could not name the files, or something other than this session will execute the work. Isolated reconnaissance, synthesis here, a spec only when a delegate needs one, then verification.
+- **Complex** - architecture, broad migration, or genuinely independent parallel surfaces. Split by question, decide here, bounded specs, one integration gate.
+
+Escalation costs a round trip and buys isolation, not quality. Escalate for risk you can name, and drop back the moment that reason disappears. {{orchestration_skill_pointer}}
+
+## Project knowledge
+
+- `.ai/backlog.md`: unfinished work, as narrative
+- `.ai/progress.json`: what is proven, as state
+{{project_context_taxonomy_line}}
+- `.ai/reports/`: codebase evidence and research
+- `.ai/decisions/`: accepted durable decisions
+- `.ai/specs/`: self-contained execution contracts
+- `.ai/runs/`: transient orchestration state
+- `.ai/templates/`: artifact templates
+
+Load only relevant artifacts. Do not bulk-read the whole `.ai/` tree.
+
 ## Context budget
 
 {{context_budget_section}}
+
+{{context_discipline_section}}
 
 ## Definition of done
 

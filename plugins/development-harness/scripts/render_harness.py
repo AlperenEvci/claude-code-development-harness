@@ -39,6 +39,21 @@ ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
 ALLOWED_MODES = {"create", "adopt", "upgrade"}
 ALLOWED_DELEGATES = {"codex-plugin", "codex-cli", "claude-only"}
 ALLOWED_ORCHESTRATORS = {"claude-code"}
+
+#: Who may open a session in the generated repository, in rendering order.
+#: This is not `implementation_delegate`, which answers who executes an
+#: accepted contract; decision 0005 keeps the two apart because conflating
+#: them is how the Fleet/`codex-cli` coupling happened. Measured behaviour
+#: per host is in `.ai/reports/0012` and `0013` of the plugin repository.
+ALLOWED_HOSTS = ("claude-code", "codex", "opencode")
+
+#: A profile that names no host renders exactly what 2.0.0 rendered.
+DEFAULT_HOSTS = ("claude-code",)
+
+#: Codex reads `.agents/skills/` and nothing else; OpenCode reads both that
+#: path and `.claude/skills/`. So the mirror is rendered for a Codex host
+#: and no other, and it is byte-identical rather than re-rendered.
+CODEX_SKILL_ROOT = ".agents/skills"
 #: Where `harness_session.py launch` puts a session. `inproc` is the default and
 #: is what every profile written before this field existed means. `orca` adds the
 #: Orca ADE as a launch surface: the same tier-enforced command, placed in a
@@ -117,7 +132,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "2.0.0"
+GENERATOR_VERSION = "2.1.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -445,6 +460,46 @@ def normalize_context_policy(data: dict[str, Any]) -> None:
     }
 
 
+def normalize_hosts(value: Any) -> list[str]:
+    """Resolve the `hosts` field to a canonical, deduplicated list.
+
+    Absent means `["claude-code"]`: every profile written before 2.1.0 keeps
+    rendering what it rendered. `claude-code` is required rather than optional
+    because the package always contains the Claude Code layer - `CLAUDE.md`,
+    the agent catalog, the settings file - and a profile that dropped it would
+    describe a package that does not exist.
+    """
+    if value is None:
+        return list(DEFAULT_HOSTS)
+    if not isinstance(value, list):
+        fail("hosts must be an array of host names")
+    names: list[str] = []
+    for item in value:
+        name = str(item).strip().lower()
+        if not name:
+            continue
+        if name not in ALLOWED_HOSTS:
+            fail(f"hosts must contain only {sorted(ALLOWED_HOSTS)}; got {name!r}")
+        if name not in names:
+            names.append(name)
+    if not names:
+        fail("hosts must name at least one host")
+    if "claude-code" not in names:
+        fail(
+            "hosts must include claude-code: the package always renders the "
+            "Claude Code layer, and a profile that omits it would describe a "
+            "package the renderer does not produce"
+        )
+    return [name for name in ALLOWED_HOSTS if name in names]
+
+
+def hosts_of(profile: dict[str, Any]) -> list[str]:
+    value = profile.get("hosts")
+    if isinstance(value, list) and value:
+        return [str(item).strip().lower() for item in value]
+    return list(DEFAULT_HOSTS)
+
+
 def load_profile(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -475,6 +530,8 @@ def load_profile(path: Path) -> dict[str, Any]:
             "Greenfield create mode cannot start at Fleet tier. Establish a working "
             "baseline and reliable gates, then upgrade deliberately."
         )
+
+    data["hosts"] = normalize_hosts(data.get("hosts"))
 
     orchestrator = str(data.get("main_orchestrator", "")).lower()
     if orchestrator not in ALLOWED_ORCHESTRATORS:
@@ -1319,6 +1376,24 @@ def agent_sessions_pointer(profile: dict[str, Any]) -> str:
     ])
 
 
+def orchestration_skill_pointer(profile: dict[str, Any]) -> str:
+    """Name the routing skill and every path a declared host reads it from.
+
+    `AGENTS.md` is read by all three hosts, so a bare `.claude/skills/...`
+    reference in it would be a dead path on Codex, which reads `.agents/skills/`
+    and nothing else (`.ai/reports/0012`).
+    """
+    paths = [".claude/skills/harness-orchestration/SKILL.md"]
+    if "codex" in hosts_of(profile):
+        paths.append(".agents/skills/harness-orchestration/SKILL.md")
+    return (
+        "The `harness-orchestration` skill holds the full routing test and the "
+        "rule for when an independent review is worth its cost: "
+        + " and ".join(f"`{path}`" for path in paths)
+        + "."
+    )
+
+
 def context_discipline_section(profile: dict[str, Any]) -> str:
     """Claude-specific routing: what leaves the main session."""
     policy = context_policy_of(profile)
@@ -1387,6 +1462,7 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
         "context_budget_section": context_budget_section(profile),
         "session_start_section": session_start_pointer(profile),
         "context_discipline_section": context_discipline_section(profile),
+        "orchestration_skill_pointer": orchestration_skill_pointer(profile),
         "agent_sessions_section": agent_sessions_pointer(profile),
         "context_working_band": context_working_band(profile),
         "workflows_markdown": workflows_markdown(profile),
@@ -2132,6 +2208,35 @@ def write_hook_scripts(payload: Path, profile: dict[str, Any]) -> list[Path]:
 
 
 
+def mirror_skills_for_codex(payload: Path, profile: dict[str, Any]) -> list[Path]:
+    """Copy every generated skill to the path a Codex host reads.
+
+    Byte-identical, like the runtime scripts in `scripts/ai-harness`, and for
+    the same reason: a second rendering is a second variant nothing tests.
+    Measured on 2026-09-09 (`.ai/reports/0013`): both other hosts parse Claude
+    Code's frontmatter unchanged, and OpenCode - which reads both paths -
+    dedupes by skill name, so a repository declaring `claude-code` and `codex`
+    does not show a doubled catalog.
+    """
+    if "codex" not in hosts_of(profile):
+        return []
+    source_root = payload / ".claude" / "skills"
+    if not source_root.is_dir():
+        return []
+    target_root = payload / ".agents" / "skills"
+    written: list[Path] = []
+    for source in sorted(source_root.rglob("*")):
+        if not source.is_file():
+            continue
+        target = target_root / source.relative_to(source_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Bytes, not text: the source was written with LF by `write_generated`,
+        # and a text round-trip on Windows would break the identity check.
+        target.write_bytes(source.read_bytes())
+        written.append(target)
+    return written
+
+
 def write_progress_ledger(payload: Path, profile: dict[str, Any]) -> Path | None:
     """Seed `.ai/progress.json`, the ledger `harness_progress.py` maintains.
 
@@ -2742,6 +2847,9 @@ def main() -> None:
     write_progress_ledger(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))
+    # Last of the payload writers: it mirrors whatever the skill writers above
+    # produced, so anything added later must be written before this line.
+    mirror_skills_for_codex(payload, profile)
 
     profile_json = json.dumps(profile, indent=2, ensure_ascii=False) + "\n"
     write_generated(output / "project-profile.json", profile_json)

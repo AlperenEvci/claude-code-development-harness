@@ -1074,10 +1074,12 @@ class RendererTests(unittest.TestCase):
             self.assertIn("checkpoint durable findings into", agents)
             self.assertIn("Load reference material on demand", agents)
 
+            # 2.1.0 moved the discipline into AGENTS.md, the one file every
+            # host loads. CLAUDE.md points at it and carries none of it.
+            self.assertIn("## Context discipline", agents)
+            self.assertIn("Broad codebase search or repository mapping", agents)
             claude = (payload / "CLAUDE.md").read_text()
-            self.assertIn("## Context discipline", claude)
-            self.assertIn("150k-200k tokens", claude)
-            self.assertIn("Broad codebase search or repository mapping", claude)
+            self.assertNotIn("## Context discipline", claude)
 
             stored = json.loads((payload / ".ai/harness/project-profile.json").read_text())
             self.assertEqual(
@@ -1111,9 +1113,8 @@ class RendererTests(unittest.TestCase):
             self.assertIn("Prefer a spec over a transcript.", agents)
             self.assertNotIn("150k-200k tokens", agents)
 
-            claude = (output / "payload" / "CLAUDE.md").read_text()
-            self.assertIn("Schema migration surveys", claude)
-            self.assertNotIn("Broad codebase search or repository mapping", claude)
+            self.assertIn("Schema migration surveys", agents)
+            self.assertNotIn("Broad codebase search or repository mapping", agents)
 
     def test_invalid_context_policy_is_rejected(self) -> None:
         cases = [
@@ -2945,6 +2946,7 @@ class EvalCaseTests(unittest.TestCase):
         words = {
             "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
             "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+            "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
         }
         stated_cases = re.search(r"holds (\w+) cases that run a real agent", readme)
         self.assertIsNotNone(stated_cases, "the README no longer states an eval-case count")
@@ -6754,4 +6756,299 @@ class ReleaseTwoTests(unittest.TestCase):
         self.assertEqual(
             checker.hook_handler_args(text),
             {"hook_stop.py": ["--check", "pytest -x"], "hook_session_start.py": []},
+        )
+
+
+class HostPortabilityTests(unittest.TestCase):
+    """2.1.0: one harness, three hosts, and no guarantee claimed twice.
+
+    Decision 0005 turns "who may open a session here" into its own profile
+    field, moves the host-neutral half of the contract into the one file all
+    three hosts read, and mirrors the skills to the path Codex reads. Two
+    measurements stand behind these assertions, both in the plugin repository:
+    `.ai/reports/0012-host-portability-smoke-test.md` (Codex reads only
+    `.agents/skills/` and fired no hook in six forms; OpenCode has no blocking
+    stop event) and `0013-skill-frontmatter-across-hosts.md` (neither other host
+    honors `disable-model-invocation`).
+
+    The absences are asserted as deliberately as the presences. A harness that
+    quietly claimed a guard on Codex would be worse than one that has none.
+    """
+
+    def render(self, temp_path: Path, tier: str = "standard", **overrides) -> Path:
+        data = profile(tier)
+        data.update(overrides)
+        for key, value in list(overrides.items()):
+            if value is None:
+                data.pop(key, None)
+        config = temp_path / "host-profile.json"
+        output = temp_path / "gen"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        run(PYTHON, str(SCRIPTS / "render_harness.py"),
+            "--config", str(config), "--output", str(output))
+        return output
+
+    def render_fails(self, temp_path: Path, **overrides) -> str:
+        data = profile("standard")
+        data.update(overrides)
+        config = temp_path / "bad-profile.json"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        proc = run(PYTHON, str(SCRIPTS / "render_harness.py"),
+                   "--config", str(config), "--output", str(temp_path / "bad"),
+                   check=False)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        return proc.stderr + proc.stdout
+
+    def installed(self, temp_path: Path, **overrides) -> Path:
+        output = self.render(temp_path, **overrides)
+        root = temp_path / "installed"
+        shutil.copytree(output / "payload", root)
+        return root
+
+    def check_json(self, root: Path) -> dict:
+        proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                   "--root", str(root), "--json", check=False)
+        return json.loads(proc.stdout)
+
+    # --- the field ---------------------------------------------------------
+
+    def test_a_profile_naming_no_host_renders_what_2_0_rendered(self) -> None:
+        """The whole release is optional, or it is a breaking change."""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            output = self.render(temp_path, hosts=None)
+            stored = json.loads(
+                (output / "project-profile.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(stored["hosts"], ["claude-code"])
+            self.assertFalse((output / "payload" / ".agents").exists())
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+
+    def test_the_host_list_is_canonical_and_deduplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(
+                Path(temp), hosts=["opencode", "codex", "CLAUDE-CODE", "codex"]
+            )
+            stored = json.loads(
+                (output / "project-profile.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(stored["hosts"], ["claude-code", "codex", "opencode"])
+
+    def test_an_unknown_host_is_refused_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            message = self.render_fails(Path(temp), hosts=["claude-code", "cursor"])
+            self.assertIn("cursor", message)
+
+    def test_a_profile_that_drops_claude_code_is_refused(self) -> None:
+        """The package always contains the Claude Code layer; the field may not lie."""
+        with tempfile.TemporaryDirectory() as temp:
+            message = self.render_fails(Path(temp), hosts=["codex"])
+            self.assertIn("claude-code", message)
+
+    def test_an_empty_host_list_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            self.render_fails(Path(temp), hosts=[])
+
+    # --- the portable contract ---------------------------------------------
+
+    def test_the_working_model_lives_where_every_host_reads_it(self) -> None:
+        """Codex never reads CLAUDE.md, so routing in CLAUDE.md is Claude-only."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), hosts=["claude-code", "codex"]) / "payload"
+            agents = (payload / "AGENTS.md").read_text(encoding="utf-8")
+            claude = (payload / "CLAUDE.md").read_text(encoding="utf-8")
+            for section in ("## Working model", "## Project knowledge",
+                            "## Context discipline"):
+                self.assertIn(section, agents)
+                self.assertNotIn(section, claude)
+            # What stayed behind is what only Claude Code can execute.
+            self.assertIn("## Role routing", claude)
+            self.assertIn("@AGENTS.md", claude)
+
+    def test_the_routing_pointer_names_the_path_each_host_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            alone = (self.render(temp_path, hosts=["claude-code"]) / "payload"
+                     / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn(".claude/skills/harness-orchestration/SKILL.md", alone)
+            self.assertNotIn(".agents/skills/", alone)
+
+        with tempfile.TemporaryDirectory() as temp:
+            both = (self.render(Path(temp), hosts=["claude-code", "codex"]) / "payload"
+                    / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn(".agents/skills/harness-orchestration/SKILL.md", both)
+
+    def test_an_oversized_contract_fails_for_a_codex_host(self) -> None:
+        """Codex truncates the AGENTS.md hierarchy; a cut contract is not a contract."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), hosts=["claude-code", "codex"]) / "payload"
+            agents = payload / "AGENTS.md"
+            write_lf(agents, agents.read_text(encoding="utf-8") + "\npadding\n" * 4000)
+            errors: list[str] = []
+            warnings: list[str] = []
+            VALIDATOR.check_codex_contract_size(
+                {"hosts": ["claude-code", "codex"]}, payload, errors, warnings
+            )
+            self.assertTrue(any("32768 bytes" in item for item in errors), errors)
+
+            # The same file is fine for a profile that never declared Codex.
+            errors = []
+            VALIDATOR.check_codex_contract_size(
+                {"hosts": ["claude-code"]}, payload, errors, warnings
+            )
+            self.assertEqual(errors, [])
+
+    # --- the skill mirror --------------------------------------------------
+
+    def test_a_codex_host_gets_byte_identical_skills_where_it_reads_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "codex"])
+            payload = output / "payload"
+            source = payload / ".claude" / "skills"
+            mirror = payload / ".agents" / "skills"
+            originals = sorted(
+                p.relative_to(source).as_posix() for p in source.rglob("*") if p.is_file()
+            )
+            copies = sorted(
+                p.relative_to(mirror).as_posix() for p in mirror.rglob("*") if p.is_file()
+            )
+            self.assertEqual(originals, copies)
+            self.assertTrue(originals)
+            for rel in originals:
+                self.assertEqual((source / rel).read_bytes(), (mirror / rel).read_bytes())
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+
+    def test_the_mirror_is_in_the_manifest(self) -> None:
+        """Nothing ships unhashed; the manifest walks the payload, and this proves it."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "codex"])
+            manifest = json.loads(
+                (output / "harness-manifest.json").read_text(encoding="utf-8")
+            )
+            paths = {entry["path"] for entry in manifest["files"]}
+            self.assertIn(".agents/skills/harness-orchestration/SKILL.md", paths)
+
+    def test_opencode_alone_gets_no_mirror(self) -> None:
+        """OpenCode reads .claude/skills directly; a copy would be dead weight."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "opencode"])
+            self.assertFalse((output / "payload" / ".agents").exists())
+            run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(output))
+
+    def test_a_drifted_mirror_is_caught_before_the_package_ships(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), hosts=["claude-code", "codex"]) / "payload"
+            target = payload / ".agents/skills/harness-orchestration/SKILL.md"
+            write_lf(target, target.read_text(encoding="utf-8") + "\nedited\n")
+            errors: list[str] = []
+            VALIDATOR.check_codex_skill_mirror(
+                {"hosts": ["claude-code", "codex"]}, payload, errors
+            )
+            self.assertTrue(any("differs from" in item for item in errors), errors)
+
+    def test_a_missing_mirror_directory_is_caught_as_one_error(self) -> None:
+        """The absent-directory branch, which the per-file check would otherwise mask.
+
+        A mutation that removed this branch survived the suite: with the
+        directory gone the loop below still reports every file as missing, so
+        the package fails either way. It fails with the wrong message, though -
+        a list of absent files rather than the one fact that matters, which is
+        that Codex has no skill path at all in this package.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), hosts=["claude-code", "codex"]) / "payload"
+            shutil.rmtree(payload / ".agents")
+            errors: list[str] = []
+            VALIDATOR.check_codex_skill_mirror(
+                {"hosts": ["claude-code", "codex"]}, payload, errors
+            )
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn(".agents/skills/ is missing", errors[0])
+
+    def test_a_stray_file_in_the_mirror_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), hosts=["claude-code", "codex"]) / "payload"
+            stray = payload / ".agents/skills/extra/SKILL.md"
+            stray.parent.mkdir(parents=True, exist_ok=True)
+            write_lf(stray, "---\nname: extra\n---\n")
+            errors: list[str] = []
+            VALIDATOR.check_codex_skill_mirror(
+                {"hosts": ["claude-code", "codex"]}, payload, errors
+            )
+            self.assertTrue(any("no counterpart" in item for item in errors), errors)
+
+    def test_a_mirror_without_a_codex_host_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp), hosts=["claude-code"]) / "payload"
+            stray = payload / ".agents/skills/harness-orchestration/SKILL.md"
+            stray.parent.mkdir(parents=True, exist_ok=True)
+            write_lf(stray, "x\n")
+            errors: list[str] = []
+            VALIDATOR.check_codex_skill_mirror({"hosts": ["claude-code"]}, payload, errors)
+            self.assertTrue(any(".agents/skills/ is present" in item for item in errors), errors)
+
+    # --- what the audit says after installation ----------------------------
+
+    def test_the_checker_reports_a_guarantee_per_declared_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(
+                Path(temp), hosts=["claude-code", "codex", "opencode"],
+                hooks_policy="guarded",
+            )
+            result = self.check_json(root)
+            self.assertEqual(result["status"], "pass-with-warnings")
+            self.assertEqual(
+                sorted(result["hosts"]), ["claude-code", "codex", "opencode"]
+            )
+            claude = result["hosts"]["claude-code"]
+            self.assertEqual(claude["pre-tool-use guard"], "present")
+            self.assertEqual(claude["manual-only skills"], "present")
+            # Measured absences, not omissions.
+            self.assertTrue(result["hosts"]["codex"]["pre-tool-use guard"].startswith("absent"))
+            self.assertTrue(result["hosts"]["codex"]["manual-only skills"].startswith("absent"))
+            self.assertTrue(result["hosts"]["opencode"]["stop check"].startswith("absent"))
+            self.assertTrue(
+                result["hosts"]["opencode"]["compaction boundary"].startswith("unmeasured")
+            )
+
+    def test_a_harness_that_names_no_host_is_reported_as_claude_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=None)
+            result = self.check_json(root)
+            self.assertEqual(list(result["hosts"]), ["claude-code"])
+
+    def test_a_codex_host_whose_mirror_was_edited_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code", "codex"])
+            target = root / ".agents/skills/harness-orchestration/SKILL.md"
+            write_lf(target, target.read_text(encoding="utf-8") + "\nlocal edit\n")
+            result = self.check_json(root)
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(
+                any("no longer matches" in item for item in result["errors"]),
+                result["errors"],
+            )
+
+    def test_a_codex_host_missing_the_mirror_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code", "codex"])
+            shutil.rmtree(root / ".agents")
+            result = self.check_json(root)
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(
+                any(".agents/skills/harness-orchestration" in item
+                    for item in result["errors"]),
+                result["errors"],
+            )
+
+    def test_the_three_copies_of_the_host_vocabulary_agree(self) -> None:
+        """The scripts do not import each other, so the lists are pinned instead."""
+        renderer = load_script("render_harness.py", "render_hosts_under_test")
+        validator = load_script("validate_harness.py", "validate_hosts_under_test")
+        checker = load_script("check_installed.py", "check_hosts_under_test")
+        self.assertEqual(renderer.ALLOWED_HOSTS, validator.ALLOWED_HOSTS)
+        self.assertEqual(renderer.ALLOWED_HOSTS, checker.ALLOWED_HOSTS)
+        self.assertEqual(tuple(renderer.DEFAULT_HOSTS), tuple(checker.DEFAULT_HOSTS))
+        self.assertEqual(
+            validator.CODEX_DOC_MAX_BYTES, checker.CODEX_DOC_MAX_BYTES
         )

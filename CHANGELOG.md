@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.1.0 - Three hosts, one contract
+
+Measured first, in `.ai/reports/0012-host-portability-smoke-test.md` and
+`0013-skill-frontmatter-across-hosts.md`, and designed in
+`.ai/decisions/0005-host-portability.md`. The generated harness now says which
+hosts may open a session in the repository, puts the host-neutral half of the
+contract where all of them read it, and reports per host which of its guarantees
+actually fire there.
+
+### Added
+
+- **`hosts` in the project profile.** An optional array of `claude-code`
+  (default), `codex`, and `opencode`, answering who may open a session here.
+  It is deliberately not `implementation_delegate`, which answers who executes
+  an accepted contract. A profile that names no host renders exactly what 2.0.0
+  rendered, so nothing existing changes shape.
+- **Byte-identical skill copies under `.agents/skills/` for a Codex host.**
+  Codex reads that path and never reads `.claude/skills/`. The copies are hashed
+  in the manifest, checked byte-for-byte by the validator against the originals,
+  and re-checked after installation, the same contract the `scripts/ai-harness`
+  runtime copies have had since 1.0. OpenCode gets no copies: it reads
+  `.claude/skills/` directly.
+- **A per-host guarantee report in `check_installed.py`.** Every guarantee is
+  `present`, `absent`, or `unmeasured` for each declared host, with the reason,
+  and the JSON output carries a `hosts` object. Codex shows no guard, no brief,
+  no stop check and no compaction boundary, because no hook fired there in six
+  measured forms. OpenCode shows no stop check, because it has no blocking stop
+  event, and an unmeasured compaction boundary, because its hook is documented
+  and has not been exercised. Neither host enforces `disable-model-invocation`,
+  so manual-only skills are reported absent on both.
+- **A Codex byte cap check.** Codex reads at most 32 KiB of the `AGENTS.md`
+  hierarchy, so for a profile declaring that host an oversized `AGENTS.md` is a
+  validator error rather than a silently truncated contract, with a warning at
+  three quarters of the cap.
+
+### Changed
+
+- **The working model, the project knowledge map, and the context discipline
+  moved from `CLAUDE.md` into `AGENTS.md`.** `CLAUDE.md` is invisible to Codex
+  and, in a generated harness, to OpenCode as well, so routing that lived there
+  existed for one host. `CLAUDE.md` keeps the `@AGENTS.md` import, the role
+  table, the work graphs, and the session commands, which only Claude Code
+  executes. The always-loaded contract is unchanged in total size for Claude
+  Code, and the validator still measures the pair as one number.
+- The routing pointer in `AGENTS.md` names every path a declared host reads the
+  orchestration skill from, rather than one path that is dead on Codex.
+
 ## 2.0.0 - 2026-09-07
 
 ### Harness 2.0

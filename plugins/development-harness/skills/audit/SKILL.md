@@ -88,7 +88,14 @@ Read:
 8. **Precedence** — generic names are not unintentionally shadowed.
 9. **Fleet readiness** — parallel writes require direct Codex CLI, independent ownership, worktrees, bounded concurrency, and a reliable integration gate in version 0.2.
 10. **Maintenance** — stale rules, duplication, dead artifacts, and oversized memory files are identified.
-11. **Repository shape** — the `shape_signals` block from the scan. Depth, directory
+11. **Host reach** — the per-host guarantee lines `check_installed.py` prints. A
+    harness declaring `codex` or `opencode` gets the contract and the skills on those
+    hosts and none of the hooks, the agent catalog, or the manual-only skill flag.
+    Report what is absent where, exactly as the checker says it: the harness makes
+    fewer promises on a second host, and prose that hides the difference is the
+    failure mode this section exists to catch. Absence on a host is not a defect to
+    fix; a claim that contradicts it is.
+12. **Repository shape** — the `shape_signals` block from the scan. Depth, directory
     fan-out, oversized source files, and directories no test names change what a harness
     can honestly promise, and the harness cannot fix any of them. Quote the measurement
     and the threshold it crossed. `test_named_directory_ratio` is proximity, never
