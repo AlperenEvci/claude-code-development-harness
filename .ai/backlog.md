@@ -465,9 +465,10 @@ The guard was exercised against a real `opencode run` before it was wired into t
 renderer: a `.env` read, `git commit` under a `no-commit` policy, and `git push` were
 each refused with the reason quoted back by the model, and a control command ran.
 
-### Module 10 - Codex sandbox floor and forbidden flags (2.3.0) - DONE, pending CI
+### Module 10 - Codex sandbox floor and forbidden flags (2.3.0) - DONE, CI-confirmed
 
-Shipped on branch `module-10-codex-floor`. The module was designed on paper as
+Shipped as PR #11, merged to main; both CI legs green on ubuntu-latest and
+windows-latest. The module was designed on paper as
 `.codex/agents/*.toml` read-only agents; the measurement in
 `.ai/reports/0015-codex-enforcement-surface.md` contradicted that and the release is
 what survived. On Codex CLI 0.153.4: that path is not read at all, and the roles
