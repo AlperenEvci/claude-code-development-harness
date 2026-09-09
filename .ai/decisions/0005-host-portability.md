@@ -76,6 +76,18 @@ with `permission` deny rules from the tier table, and into `.codex/agents/*.toml
 hosts are not rendered until their enforcement is measured, since neither host's deny
 was exercised in the smoke test.
 
+**Amended 2026-09-09 by `.ai/reports/0015-codex-enforcement-surface.md`.** The Codex
+half of this paragraph is wrong and was not shipped. `.codex/agents/*.toml` is not read
+by Codex CLI 0.153.4 at all; the roles it does have are `[agents.<name>]` tables in
+configuration, and a role constrains only its own name - `spawn_agent` refuses an
+undeclared `agent_type`, but the role's `instructions` never reached the spawned agent
+and its `sandbox_mode` bound nothing in either direction. What Codex enforces is the
+session sandbox, so 2.3.0 renders `.codex/config.toml` - `sandbox_mode` and, where it
+applies, `[sandbox_workspace_write] network_access` - and renders no agent file. The
+read-only catalog stays reported as absent on that host, now with a measured reason.
+This is the second time a paper design met a file that reads like a rule and enforces
+nothing; the first was the per-command permission table in section 5.
+
 ### 7. The launcher grows a host table, not a second launcher
 
 `harness_session.py launch --host <name>` resolves the binary and maps the tier to the

@@ -110,6 +110,7 @@ does not pretend otherwise. Every guarantee is reported per host by
 | stop check | present when guarded | absent | absent |
 | compaction boundary | present when guarded | absent | unmeasured |
 | read-only agent catalog | present at Standard and Fleet | absent | present |
+| permission floor | absent (launch flags carry the tier) | present with `.codex/config.toml` | present with `opencode.json` |
 
 Every absence in that table was measured, not assumed. Codex documents Claude Code's
 hook surface name for name and fired none of it in six forms under `codex exec`;
@@ -133,6 +134,26 @@ than a sentence, measured in `0014-opencode-enforcement-surface.md`:
   policy imply, in whole-tool form only. A per-command table under `bash` is
   schema-valid and enforces nothing under `opencode run`, so the harness never
   writes one and flags one that appears by hand.
+
+The Codex floor is 2.3.0's work, measured in `0015-codex-enforcement-surface.md`:
+
+- `.codex/config.toml` sets `sandbox_mode` for every session started in the repository
+  without a `-s` flag, with no trust prompt, and the sandbox is enforced by the
+  operating system: under a `read-only` floor a shell write fails with an access
+  error and the file does not appear. `[sandbox_workspace_write] network_access`
+  is enforced the same way - the same request returned "cannot reach the remote
+  server" with `false` and `200` with `true`.
+- It is a default, not a ceiling. `codex exec -s workspace-write` overrides it, and
+  the same file can widen a sandbox as easily as narrow one - a project config
+  declaring `danger-full-access` removed the sandbox with no prompt at all. That is
+  why `check_installed.py` reads the installed file back rather than trusting what
+  was rendered, and reports a floor wider than the profile as an error.
+- What is deliberately absent there: no `approval_policy`, which is not observable
+  under `codex exec`, and no `[agents.<name>]` role table. A role's `sandbox_mode`
+  binds nothing in either direction and its `instructions` never reached the agent it
+  named, so the read-only catalog does not cross to this host and the guarantee stays
+  reported as absent. A role table that appears by hand is a validator error and a
+  checker warning.
 
 Set `HARNESS_HOOKS_DISABLE=1` and the guard stands down on both hosts, which is the
 one thing an operator needs when a guard is wrong. The permission floor and the agent

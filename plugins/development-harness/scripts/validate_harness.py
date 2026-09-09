@@ -26,8 +26,11 @@ from harness_capabilities import (
     AUTOCOMPACT_MAX_TOKENS,
     AUTOCOMPACT_MIN_TOKENS,  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
+    CODEX_SANDBOX_RANK,
     EDIT_ACCEPTING_MODES,
     MODEL_INHERIT,
+    codex_sandbox_floor,
+    read_codex_config,
 )
 
 #: Kept in step with render_harness.SESSION_TOOL_SCRIPTS by a test, rather than
@@ -89,6 +92,7 @@ FORBIDDEN_CODEX_DEFAULTS = (
     "--dangerously-bypass-approvals-and-sandbox",
     "--allow-dangerously-skip-permissions",
     "--dangerously-skip-permissions",
+    "--dangerously-bypass-hook-trust",
     "--skip-git-repo-check",
     "danger-full-access",
 )
@@ -1361,6 +1365,76 @@ def check_opencode_guard(
         )
 
 
+CODEX_CONFIG_PATH = ".codex/config.toml"
+
+
+def check_codex_config(
+    profile: dict[str, Any], payload: Path, errors: list[str]
+) -> None:
+    """`.codex/config.toml` states the sandbox the profile implies, and only that.
+
+    Three refusals, in the order they matter. A floor that does not match the
+    profile is a contract that disagrees with itself. A floor wider than the
+    profile is the widening surface report 0015 measured - a repository that
+    hands the next `codex exec` a bigger sandbox than its own policy claims. And
+    an `[agents.<name>]` role table is refused outright: its `sandbox_mode` was
+    measured to bind nothing, so a rendered one would read like the guarantee the
+    Claude Code catalog gives and give none of it.
+    """
+    declared = "codex" in hosts_of(profile)
+    target = payload / CODEX_CONFIG_PATH
+    floor = codex_sandbox_floor(profile)
+
+    if not declared:
+        if target.exists():
+            errors.append(
+                f"no codex host is declared but {CODEX_CONFIG_PATH} is present"
+            )
+        return
+
+    if not floor:
+        return
+
+    if not target.is_file():
+        errors.append(
+            f"profile declares a codex host but {CODEX_CONFIG_PATH} is missing; "
+            "the sandbox floor would be prose"
+        )
+        return
+
+    actual = read_codex_config(target.read_text(encoding="utf-8"))
+
+    expected_mode = floor["sandbox_mode"]
+    actual_mode = actual["sandbox_mode"]
+    if actual_mode != expected_mode:
+        wider = CODEX_SANDBOX_RANK.get(actual_mode, 99) > CODEX_SANDBOX_RANK.get(
+            expected_mode, 0
+        )
+        errors.append(
+            f"{CODEX_CONFIG_PATH} sets sandbox_mode to {actual_mode!r}; the "
+            f"profile's autonomy implies {expected_mode!r}"
+            + (
+                " - and that widens every codex session in the repository"
+                if wider
+                else ""
+            )
+        )
+
+    if "network_access" in floor and actual["network_access"] != floor["network_access"]:
+        errors.append(
+            f"{CODEX_CONFIG_PATH} sets network_access to "
+            f"{actual['network_access']!r}; the profile's network policy implies "
+            f"{floor['network_access']!r}"
+        )
+
+    for role in actual["roles"]:
+        errors.append(
+            f"{CODEX_CONFIG_PATH} declares an agent role [agents.{role}]; measured "
+            "on 0.153.4 a role's sandbox_mode binds nothing in either direction, "
+            "so the harness never generates one"
+        )
+
+
 def check_opencode_config(
     profile: dict[str, Any], payload: Path, errors: list[str]
 ) -> None:
@@ -2006,6 +2080,7 @@ def main() -> None:
     check_codex_contract_size(profile, payload, errors, warnings)
     check_codex_skill_mirror(profile, payload, errors)
     check_opencode_guard(profile, payload, errors, warnings)
+    check_codex_config(profile, payload, errors)
     check_opencode_config(profile, payload, errors)
     check_opencode_agents(profile, payload, errors)
     check_context_policy(profile, payload, errors, warnings)

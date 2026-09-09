@@ -161,7 +161,14 @@ Create one normalized JSON object from project evidence plus the user's confirme
   layer. Declaring `codex` adds byte-identical copies of every generated
   skill under `.agents/skills/`, which is the only skill path Codex
   reads, and makes the 32 KiB Codex cap on the `AGENTS.md` hierarchy a
-  validator check. Declaring `opencode` adds the three things that host
+  validator check. Since 2.3.0 it also writes `.codex/config.toml`, the
+  sandbox floor that host enforces: `sandbox_mode` from `autonomy`, and
+  `[sandbox_workspace_write] network_access` from `network_access` where
+  that mode applies. It is a default rather than a ceiling - a `-s` flag
+  overrides it - and because the same file can widen a sandbox as easily
+  as narrow one, `check_installed.py` reports an installed floor wider
+  than the profile as an error. No agent file is written for Codex: a
+  role's `sandbox_mode` was measured to bind nothing. Declaring `opencode` adds the three things that host
   enforces: `.opencode/plugins/harness-guard.js` when the hooks policy is
   `guarded`, a whole-tool permission floor in `opencode.json` derived
   from `autonomy` and `network_access`, and a read-only agent under

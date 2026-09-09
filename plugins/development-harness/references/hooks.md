@@ -44,6 +44,17 @@ and parse-checked by the validator, because a plugin whose module body throws le
 there: OpenCode has no blocking stop event and no session-start injection, and its
 compaction event is documented and unmeasured.
 
+A `codex` host gets no hook at all, and that is measured rather than assumed twice
+over: a project `.codex/hooks.json` registering a command on `PreToolUse` and
+`SessionStart` was never invoked, the `.env` read it should have blocked printed the
+token, and the hook's log file was never created
+(`.ai/reports/0015-codex-enforcement-surface.md`, reproducing report 0012). What that
+host does enforce is a sandbox, so the harness writes `.codex/config.toml` instead of
+a hook - a floor rather than a decision per call. The bypass flags that would undo it,
+`--dangerously-bypass-approvals-and-sandbox` and `--dangerously-bypass-hook-trust`,
+are refused by name in both guards, which is the only place the harness can refuse
+them on a host that runs no hook of its own.
+
 `guarded` requires Standard or Fleet. The hooks are installed under
 `scripts/ai-harness/`, and Lite installs that directory for nothing else;
 accepting the policy at Lite would render a settings file pointing at scripts

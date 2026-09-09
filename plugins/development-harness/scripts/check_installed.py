@@ -16,7 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
     ALLOWED_EFFORT,
     CAPABILITY_TIERS,
+    CODEX_SANDBOX_RANK,
     EDIT_ACCEPTING_MODES,
+    codex_sandbox_floor,
+    read_codex_config,
 )
 
 PLACEHOLDER = re.compile(r"\{\{[a-zA-Z0-9_]+\}\}")
@@ -93,6 +96,7 @@ CODEX_DOC_MAX_BYTES = 32 * 1024
 #: The guard plugin denies by throwing, and an agent file's permission block
 #: removes the tool rather than refusing the call - so both are mechanisms this
 #: script can look for, and their absence is reported as an absence.
+CODEX_CONFIG_PATH = ".codex/config.toml"
 OPENCODE_PLUGIN_PATH = ".opencode/plugins/harness-guard.js"
 OPENCODE_AGENT_ROOT = ".opencode/agents"
 OPENCODE_CONFIG_PATH = "opencode.json"
@@ -153,6 +157,10 @@ def host_guarantees(
             ("stop check", "present" if has_stop else "absent (no smallest check command)"),
             ("compaction boundary", "present" if guarded else "absent (hooks not guarded)"),
             ("read-only agent catalog", agents),
+            (
+                "permission floor",
+                "absent (a tier is enforced by its launch flags, not by a settings floor)",
+            ),
         ]
 
     if host == "codex":
@@ -160,6 +168,12 @@ def host_guarantees(
             "present"
             if (root / ".agents/skills").is_dir()
             else "absent (.agents/skills is missing; Codex never reads .claude/skills)"
+        )
+        floor = read_codex_config(read_text(root / CODEX_CONFIG_PATH))
+        codex_floor = (
+            f"present ({floor['sandbox_mode']})"
+            if floor["sandbox_mode"]
+            else f"absent (no {CODEX_CONFIG_PATH} sandbox floor is installed)"
         )
         return [
             ("always-loaded contract", "present"),
@@ -169,7 +183,11 @@ def host_guarantees(
             ("session-start brief", "absent (no hook fired in six measured forms)"),
             ("stop check", "absent (no hook fired in six measured forms)"),
             ("compaction boundary", "absent (no hook fired in six measured forms)"),
-            ("read-only agent catalog", "absent (not yet rendered for this host)"),
+            (
+                "read-only agent catalog",
+                "absent (a role's sandbox_mode binds nothing; measured 0.153.4)",
+            ),
+            ("permission floor", codex_floor),
         ]
 
     plugin = root / OPENCODE_PLUGIN_PATH
@@ -185,6 +203,13 @@ def host_guarantees(
         "present" if agent_files else "absent (no read-only agent file is installed)"
     )
 
+    try:
+        opencode_floor = bool(
+            json.loads(read_text(root / OPENCODE_CONFIG_PATH)).get("permission")
+        )
+    except ValueError:
+        opencode_floor = False
+
     return [
         ("always-loaded contract", "present"),
         ("on-demand skills", "present"),
@@ -194,6 +219,10 @@ def host_guarantees(
         ("stop check", "absent (this host has no blocking stop event)"),
         ("compaction boundary", "unmeasured (documented, not exercised)"),
         ("read-only agent catalog", opencode_agents),
+        (
+            "permission floor",
+            "present" if opencode_floor else f"absent (no {OPENCODE_CONFIG_PATH} permission block)",
+        ),
     ]
 
 
@@ -511,6 +540,11 @@ def main() -> None:
             errors.append(f"unknown host in project profile: {name!r}")
     if "codex" in hosts:
         required.append(".agents/skills/harness-orchestration/SKILL.md")
+        if codex_sandbox_floor(profile):
+            # The sandbox floor is the only thing a repository can enforce on
+            # this host. A codex harness without it has a policy in prose and
+            # nothing that fires.
+            required.append(CODEX_CONFIG_PATH)
     hooks_policy = str(profile.get("hooks_policy") or default_hooks_policy(tier))
     if hooks_policy == "guarded":
         required.extend(HOOK_REQUIRED)
@@ -692,6 +726,45 @@ def main() -> None:
                         f".agents/skills/{rel} no longer matches .claude/skills/{rel}; "
                         "the two hosts read different instructions from one harness"
                     )
+
+    if "codex" in hosts:
+        config = root / CODEX_CONFIG_PATH
+        if config.is_file():
+            installed = read_codex_config(read_text(config))
+            expected = codex_sandbox_floor(profile)
+            actual_mode = installed["sandbox_mode"]
+            if expected and actual_mode != expected["sandbox_mode"]:
+                wider = CODEX_SANDBOX_RANK.get(actual_mode, 99) > CODEX_SANDBOX_RANK.get(
+                    expected["sandbox_mode"], 0
+                )
+                message = (
+                    f"{CODEX_CONFIG_PATH} sets sandbox_mode to {actual_mode!r} but "
+                    f"the profile's autonomy implies {expected['sandbox_mode']!r}"
+                )
+                if wider:
+                    # Report 0015: this file needs no flag and no trust prompt,
+                    # so a widened floor silently hands the next `codex exec` in
+                    # this repository more authority than the contract claims.
+                    errors.append(
+                        message + "; every codex session here now starts wider "
+                        "than the harness says it may"
+                    )
+                else:
+                    warnings.append(message)
+            if (
+                expected.get("network_access") is False
+                and installed["network_access"] is True
+            ):
+                errors.append(
+                    f"{CODEX_CONFIG_PATH} enables sandbox network access but the "
+                    "profile's network policy denies it"
+                )
+            for role in installed["roles"]:
+                warnings.append(
+                    f"{CODEX_CONFIG_PATH} declares an agent role [agents.{role}]; "
+                    "measured on Codex 0.153.4 a role's sandbox_mode binds nothing "
+                    "in either direction, so this reads as a boundary and is not one"
+                )
 
     if "opencode" in hosts:
         plugin = root / OPENCODE_PLUGIN_PATH

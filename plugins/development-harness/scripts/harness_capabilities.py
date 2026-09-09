@@ -24,7 +24,20 @@ from typing import Any
 # with it holds none of the contract the harness installed - and on subscription
 # authentication it refuses to start at all. Measured on Claude Code 2.1.263; see
 # `.ai/reports/0004-bare-flag-smoke-test.md`.
-FORBIDDEN_LAUNCH_FLAGS: tuple[str, ...] = ("--bare",)
+#
+# The other two hosts have the same kind of flag, named in `codex --help` and in
+# OpenCode's own documentation (reports 0012 and 0015): Codex's two bypasses
+# remove the sandbox and the hook-trust requirement, and OpenCode's `--auto`
+# auto-approves every permission that is not explicitly denied. They are listed
+# here rather than in the launcher because the rule is the tier's, not the
+# binary's: a tier that could hand itself more authority than the table grants
+# is not a tier. The match is exact, so `--autocompact` is untouched by `--auto`.
+FORBIDDEN_LAUNCH_FLAGS: tuple[str, ...] = (
+    "--bare",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--auto",
+)
 
 # The range `claude --autocompact` accepts, measured on 2.1.263 rather than read
 # from the help line: `50000` and `2000000` are both refused at argument parsing
@@ -256,3 +269,99 @@ def capability_grant_errors(
                 f"{label}.approved_by_operator is only meaningful for an implementer"
             )
     return errors
+
+
+# --- The Codex sandbox floor -----------------------------------------------
+#
+# Here for the reason the tier table is here: the renderer writes this floor,
+# the validator checks the rendered file against the profile, and the checker
+# reads the installed one back. Three copies of the mapping would be three
+# places for authority and its enforcement to drift apart.
+#
+# Measured on Codex CLI 0.153.4, `.ai/reports/0015-codex-enforcement-surface.md`:
+# a project `.codex/config.toml` sets the session sandbox with no command-line
+# flag and no trust prompt, and the sandbox is enforced by the operating system.
+# It is a default rather than a ceiling - `codex exec -s workspace-write`
+# overrides it - and the same file can widen a sandbox as easily as narrow one,
+# which is why the checker reads it back instead of trusting what was rendered.
+
+#: Autonomy to sandbox mode. Codex has three modes and no enforceable "ask": a
+#: project config asking for `approval_policy = "on-request"` still reports
+#: `approval: never` under `codex exec`, so a policy meaning "ask first" rounds
+#: down to the mode that cannot write rather than up to the one that can.
+CODEX_AUTONOMY_SANDBOX: dict[str, str] = {
+    "read-only": "read-only",
+    "approval-required": "read-only",
+    "repository-write-with-approval": "workspace-write",
+    "isolated-auto": "workspace-write",
+}
+
+#: Network policy to the one network switch the sandbox honors. Measured as a
+#: pair: the same request to the same host returned "cannot reach the remote
+#: server" with `false` and `200` with `true`.
+CODEX_NETWORK_ACCESS: dict[str, bool] = {
+    "deny-by-default": False,
+    "ask-before-network": False,
+    "approved-for-scoped-tasks": True,
+}
+
+#: How much authority each mode carries, so "wider than the profile allows" is
+#: a comparison rather than a judgement. `danger-full-access` is never rendered
+#: by anything in this repository; it is in the table only so an installed file
+#: claiming it can be recognized and refused.
+CODEX_SANDBOX_RANK: dict[str, int] = {
+    "read-only": 0,
+    "workspace-write": 1,
+    "danger-full-access": 2,
+}
+
+
+def codex_sandbox_floor(profile: dict[str, Any]) -> dict[str, Any]:
+    """The sandbox a profile's declared policy implies.
+
+    Two keys at most, because two are all a project file was measured to
+    enforce. `network_access` only applies inside the workspace-write sandbox,
+    so a read-only floor omits it rather than stating something inapplicable.
+    """
+    mode = CODEX_AUTONOMY_SANDBOX.get(str(profile.get("autonomy", "")))
+    if mode is None:
+        return {}
+    floor: dict[str, Any] = {"sandbox_mode": mode}
+    if mode == "workspace-write":
+        network = CODEX_NETWORK_ACCESS.get(str(profile.get("network_access", "")))
+        if network is not None:
+            floor["network_access"] = network
+    return floor
+
+
+def read_codex_config(text: str) -> dict[str, Any]:
+    """The three things anything here needs to know about a `.codex/config.toml`.
+
+    Not a TOML parser, and not pretending to be one: `tomllib` is 3.11 and this
+    repository supports 3.10. It reads the top-level `sandbox_mode`, the
+    `network_access` under `[sandbox_workspace_write]`, and the names of any
+    `[agents.<name>]` role tables - which is exactly what the floor check and
+    the widening check need, and nothing else. A key it cannot read is reported
+    as absent, so an unreadable file fails the comparison rather than passing it.
+    """
+    result: dict[str, Any] = {"sandbox_mode": None, "network_access": None, "roles": []}
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            if section.startswith("agents."):
+                result["roles"].append(section[len("agents."):].strip().strip('"'))
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.split("#", 1)[0].strip().strip('"').strip("'")
+        if not section and key == "sandbox_mode":
+            result["sandbox_mode"] = value
+        elif section == "sandbox_workspace_write" and key == "network_access":
+            result["network_access"] = value == "true"
+    return result

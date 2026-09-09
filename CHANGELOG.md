@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.3.0 - The one thing Codex lets a repository enforce
+
+Measured first, in `.ai/reports/0015-codex-enforcement-surface.md`, which is the
+third module of `.ai/decisions/0005-host-portability.md`. The design that decision
+recorded for this release - read-only agent files at `.codex/agents/*.toml` - did not
+survive contact with the binary, and what replaced it is smaller and real.
+
+### Added
+
+- **A sandbox floor for a `codex` host.** `.codex/config.toml` states
+  `sandbox_mode`, and `[sandbox_workspace_write] network_access` where that mode
+  applies, derived from the profile's `autonomy` and `network_access`. A project file
+  there sets the session sandbox with no command-line flag and no trust prompt, and the
+  sandbox is enforced by the operating system: under a `read-only` floor a shell write
+  failed with an access error and the file did not appear. The network switch was
+  measured as a pair - the same request to the same host returned "cannot reach the
+  remote server" with `false` and `200` with `true`.
+- **A widening check, in both places.** The same file that installs a floor can raise
+  one: a project config declaring `danger-full-access` removed the sandbox with no
+  prompt at all. The validator refuses a rendered floor that does not match the profile,
+  and `check_installed.py` reads the installed file back and reports a floor wider than
+  the profile as an error rather than a difference.
+- **The other hosts' bypass flags are refused by name.** Codex's
+  `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-bypass-hook-trust`
+  and OpenCode's `--auto` join `FORBIDDEN_LAUNCH_FLAGS`, so no tier may launch with
+  them, and both guards refuse a shell command carrying one. `--auto` is matched with a
+  boundary, because `--autocompact` is a flag the harness itself passes.
+- **A `permission floor` row in the guarantee table**, reported per host: present with
+  the mode it installs on Codex, present with its permission block on OpenCode, and
+  absent on Claude Code, where a tier is carried by its launch flags and the harness
+  pre-approves nothing in settings.
+
+### Changed
+
+- **The Codex row of the guarantee table** now says why the read-only agent catalog is
+  absent there rather than that it has not been rendered yet: measured, a role's
+  `sandbox_mode` binds nothing in either direction.
+
+### Deliberately not shipped
+
+- **`.codex/agents/*.toml`, which decision 0005 had planned.** The path is not read at
+  all. What Codex 0.153.4 has instead is `[agents.<name>]` in configuration, and a role
+  defined there constrains only its own name: `spawn_agent` refuses an undeclared
+  `agent_type`, but the role's `instructions` never reached the agent, a role declaring
+  `read-only` wrote a file under a `workspace-write` parent, and a role declaring
+  `workspace-write` was still refused under a `read-only` parent. Rendering one would
+  read exactly like the guarantee the Claude Code catalog gives and would give none of
+  it, so the harness renders none and refuses one that appears by hand.
+- **`approval_policy`.** A project config asking for `on-request` still reports
+  `approval: never` under `codex exec`.
+- **Codex hooks.** A project `.codex/hooks.json` on `PreToolUse` and `SessionStart`
+  was never invoked; the `.env` read it should have blocked printed the token and the
+  hook's log file was never created. That reproduces report 0012's finding on the same
+  binary, so the guard stays reported as absent on this host.
+
 ## 2.2.0 - What OpenCode can enforce, enforced
 
 Measured first, in `.ai/reports/0014-opencode-enforcement-surface.md`, which is
