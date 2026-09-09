@@ -54,8 +54,15 @@ invocation joins the guarantees reported as absent per host.
 The deny rules in `hook_guard.py` are the floor. On OpenCode they are rendered as a
 project plugin at `.opencode/plugins/harness-guard.js` - stdlib-free JavaScript, no
 `package.json`, no dependency - denying by throw with the same reason strings, plus a
-permission block in `opencode.json` that lowers the default `build` agent from
-allow-everything to the profile's autonomy. On Codex, hooks are rendered only after a
+permission block in `opencode.json` that lowers the default agent from
+allow-everything to the profile's autonomy. Measured before it shipped, in
+`.ai/reports/0014-opencode-enforcement-surface.md`: the throw is a real deny for every
+tool tried and for a subagent's calls, and the permission block is enforced by removing
+the tool from the model rather than by refusing the call. The one part of this
+paragraph the measurement contradicted is the shape of the block - a per-command
+allowlist under `bash` is schema-valid and enforces nothing under `opencode run`, so
+the floor is whole-tool only and every command rule stays in the plugin, which is the
+only mechanism that sees a command string. On Codex, hooks are rendered only after a
 run shows one firing; until then `check_installed.py` reports, for a Codex host,
 "guard: absent on this host", and the same for the stop check on OpenCode, which has
 no blocking stop event. A guarantee is present, absent, or unmeasured, and the audit

@@ -66,9 +66,12 @@ says which hosts to render for. `AGENTS.md` is the only file Claude Code, Codex,
 OpenCode all load, which is why the host-neutral half of the contract lives there
 rather than in `CLAUDE.md`, a file the other two never read. A profile declaring a
 `codex` host also gets byte-identical copies of every generated skill under
-`.agents/skills/`, the only skill path Codex reads. Nothing else in the layout is
-per-host, and `check_installed.py` reports for each declared host which guarantees
-actually fire there rather than assuming they all do.
+`.agents/skills/`, the only skill path Codex reads. A profile declaring an `opencode`
+host gets the one thing that host does enforce: a guard plugin under
+`.opencode/plugins/`, a whole-tool permission floor in `opencode.json`, and read-only
+agents under `.opencode/agents/` whose permission block removes the tools they may not
+use. Nothing else in the layout is per-host, and `check_installed.py` reports for each
+declared host which guarantees actually fire there rather than assuming they all do.
 
 `.ai/project/` records accepted intent before code exists. Reports later record what the repository actually proves. The harness explicitly prevents planned paths and commands from being mislabeled as verified implementation facts.
 

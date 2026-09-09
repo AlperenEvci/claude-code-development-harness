@@ -89,6 +89,14 @@ HOST_LABELS = {
 #: Codex truncates the AGENTS.md hierarchy here (`project_doc_max_bytes`).
 CODEX_DOC_MAX_BYTES = 32 * 1024
 
+#: The OpenCode surface, from `.ai/reports/0014-opencode-enforcement-surface.md`.
+#: The guard plugin denies by throwing, and an agent file's permission block
+#: removes the tool rather than refusing the call - so both are mechanisms this
+#: script can look for, and their absence is reported as an absence.
+OPENCODE_PLUGIN_PATH = ".opencode/plugins/harness-guard.js"
+OPENCODE_AGENT_ROOT = ".opencode/agents"
+OPENCODE_CONFIG_PATH = "opencode.json"
+
 HOOK_CAPABLE_TIERS = frozenset({"standard", "fleet"})
 
 #: The one flag each hook script takes, and the profile key its value must equal.
@@ -164,15 +172,28 @@ def host_guarantees(
             ("read-only agent catalog", "absent (not yet rendered for this host)"),
         ]
 
+    plugin = root / OPENCODE_PLUGIN_PATH
+    if plugin.is_file():
+        opencode_guard = "present"
+    elif not guarded:
+        opencode_guard = "absent (hooks not guarded)"
+    else:
+        opencode_guard = "absent (no guard plugin is installed)"
+
+    agent_files = sorted((root / OPENCODE_AGENT_ROOT).glob("*.md"))
+    opencode_agents = (
+        "present" if agent_files else "absent (no read-only agent file is installed)"
+    )
+
     return [
         ("always-loaded contract", "present"),
         ("on-demand skills", "present"),
         ("manual-only skills", "absent (not enforced on this host)"),
-        ("pre-tool-use guard", "absent (no guard plugin is installed)"),
+        ("pre-tool-use guard", opencode_guard),
         ("session-start brief", "absent (this host has no session-start injection)"),
         ("stop check", "absent (this host has no blocking stop event)"),
         ("compaction boundary", "unmeasured (documented, not exercised)"),
-        ("read-only agent catalog", "absent (not yet rendered for this host)"),
+        ("read-only agent catalog", opencode_agents),
     ]
 
 
@@ -493,6 +514,11 @@ def main() -> None:
     hooks_policy = str(profile.get("hooks_policy") or default_hooks_policy(tier))
     if hooks_policy == "guarded":
         required.extend(HOOK_REQUIRED)
+        if "opencode" in hosts:
+            # The guard is this host's only pre-tool-use mechanism, so a guarded
+            # profile that declares OpenCode and ships no plugin has a guarantee
+            # its own contract claims and nothing enforces.
+            required.append(OPENCODE_PLUGIN_PATH)
     required.extend(dynamic)
 
     missing = [rel for rel in required if not (root / rel).is_file()]
@@ -665,6 +691,54 @@ def main() -> None:
                     errors.append(
                         f".agents/skills/{rel} no longer matches .claude/skills/{rel}; "
                         "the two hosts read different instructions from one harness"
+                    )
+
+    if "opencode" in hosts:
+        plugin = root / OPENCODE_PLUGIN_PATH
+        if plugin.is_file():
+            text = read_text(plugin)
+            # Not a byte comparison: an installed repository has no path back to
+            # the plugin that wrote this file. What can be checked from here is
+            # that the two properties the guard's design rests on are still true.
+            if "HARNESS_HOOKS_DISABLE" not in text:
+                errors.append(
+                    f"{OPENCODE_PLUGIN_PATH} no longer honors HARNESS_HOOKS_DISABLE; "
+                    "a guard with no escape hatch cannot be stood down by the operator"
+                )
+            if "harnessDeny" not in text:
+                warnings.append(
+                    f"{OPENCODE_PLUGIN_PATH} has been edited: it no longer separates a "
+                    "deliberate refusal from a defect, so a bug in it can now deny a "
+                    "call that should have been allowed"
+                )
+        for agent in sorted((root / OPENCODE_AGENT_ROOT).glob("*.md")):
+            text = read_text(agent)
+            missing_lines = [
+                line for line in ("edit: deny", "write: deny") if line not in text
+            ]
+            if missing_lines:
+                errors.append(
+                    f"{OPENCODE_AGENT_ROOT}/{agent.name} no longer declares "
+                    f"{', '.join(missing_lines)}; on OpenCode that line is what removes "
+                    "the tool, so the agent is no longer read-only"
+                )
+        config = root / OPENCODE_CONFIG_PATH
+        if config.is_file():
+            try:
+                permission = json.loads(read_text(config)).get("permission")
+            except ValueError:
+                permission = None
+                errors.append(f"{OPENCODE_CONFIG_PATH} is not readable JSON")
+            if isinstance(permission, dict):
+                tables = sorted(
+                    tool for tool, value in permission.items() if isinstance(value, dict)
+                )
+                if tables:
+                    warnings.append(
+                        f"{OPENCODE_CONFIG_PATH} sets a per-command table for "
+                        f"{', '.join(tables)}; measured on OpenCode 1.18.29 those do "
+                        "not enforce under `opencode run`, so this reads as a rule and "
+                        "is not one"
                     )
 
     settings_path = root / ".claude/settings.json"

@@ -7052,3 +7052,498 @@ class HostPortabilityTests(unittest.TestCase):
         self.assertEqual(
             validator.CODEX_DOC_MAX_BYTES, checker.CODEX_DOC_MAX_BYTES
         )
+
+
+class OpenCodeEnforcementTests(unittest.TestCase):
+    """2.2.0: what OpenCode can enforce, enforced - and nothing else claimed.
+
+    Measured in `.ai/reports/0014-opencode-enforcement-surface.md` against
+    OpenCode 1.18.29: a throw inside a plugin's `tool.execute.before` is a real
+    deny for `read`, `write`, `edit`, `bash`, and a subagent's calls; a
+    whole-tool permission in `opencode.json` is enforced by removing the tool
+    from the model's toolset; an agent file's permission block does the same for
+    that agent; and a per-command table under `bash` enforces nothing at all.
+
+    Every assertion below follows one of those four facts. The last one is why
+    the renderer never emits a command allowlist and the validator refuses one:
+    a rule that does not fire is worse than an absent rule, because an operator
+    reads it and believes it.
+    """
+
+    GUARD_SOURCE = PLUGIN / "assets" / "opencode" / "harness-guard.js"
+
+    # What OpenCode does to the plugin, reduced to the two lines that matter:
+    # load the module, call the hook with the shape report 0014 measured, and
+    # say whether the call was refused. Reading the file and asserting a string
+    # is in it proves the rule was written, not that it fires.
+    GUARD_DRIVER = """import { readFileSync } from "node:fs"
+import { HarnessGuard } from "./guard.mjs"
+
+const call = JSON.parse(readFileSync(new URL("./call.json", import.meta.url), "utf8"))
+const hooks = await HarnessGuard({ directory: process.cwd() })
+try {
+  await hooks["tool.execute.before"]({ tool: call.tool }, { args: call.args })
+  console.log("ALLOWED")
+} catch (error) {
+  console.log("DENIED " + error.message)
+}
+"""
+
+    def exercise_guard(
+        self,
+        tool: str,
+        args: dict,
+        *,
+        disable: bool = False,
+        policy: str = "no-commit",
+    ) -> str:
+        """Run the guard under node and report what it did to one call."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            (work / "guard.mjs").write_bytes(self.GUARD_SOURCE.read_bytes())
+            (work / "drive.mjs").write_text(self.GUARD_DRIVER, encoding="utf-8")
+            (work / "call.json").write_text(
+                json.dumps({"tool": tool, "args": args}), encoding="utf-8"
+            )
+            harness = work / ".ai" / "harness"
+            harness.mkdir(parents=True)
+            (harness / "project-profile.json").write_text(
+                json.dumps({"agent_commit_policy": policy}), encoding="utf-8"
+            )
+            env = dict(os.environ)
+            env.pop("HARNESS_HOOKS_DISABLE", None)
+            if disable:
+                env["HARNESS_HOOKS_DISABLE"] = "1"
+            proc = subprocess.run(
+                [node, str(work / "drive.mjs")],
+                cwd=work,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return proc.stdout.strip()
+
+    def render(self, temp_path: Path, tier: str = "standard", **overrides) -> Path:
+        data = profile(tier)
+        data.update(overrides)
+        for key, value in list(overrides.items()):
+            if value is None:
+                data.pop(key, None)
+        config = temp_path / "opencode-profile.json"
+        output = temp_path / "gen"
+        config.write_text(json.dumps(data, indent=2) + "\n")
+        run(PYTHON, str(SCRIPTS / "render_harness.py"),
+            "--config", str(config), "--output", str(output))
+        return output
+
+    def validate(self, package: Path) -> subprocess.CompletedProcess:
+        return run(PYTHON, str(SCRIPTS / "validate_harness.py"), str(package),
+                   check=False)
+
+    def check_json(self, root: Path) -> dict:
+        proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                   "--root", str(root), "--json", check=False)
+        return json.loads(proc.stdout)
+
+    def installed(self, temp_path: Path, **overrides) -> Path:
+        output = self.render(temp_path, **overrides)
+        root = temp_path / "installed"
+        shutil.copytree(output / "payload", root)
+        return root
+
+    # --- what is rendered, and when ----------------------------------------
+
+    def test_a_harness_without_an_opencode_host_has_no_opencode_surface(self) -> None:
+        """The release is additive or it is a breaking change."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(Path(temp)) / "payload"
+            self.assertFalse((payload / ".opencode").exists())
+            self.assertFalse((payload / "opencode.json").exists())
+
+    def test_an_opencode_host_gets_the_guard_plugin_byte_for_byte(self) -> None:
+        """A per-project variant is an untested variant, and this one can deny."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            ) / "payload"
+            target = payload / ".opencode" / "plugins" / "harness-guard.js"
+            self.assertTrue(target.is_file())
+            self.assertEqual(target.read_bytes(), self.GUARD_SOURCE.read_bytes())
+
+    def test_the_guard_plugin_parses_as_a_javascript_module(self) -> None:
+        """A plugin that fails to parse is skipped silently by the host."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            probe = Path(temp) / "guard.mjs"
+            probe.write_bytes(self.GUARD_SOURCE.read_bytes())
+            proc = run(node, "--check", str(probe), check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_the_guard_is_not_rendered_when_hooks_are_not_guarded(self) -> None:
+        """The guard follows the hooks policy, not the host list."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="disabled"
+            ) / "payload"
+            self.assertFalse((payload / ".opencode" / "plugins").exists())
+
+    def test_the_permission_floor_follows_the_declared_policy(self) -> None:
+        """`opencode.json` restates the profile's policy in the host's vocabulary."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp),
+                hosts=["claude-code", "opencode"],
+                autonomy="read-only",
+                network_access="deny-by-default",
+            ) / "payload"
+            data = json.loads((payload / "opencode.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                data["permission"],
+                {
+                    "edit": "deny",
+                    "bash": "deny",
+                    "webfetch": "deny",
+                    "websearch": "deny",
+                },
+            )
+
+    def test_a_writing_autonomy_asks_rather_than_denying(self) -> None:
+        """`ask` auto-rejects in a run and prompts in the TUI; it never allows."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp),
+                hosts=["claude-code", "opencode"],
+                autonomy="approval-required",
+                network_access="ask-before-network",
+            ) / "payload"
+            data = json.loads((payload / "opencode.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["permission"]["edit"], "ask")
+            self.assertEqual(data["permission"]["bash"], "ask")
+
+    def test_the_floor_never_contains_a_per_command_table(self) -> None:
+        """Measured: those do not enforce under `opencode run`."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), hosts=["claude-code", "opencode"]
+            ) / "payload"
+            data = json.loads((payload / "opencode.json").read_text(encoding="utf-8"))
+            for value in data["permission"].values():
+                self.assertIsInstance(value, str)
+
+    def test_read_only_agents_are_translated_and_cannot_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), hosts=["claude-code", "opencode"]
+            ) / "payload"
+            reader = payload / ".opencode" / "agents" / "harness-codebase-researcher.md"
+            reviewer = payload / ".opencode" / "agents" / "harness-code-reviewer.md"
+            self.assertTrue(reader.is_file())
+            self.assertTrue(reviewer.is_file())
+            reader_text = reader.read_text(encoding="utf-8")
+            reviewer_text = reviewer.read_text(encoding="utf-8")
+            for text in (reader_text, reviewer_text):
+                self.assertIn("edit: deny", text)
+                self.assertIn("write: deny", text)
+                self.assertIn("mode: subagent", text)
+            # The reader has no reason to run a command, and this host can take
+            # the tool away rather than refuse the call.
+            self.assertIn("bash: deny", reader_text)
+            # The verifier runs the gates, so it keeps the tool it needs.
+            self.assertIn("bash: allow", reviewer_text)
+
+    def test_an_implementer_agent_is_not_translated(self) -> None:
+        """Its boundary is a worktree, and nothing on OpenCode enforces one."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp),
+                tier="fleet",
+                hosts=["claude-code", "opencode"],
+                additional_agents=[
+                    {
+                        "name": "scoped-implementer",
+                        "capability": "implementer",
+                        "approved_by_operator": True,
+                        "writable_paths": ["src/**"],
+                        "description": "Implement an accepted contract inside src.",
+                        "instructions": ["Work only against a written contract."],
+                    }
+                ],
+            ) / "payload"
+            self.assertTrue(
+                (payload / ".claude" / "agents" / "harness-scoped-implementer.md").is_file()
+            )
+            self.assertFalse(
+                (payload / ".opencode" / "agents" / "harness-scoped-implementer.md").exists()
+            )
+
+    def test_the_translated_agent_drops_the_claude_launch_flags(self) -> None:
+        """Those flags are Claude Code's; the mission is the portable part."""
+        with tempfile.TemporaryDirectory() as temp:
+            payload = self.render(
+                Path(temp), hosts=["claude-code", "opencode"]
+            ) / "payload"
+            text = (
+                payload / ".opencode" / "agents" / "harness-codebase-researcher.md"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("## Session launch", text)
+            self.assertNotIn("--permission-mode", text)
+            self.assertIn("## Boundaries", text)
+            self.assertIn("## Deliverable", text)
+
+    def test_the_guard_plugin_is_hashed_in_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            manifest = json.loads(
+                (output / "harness-manifest.json").read_text(encoding="utf-8")
+            )
+            paths = {entry["path"] for entry in manifest["files"]}
+            self.assertIn(".opencode/plugins/harness-guard.js", paths)
+
+    # --- what the validator refuses ----------------------------------------
+
+    def test_a_drifted_guard_plugin_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            target = output / "payload" / ".opencode" / "plugins" / "harness-guard.js"
+            target.write_bytes(target.read_bytes() + b"\n// local tweak\n")
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("differs from the plugin's copy", proc.stderr)
+
+    def test_a_missing_guard_plugin_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            (output / "payload" / ".opencode" / "plugins" / "harness-guard.js").unlink()
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("has no counterpart on that host", proc.stderr)
+
+    def test_a_guard_without_a_declared_host_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp))
+            target = output / "payload" / ".opencode" / "plugins" / "harness-guard.js"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.GUARD_SOURCE.read_bytes())
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("no opencode host is declared", proc.stderr)
+
+    def test_a_guard_that_does_not_parse_is_refused(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            target = output / "payload" / ".opencode" / "plugins" / "harness-guard.js"
+            target.write_bytes(b"export const HarnessGuard = async ({ =>\n")
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("does not parse", proc.stderr)
+
+    def test_a_floor_that_contradicts_the_profile_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(
+                Path(temp),
+                hosts=["claude-code", "opencode"],
+                autonomy="read-only",
+                network_access="deny-by-default",
+            )
+            config = output / "payload" / "opencode.json"
+            data = json.loads(config.read_text(encoding="utf-8"))
+            data["permission"]["edit"] = "allow"
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("permission.edit", proc.stderr)
+
+    def test_a_per_command_table_in_the_floor_is_refused(self) -> None:
+        """The one shape that reads like a rule and is not one."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "opencode"])
+            config = output / "payload" / "opencode.json"
+            data = json.loads(config.read_text(encoding="utf-8"))
+            data["permission"]["bash"] = {"git push*": "deny", "*": "allow"}
+            config.write_text(json.dumps(data, indent=2) + "\n")
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("do not enforce", proc.stderr)
+
+    def test_an_agent_that_lost_its_deny_line_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "opencode"])
+            agent = (
+                output / "payload" / ".opencode" / "agents"
+                / "harness-codebase-researcher.md"
+            )
+            agent.write_text(
+                agent.read_text(encoding="utf-8").replace("  edit: deny\n", ""),
+                encoding="utf-8",
+            )
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("edit: deny", proc.stderr)
+
+    def test_an_undeclared_opencode_agent_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "opencode"])
+            stray = output / "payload" / ".opencode" / "agents" / "shadow.md"
+            stray.write_text("---\ndescription: x\n---\n", encoding="utf-8")
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("unreviewed authority", proc.stderr)
+
+    # --- what the installed harness reports --------------------------------
+
+    def test_the_guarantee_report_credits_opencode_for_what_it_now_has(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            rows = self.check_json(root)["hosts"]["opencode"]
+            self.assertEqual(rows["pre-tool-use guard"], "present")
+            self.assertEqual(rows["read-only agent catalog"], "present")
+            # Unchanged by this release, and still measured absences.
+            self.assertTrue(rows["stop check"].startswith("absent"))
+            self.assertTrue(rows["session-start brief"].startswith("absent"))
+
+    def test_removing_the_installed_guard_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            (root / ".opencode" / "plugins" / "harness-guard.js").unlink()
+            proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                       "--root", str(root), check=False)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn(".opencode/plugins/harness-guard.js", proc.stdout + proc.stderr)
+
+    def test_a_missing_guard_is_reported_absent_not_present(self) -> None:
+        """The guarantee table is the answer to "what holds here". A row that
+        says present when the file is gone is worse than no table at all."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            (root / ".opencode" / "plugins" / "harness-guard.js").unlink()
+            row = self.check_json(root)["hosts"]["opencode"]["pre-tool-use guard"]
+            self.assertTrue(row.startswith("absent"), row)
+
+    def test_an_installed_agent_that_lost_its_deny_line_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(Path(temp), hosts=["claude-code", "opencode"])
+            agent = root / ".opencode" / "agents" / "harness-code-reviewer.md"
+            agent.write_text(
+                agent.read_text(encoding="utf-8").replace("  write: deny\n", ""),
+                encoding="utf-8",
+            )
+            proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                       "--root", str(root), check=False)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("no longer read-only", proc.stdout + proc.stderr)
+
+    def test_an_installed_guard_without_the_escape_hatch_is_an_error(self) -> None:
+        """An operator who cannot stand a guard down is locked out by it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.installed(
+                Path(temp), hosts=["claude-code", "opencode"], hooks_policy="guarded"
+            )
+            plugin = root / ".opencode" / "plugins" / "harness-guard.js"
+            plugin.write_text(
+                plugin.read_text(encoding="utf-8").replace("HARNESS_HOOKS_DISABLE", "X"),
+                encoding="utf-8",
+            )
+            proc = run(PYTHON, str(SCRIPTS / "check_installed.py"),
+                       "--root", str(root), check=False)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("escape hatch", proc.stdout + proc.stderr)
+
+    # --- the two guards say the same thing ---------------------------------
+
+    def test_the_javascript_guard_carries_the_python_guards_secret_list(self) -> None:
+        """Two languages, two hosts, one rule. Nothing imports across that gap."""
+        guard = load_script("hook_guard.py", "hook_guard_for_opencode_parity")
+        text = self.GUARD_SOURCE.read_text(encoding="utf-8")
+        for name in guard.SECRET_FILENAMES:
+            self.assertIn(f'"{name}"', text, f"{name} is missing from the JS guard")
+        for suffix in guard.SECRET_SUFFIXES:
+            self.assertIn(f'"{suffix}"', text)
+        for fragment in guard.SECRET_DIR_FRAGMENTS:
+            self.assertIn(f'"{fragment}"', text)
+
+    def test_the_running_guard_refuses_every_secret_it_lists(self) -> None:
+        """The parity test proves the names are in the file. This one proves
+        the file consults them: each is fed to a real `read` call."""
+        guard = load_script("hook_guard.py", "hook_guard_for_opencode_running")
+        for name in sorted(guard.SECRET_FILENAMES):
+            verdict = self.exercise_guard("read", {"filePath": f"/repo/{name}"})
+            self.assertTrue(
+                verdict.startswith("DENIED"), f"{name} was not refused: {verdict}"
+            )
+            self.assertIn("harness guard:", verdict)
+
+    def test_the_running_guard_lets_an_ordinary_file_through(self) -> None:
+        """A guard that refuses everything is a broken host, not a safe one."""
+        verdict = self.exercise_guard("read", {"filePath": "/repo/README.md"})
+        self.assertEqual(verdict, "ALLOWED")
+
+    def test_the_running_guard_reads_the_installed_commit_policy(self) -> None:
+        with tempfile.TemporaryDirectory():
+            denied = self.exercise_guard("bash", {"command": "git commit -m x"})
+            self.assertIn("no-commit", denied)
+            allowed = self.exercise_guard(
+                "bash", {"command": "git commit -m x"}, policy="commit-locally"
+            )
+            self.assertEqual(allowed, "ALLOWED")
+
+    def test_the_running_guard_stands_down_for_the_escape_hatch(self) -> None:
+        """An operator who cannot stand a guard down is locked out by it, and
+        the only proof of an escape hatch is a run that takes it."""
+        self.assertTrue(
+            self.exercise_guard("read", {"filePath": "/repo/.env"}).startswith("DENIED")
+        )
+        self.assertEqual(
+            self.exercise_guard("read", {"filePath": "/repo/.env"}, disable=True),
+            "ALLOWED",
+        )
+        self.assertEqual(
+            self.exercise_guard("bash", {"command": "git push origin main"}, disable=True),
+            "ALLOWED",
+        )
+
+    def test_the_javascript_guard_denies_the_same_commands(self) -> None:
+        guard = load_script("hook_guard.py", "hook_guard_for_opencode_commands")
+        text = self.GUARD_SOURCE.read_text(encoding="utf-8")
+        for _pattern, reason in guard.ALWAYS_DENIED_GIT:
+            self.assertIn(reason, text, f"{reason!r} is missing from the JS guard")
+        for _pattern, label in guard.COMMIT_GIT:
+            self.assertIn(label, text)
+        self.assertIn("--dangerously-skip-permissions", text)
+        self.assertIn("--permission-mode bypassPermissions", text)
+
+    def test_the_javascript_guard_never_allows(self) -> None:
+        """No path through the file may grant; a guard that grants is a hole."""
+        text = self.GUARD_SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn('"allow"', text)
+        self.assertNotIn("permission:", text)
+        # Nothing at module scope may throw: a plugin that does leaves
+        # `opencode run` with no session at all (report 0014, finding 5).
+        for line in text.splitlines():
+            if line and not line.startswith((" ", ")", "}", "]", "//", "*", "/*")):
+                self.assertFalse(
+                    line.startswith("throw ") or line.startswith("await "),
+                    f"module-scope work that can throw: {line!r}",
+                )
