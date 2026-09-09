@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
     ALLOWED_EFFORT,
     CAPABILITY_TIERS,
+    CODEX_CONFIG_PATH,
     CODEX_SANDBOX_RANK,
     EDIT_ACCEPTING_MODES,
     codex_sandbox_floor,
@@ -96,7 +97,6 @@ CODEX_DOC_MAX_BYTES = 32 * 1024
 #: The guard plugin denies by throwing, and an agent file's permission block
 #: removes the tool rather than refusing the call - so both are mechanisms this
 #: script can look for, and their absence is reported as an absence.
-CODEX_CONFIG_PATH = ".codex/config.toml"
 OPENCODE_PLUGIN_PATH = ".opencode/plugins/harness-guard.js"
 OPENCODE_AGENT_ROOT = ".opencode/agents"
 OPENCODE_CONFIG_PATH = "opencode.json"
@@ -399,8 +399,6 @@ def frontmatter_keys(text: str) -> set[str]:
         if line and not line.startswith((" ", "\t", "-")) and ":" in line:
             keys.add(line.split(":", 1)[0].strip())
     return keys
-
-
 
 
 def executable_code_blocks(text: str) -> list[str]:

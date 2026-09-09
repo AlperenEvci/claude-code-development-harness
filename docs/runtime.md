@@ -282,6 +282,62 @@ claude --bg --session-id 82d25ce1-... --permission-mode acceptEdits \
 appended. `--json` emits argv as a JSON array if you would rather hand it to a script
 than to a shell.
 
+### Launching on another host
+
+`--host` picks the binary and translates the tier into that host's own vocabulary.
+`claude-code` is the default and its command is unchanged.
+
+```bash
+python scripts/ai-harness/harness_session.py launch \
+  --host codex --capability reader \
+  --task "Map how billing retries are wired"
+```
+
+```text
+codex exec --json --sandbox read-only 'Map how billing retries are wired'
+```
+
+The sandbox is the narrower of the tier's own mode and whatever this repository's
+`.codex/config.toml` already declares. A repository that hands out `danger-full-access`
+does not promote a reader, and a reader does not reopen a repository that declares
+`read-only`.
+
+OpenCode has no flag that expresses a tier, so the tier is the agent file, named:
+
+```bash
+python scripts/ai-harness/harness_session.py launch \
+  --host opencode --capability reader \
+  --agent harness-codebase-researcher \
+  --task "Map how billing retries are wired"
+```
+
+The launcher checks that agent before it spends anything, because **this host fails
+open**: `opencode run --agent` warns on stderr, falls back to the *default* agent and
+still exits 0 when the name does not resolve. A probe that hit that path wrote a file
+under an agent that had declared `write: deny`. So the launch is refused unless the
+agent file exists, is `mode: all`, denies the `task` tool, and has a Claude twin
+declaring the tier you asked for.
+
+Six flags are refused on another host rather than forwarded, each because the
+counterpart was measured absent rather than different: `--background`, `--restricted`,
+`--worktree`, `--scope`, `--session-id`, and `--surface orca`. Neither `codex exec` nor
+`opencode run` has a background mode, so `--background` there would silently be a
+foreground run.
+
+| | Claude Code | Codex | OpenCode |
+|---|---|---|---|
+| binary | `claude` | `codex exec` | `opencode run` |
+| tier carried by | launch flags | `--sandbox` | the named agent file |
+| background | yes | no | no |
+| structured return | `--output-format json` | `--output-schema` | none |
+| session id | minted by the harness | `thread_id` | not a UUID |
+| tokens | yes | yes | yes |
+| cost | yes | none reported | reports `0` on a subscription |
+| two at once in one directory | yes | yes | **no** - `database is locked` |
+
+Run more than one OpenCode session at a time and give each its own worktree. The lock
+is the project's, not the machine's: the same pair in two directories both succeed.
+
 ### Dispatch follows the tier
 
 This is the constraint most likely to be worked around by someone who does not know
@@ -470,7 +526,7 @@ python scripts/ai-harness/harness_bus.py post \
   --from migration-safety-reader --kind finding --capability verifier \
   --summary "Two migrations in the release range are irreversible" \
   --correlation 4c1d8a90-3e77-42bb-9a55-0f6de2b71c84 \
-  --duration-ms 41200 --tokens-in 18400 --tokens-out 900
+  --duration-ms 41200 --tokens-in 18400 --tokens-out 900 --host claude-code
 ```
 
 ```json
@@ -478,6 +534,7 @@ python scripts/ai-harness/harness_bus.py post \
   "correlation_id": "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84",
   "duration_ms": 41200,
   "tokens": {"input": 18400, "output": 900},
+  "host": "claude-code",
   "reported_by": "launcher"
 }
 ```

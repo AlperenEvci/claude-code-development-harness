@@ -50,15 +50,21 @@ from harness_capabilities import (
     autocompact_flag,  # noqa: E402  (sibling module, resolved above)
     ALLOWED_EFFORT,
     CAPABILITY_TIERS,
+    CODEX_CONFIG_PATH,
     FORBIDDEN_LAUNCH_FLAGS,
+    LAUNCH_HOSTS,
     LAUNCH_PLACEHOLDERS,
+    codex_launch_sandbox,
     model_effort_flags,
+    read_codex_config,
 )
 from harness_bus import (  # noqa: E402  (sibling module, resolved above)
     AGENT_NAME_PATTERN,
     UUID_PATTERN,
     BusError,
     build_envelope,
+    codex_envelope_body,
+    codex_output_schema,
     envelope_schema,
     write_envelope,
 )
@@ -297,6 +303,215 @@ def declared_ceiling(root: Path) -> int | None:
     return ceiling
 
 
+#: The flags a session on another host is not allowed to be launched with. Each
+#: is a Claude Code flag with no counterpart measured on the other two, so
+#: forwarding it would be a launch that silently did something else. See
+#: `.ai/reports/0016-launcher-host-surface.md`.
+CLAUDE_ONLY_OPTIONS: dict[str, str] = {
+    "background": (
+        "neither `codex exec` nor `opencode run` has a background mode, so "
+        "--background there would silently be a foreground run"
+    ),
+    "restricted": "--restricted is a Claude Code flag; neither other host has one",
+    "worktree": (
+        "--worktree is Claude Code's own isolation; on another host, create the "
+        "checkout yourself and launch inside it"
+    ),
+    "scope": (
+        "--scope becomes Claude Code's --add-dir; Codex spells extra writable "
+        "roots --add-dir on its own terms and OpenCode has no equivalent, so "
+        "forwarding it would be a guess"
+    ),
+    "session_id": (
+        "--session-id names a Claude Code session; the other hosts mint their "
+        "own identifier and report it in their event stream"
+    ),
+}
+
+
+def installed_codex_floor(root: Path) -> str | None:
+    """The sandbox mode this repository's own `.codex/config.toml` declares.
+
+    None when there is no file, or it declares no mode. Read rather than
+    inferred from the profile, because the file is what the next `codex exec`
+    in this directory will actually obey.
+    """
+    target = root / CODEX_CONFIG_PATH
+    if not target.is_file():
+        return None
+    try:
+        return read_codex_config(target.read_text(encoding="utf-8"))["sandbox_mode"]
+    except OSError:  # pragma: no cover - unreadable file is the same as absent
+        return None
+
+
+def opencode_agent_preflight(root: Path, agent: str, capability: str) -> None:
+    """Refuse an OpenCode launch whose agent would not bind. Raises SessionError.
+
+    This exists because of one measurement: `opencode run --agent <name>` does
+    not fail when the name does not resolve. It prints a warning to stderr,
+    falls back to the *default* agent, and exits 0. A launcher that passed the
+    name and trusted the exit code would report a bound read-only tier for a
+    session that had none - and the probe in
+    `.ai/reports/0016-launcher-host-surface.md` wrote a file exactly that way.
+
+    So the harness checks, before spending a model call, the three things the
+    host will not check for it: that the agent file exists, that it is
+    launchable rather than subagent-only, and that it cannot delegate its way
+    out of its own permission block.
+    """
+    if not AGENT_NAME_PATTERN.match(agent):
+        raise SessionError(
+            f"--agent must be a lowercase-hyphen agent name, got {agent!r}"
+        )
+
+    target = root / ".opencode" / "agents" / f"{agent}.md"
+    if not target.is_file():
+        raise SessionError(
+            f"{target.as_posix()} does not exist. `opencode run --agent` warns "
+            "and falls back to the default agent for a name it cannot resolve, "
+            "and still exits 0, so this launch would run unbound."
+        )
+
+    text = target.read_text(encoding="utf-8")
+    if "mode: all" not in text:
+        raise SessionError(
+            f"{target.as_posix()} is not `mode: all`; OpenCode falls back to the "
+            "default agent for a subagent-only name, so the tier would not bind"
+        )
+    if "task: false" not in text:
+        raise SessionError(
+            f"{target.as_posix()} does not deny the `task` tool; an agent's "
+            "permission block does not reach what it delegates to, so this "
+            "agent could write through a subagent"
+        )
+
+    source = root / ".claude" / "agents" / f"{agent}.md"
+    if not source.is_file():
+        raise SessionError(
+            f"{source.as_posix()} does not exist, so nothing states which tier "
+            f"{agent!r} is; the OpenCode file carries permissions, not a capability"
+        )
+    declared = ""
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if line.startswith("capability:"):
+            declared = line.split(":", 1)[1].strip()
+            break
+    if declared != capability:
+        raise SessionError(
+            f"{agent!r} declares capability {declared or 'none'!r}, not "
+            f"{capability!r}; the tier a session is launched under is read from "
+            "the agent catalog, never from the command line alone"
+        )
+
+
+def host_launch_argv(
+    host: str,
+    capability: str,
+    task: str,
+    *,
+    root: Path,
+    agent: str | None = None,
+    output_schema: str | None = None,
+) -> list[str]:
+    """Build the launch command for a host that is not Claude Code.
+
+    The tier is translated into the host's own vocabulary from the shared
+    tables, never from a second list here: the Codex sandbox comes from
+    `codex_launch_sandbox`, narrowed by whatever the repository's own
+    `.codex/config.toml` already declares, and the OpenCode tier is the agent
+    file the harness rendered for it.
+    """
+    if host not in LAUNCH_HOSTS:
+        raise SessionError(
+            f"unknown host {host!r}; expected one of {', '.join(sorted(LAUNCH_HOSTS))}"
+        )
+    if capability not in CAPABILITY_TIERS:
+        raise SessionError(f"unknown capability {capability!r}")
+
+    task = str(task or "").strip()
+    if not task:
+        raise SessionError("a task prompt is required")
+
+    if host == "codex":
+        sandbox = codex_launch_sandbox(capability, installed_codex_floor(root))
+        argv = ["codex", "exec", "--json", "--sandbox", sandbox]
+        if output_schema:
+            argv += ["--output-schema", output_schema]
+        argv.append(task)
+    elif host == "opencode":
+        if not agent:
+            raise SessionError(
+                "--host opencode needs --agent: this host binds a tier by naming "
+                "the agent file, and there is no flag that expresses a tier"
+            )
+        opencode_agent_preflight(root, agent, capability)
+        argv = ["opencode", "run", "--format", "json", "--agent", agent, task]
+    else:  # pragma: no cover - claude-code never reaches here
+        raise SessionError(f"{host} is launched by launch_argv, not here")
+
+    forbidden = [item for item in argv if item in FORBIDDEN_LAUNCH_FLAGS]
+    if forbidden:
+        raise SessionError(
+            f"{capability} refuses {', '.join(forbidden)} on {host}"
+        )
+    return argv
+
+
+def codex_result(stdout: str) -> dict[str, Any]:
+    """Read a `codex exec --json` stream into the few facts a launcher needs.
+
+    Measured shapes only (`.ai/reports/0016`): `thread.started` carries
+    `thread_id`, `turn.completed` carries `usage`, `turn.failed` carries an
+    error message, and the final `agent_message` item holds the model's last
+    message - which is the JSON object when `--output-schema` was passed.
+
+    Absent stays absent. A stream with no `usage` yields no token counts rather
+    than zeros, for the same reason `usage_tokens` refuses to substitute one.
+    """
+    result: dict[str, Any] = {
+        "thread_id": None,
+        "message": None,
+        "error": None,
+        "tokens_in": None,
+        "tokens_out": None,
+    }
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "thread.started":
+            result["thread_id"] = event.get("thread_id")
+        elif kind == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                for key, field in (
+                    ("input_tokens", "tokens_in"),
+                    ("output_tokens", "tokens_out"),
+                ):
+                    value = usage.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        result[field] = value
+        elif kind == "turn.failed":
+            error = event.get("error")
+            if isinstance(error, dict):
+                result["error"] = str(error.get("message") or "").strip() or None
+        elif kind == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                result["message"] = item.get("text")
+            elif isinstance(item, dict) and item.get("type") == "error":
+                result["error"] = str(item.get("message") or "").strip() or None
+    return result
+
+
 def launch_argv(
     capability: str,
     task: str,
@@ -517,6 +732,33 @@ def cmd_launch(args: argparse.Namespace) -> int:
     writes = CAPABILITY_TIERS[args.capability]["writes"]
     execute = getattr(args, "execute", False)
     report = getattr(args, "report", False)
+    host = getattr(args, "host", "claude-code") or "claude-code"
+    root = Path(getattr(args, "root", ".")).resolve()
+
+    if host != "claude-code":
+        # Every one of these is a Claude Code flag whose meaning on the other
+        # hosts was measured to be absent rather than different. Refusing by
+        # name beats forwarding something that would quietly not apply.
+        for option, why in CLAUDE_ONLY_OPTIONS.items():
+            if getattr(args, option, None):
+                flag = "--" + option.replace("_", "-")
+                fail(f"{flag} cannot be used with --host {host}: {why}")
+        if surface != "inproc":
+            fail(
+                f"--surface orca cannot be used with --host {host}: the Orca "
+                "surface drives a `claude` session in a terminal tab, and "
+                "nothing here has been measured against another host's."
+            )
+        if report and host != "codex":
+            # Codex has `--output-schema`, measured returning a JSON object that
+            # matches it. OpenCode has no schema flag at all, and its session id
+            # is not a UUID, so there is nothing to build an envelope from that
+            # would not be an invention.
+            fail(
+                f"--report cannot be used with --host {host}: this host has no "
+                "structured return channel, so an envelope would be assembled "
+                "from prose. Run it and read the output."
+            )
 
     correlation = str(getattr(args, "correlation", None) or "").strip()
     if correlation and not UUID_PATTERN.match(correlation):
@@ -580,6 +822,20 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 "this tier writes. The lane is the isolated checkout that makes "
                 "an automatically started writing session recoverable."
             )
+
+    if host != "claude-code":
+        return run_host_launch(
+            host,
+            args.capability,
+            args.task,
+            root=root,
+            agent=getattr(args, "agent", None),
+            execute=execute,
+            report=report,
+            as_json=args.json,
+            sender=getattr(args, "report_from", None) or args.capability,
+            correlation_id=correlation,
+        )
 
     try:
         argv = launch_argv(
@@ -794,6 +1050,7 @@ def report_envelope(
             duration_ms=duration_ms,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            host="claude-code",
             **run_cost(result),
         )
         return write_envelope(root, envelope), None
@@ -890,6 +1147,190 @@ def run_launch(
         shown = str(path)
     print(f"# envelope: {shown}", file=sys.stderr)
     return proc.returncode
+
+
+def run_host_launch(
+    host: str,
+    capability: str,
+    task: str,
+    *,
+    root: Path,
+    agent: str | None,
+    execute: bool,
+    report: bool,
+    as_json: bool,
+    sender: str,
+    correlation_id: str,
+) -> int:
+    """Print - or run - a session on a host that is not Claude Code.
+
+    The writing gate is the same one `run_launch` applies, read from the same
+    tier table: a tier that writes is printed and refused rather than started
+    automatically, whichever host it would have run on.
+
+    With `--report` on Codex, the run is given the bus schema through
+    `--output-schema`. That flag was measured returning the model's final
+    message as a JSON object matching the schema
+    (`.ai/reports/0016-launcher-host-surface.md`), which is what makes an
+    envelope possible here at all.
+    """
+    schema_file: Path | None = None
+    try:
+        if report:
+            schema_file = root / ".ai" / "runs" / f"envelope-schema-{uuid.uuid4()}.json"
+            schema_file.parent.mkdir(parents=True, exist_ok=True)
+            schema_file.write_bytes(
+                json.dumps(codex_output_schema(), indent=2).encode("utf-8")
+            )
+        try:
+            argv = host_launch_argv(
+                host,
+                capability,
+                task,
+                root=root,
+                agent=agent,
+                output_schema=str(schema_file) if schema_file else None,
+            )
+        except SessionError as exc:
+            fail(str(exc))
+
+        if not execute:
+            if as_json:
+                payload: dict[str, Any] = {"host": host, "argv": argv}
+                if correlation_id:
+                    payload["correlation_id"] = correlation_id
+                print(json.dumps(payload, indent=2))
+            else:
+                print(" ".join(quote(item) for item in argv))
+            return 0
+
+        if CAPABILITY_TIERS[capability]["writes"]:
+            print(" ".join(quote(item) for item in argv))
+            fail(
+                f"--exec refuses {capability} because this tier writes to the "
+                "repository. The command is printed above; run it yourself."
+            )
+
+        binary = shutil.which(LAUNCH_HOSTS[host]["binary"])
+        if binary is None:
+            fail(f"{LAUNCH_HOSTS[host]['binary']} is not on PATH; cannot --exec")
+
+        started = time.monotonic_ns()
+        proc = subprocess.run(  # noqa: S603  (argv built from the host table)
+            [binary, *argv[1:]],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(root),
+        )
+        duration_ms = max(0, (time.monotonic_ns() - started) // 1_000_000)
+
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.stderr:
+            print(proc.stderr, end="", file=sys.stderr)
+
+        if host == "opencode" and proc.returncode != 0 and "database is locked" in (
+            proc.stdout + proc.stderr
+        ):
+            # Measured: two `opencode run` processes in one directory collide,
+            # and the second dies this way. Said plainly here because the host's
+            # own message does not mention concurrency at all.
+            print(
+                "# opencode serialises per directory: another `opencode run` is "
+                "already using this one. Give each lane its own worktree.",
+                file=sys.stderr,
+            )
+
+        if not report:
+            return proc.returncode
+
+        result = codex_result(proc.stdout)
+        if proc.returncode != 0 or result["error"]:
+            print(
+                "# no envelope: "
+                + (result["error"] or f"the run exited {proc.returncode}"),
+                file=sys.stderr,
+            )
+            return proc.returncode or 1
+
+        path, reason = host_report_envelope(
+            result,
+            host=host,
+            root=root,
+            sender=sender,
+            capability=capability,
+            task=task,
+            correlation_id=correlation_id,
+            duration_ms=duration_ms,
+        )
+        if path is None:
+            print(f"# no envelope: {reason}", file=sys.stderr)
+            return 1
+        try:
+            shown = path.relative_to(root).as_posix()
+        except ValueError:  # pragma: no cover - the bus always writes under root
+            shown = str(path)
+        print(f"# envelope: {shown}", file=sys.stderr)
+        return proc.returncode
+    finally:
+        if schema_file is not None and schema_file.exists():
+            schema_file.unlink()
+
+
+def host_report_envelope(
+    result: dict[str, Any],
+    *,
+    host: str,
+    root: Path,
+    sender: str,
+    capability: str,
+    task: str,
+    correlation_id: str,
+    duration_ms: int,
+) -> tuple[Path | None, str | None]:
+    """Turn a finished Codex run into one bus envelope.
+
+    Same rule as `report_envelope`: nothing is invented. The summary and body
+    come only from the JSON the model returned under the schema it was given,
+    the session id is the host's own thread id, and the token counts are the
+    host's own `usage`. There is no cost field because Codex reports none - a
+    zero here would be a claim the host never made.
+    """
+    message = str(result.get("message") or "").strip()
+    if not message:
+        return None, "the run returned no final message"
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        return None, "the run's final message was not the JSON the schema asked for"
+    if not isinstance(payload, dict):
+        return None, "the run's final message was not a JSON object"
+
+    thread_id = str(result.get("thread_id") or "").strip()
+    if not thread_id:
+        return None, "the run reported no thread id to record the session under"
+
+    try:
+        envelope = build_envelope(
+            session_id=thread_id,
+            sender=sender,
+            capability=capability,
+            kind=payload.get("kind"),
+            summary=payload.get("summary", ""),
+            body=codex_envelope_body(payload.get("body")),
+            evidence=payload.get("evidence"),
+            next_step=payload.get("next"),
+            task=task,
+            correlation_id=correlation_id or None,
+            duration_ms=duration_ms,
+            tokens_in=result.get("tokens_in"),
+            tokens_out=result.get("tokens_out"),
+            host=host,
+        )
+        return write_envelope(root, envelope), None
+    except BusError as exc:
+        return None, f"the structured output is not a valid envelope: {exc}"
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -1066,6 +1507,22 @@ def main() -> None:
             "stays the operator's action."
         ),
     )
+    launch.add_argument(
+        "--host",
+        choices=sorted(LAUNCH_HOSTS),
+        default="claude-code",
+        help=(
+            "Which host to launch on (default: claude-code). The tier is "
+            "translated into that host's own vocabulary."
+        ),
+    )
+    launch.add_argument(
+        "--agent",
+        help=(
+            "The agent file that carries the tier on OpenCode. Required for "
+            "--host opencode, which has no flag that expresses a tier."
+        ),
+    )
     launch.add_argument("--capability", required=True, choices=sorted(CAPABILITY_TIERS))
     launch.add_argument("--task", required=True, help="The prompt for the session")
     launch.add_argument("--session-id", help="Session UUID (default: generate one)")
@@ -1153,7 +1610,14 @@ def main() -> None:
     sweep.set_defaults(func=cmd_sweep)
 
     args = parser.parse_args()
-    if args.command == "launch" and not args.session_id:
+    if (
+        args.command == "launch"
+        and not args.session_id
+        and getattr(args, "host", "claude-code") == "claude-code"
+    ):
+        # Minted only for the host that takes one. The other two report their
+        # own identifier in their event stream, and a session id invented here
+        # would be a second name for a session nobody could look up.
         args.session_id = str(uuid.uuid4())
     raise SystemExit(args.func(args))
 

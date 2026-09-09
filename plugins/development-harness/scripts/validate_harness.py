@@ -26,6 +26,7 @@ from harness_capabilities import (
     AUTOCOMPACT_MAX_TOKENS,
     AUTOCOMPACT_MIN_TOKENS,  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
+    CODEX_CONFIG_PATH,
     CODEX_SANDBOX_RANK,
     EDIT_ACCEPTING_MODES,
     MODEL_INHERIT,
@@ -1365,9 +1366,6 @@ def check_opencode_guard(
         )
 
 
-CODEX_CONFIG_PATH = ".codex/config.toml"
-
-
 def check_codex_config(
     profile: dict[str, Any], payload: Path, errors: list[str]
 ) -> None:
@@ -1531,6 +1529,24 @@ def check_opencode_agents(
                     f"`{required}`; on OpenCode that permission line is what "
                     "removes the tool, so without it the agent is not read-only"
                 )
+        if "task: false" not in text:
+            # Measured in `.ai/reports/0016`: an agent denied edit, write and
+            # bash called `task` and its delegate wrote the file. The permission
+            # block does not reach what the agent delegates to.
+            errors.append(
+                f"{OPENCODE_AGENT_ROOT}/{name}.md does not deny the `task` tool; "
+                "an OpenCode agent's permission block does not bind what it "
+                "delegates to, so a read-only agent that can delegate is not "
+                "read-only"
+            )
+        if "mode: all" not in text:
+            # `opencode run --agent <name>` warns and falls back to the default
+            # agent when the named agent is subagent-only, and returns 0.
+            errors.append(
+                f"{OPENCODE_AGENT_ROOT}/{name}.md is not `mode: all`; "
+                "`opencode run --agent` falls back to the default agent for a "
+                "subagent-only name and still exits 0, so the tier would not bind"
+            )
 
 
 def check_always_loaded_size(payload: Path, errors: list[str]) -> None:

@@ -34,6 +34,7 @@ from typing import Any, NoReturn
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness_capabilities import (  # noqa: E402  (sibling module, resolved above)
+    LAUNCH_HOSTS,
     CAPABILITY_TIERS,
 )
 
@@ -166,6 +167,84 @@ def envelope_schema() -> dict[str, Any]:
     }
 
 
+def codex_output_schema() -> dict[str, Any]:
+    """`envelope_schema` restated in the dialect `codex exec --output-schema` takes.
+
+    Measured, not guessed (`.ai/reports/0016-launcher-host-surface.md`): that
+    flag routes the schema into strict structured outputs, which rejected the
+    bus schema outright - `In context=('properties', 'body'),
+    'additionalProperties' is required to be supplied and to be false`. Strict
+    mode also requires every declared property to appear in `required`, so an
+    optional field is expressed as a nullable one instead.
+
+    The one real consequence is `body`. The bus body is an open object, and
+    strict mode cannot express one at all, so here it is a list of labelled
+    parts that `codex_envelope_body` folds back into the object the bus stores.
+    That is a translation, and it is in one place so the two schemas cannot
+    drift into two different contracts.
+    """
+    source = envelope_schema()["properties"]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["kind", "summary", "body", "evidence", "next"],
+        "properties": {
+            "kind": source["kind"],
+            "summary": {
+                "type": "string",
+                "description": source["summary"]["description"],
+            },
+            "body": {
+                "type": "array",
+                "description": (
+                    "Structured detail as labelled parts. Conclusions, not file "
+                    "dumps."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["label", "detail"],
+                    "properties": {
+                        "label": {"type": "string"},
+                        "detail": {"type": "string"},
+                    },
+                },
+            },
+            "evidence": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "description": source["evidence"]["description"],
+            },
+            "next": {
+                "type": ["string", "null"],
+                "description": source["next"]["description"],
+            },
+        },
+    }
+
+
+def codex_envelope_body(value: Any) -> Any:
+    """Fold Codex's labelled parts back into the object the bus stores.
+
+    Anything that is not the measured shape is returned untouched, so a host
+    that one day returns a plain object is not mangled on the way in. A
+    duplicate label keeps the first part rather than overwriting it: the bus
+    records what an agent said, and silently dropping half of it is a worse
+    failure than a slightly odd key.
+    """
+    if not isinstance(value, list):
+        return value
+    body: dict[str, Any] = {}
+    for index, part in enumerate(value):
+        if not isinstance(part, dict) or "label" not in part or "detail" not in part:
+            return value
+        label = str(part["label"]).strip() or f"part-{index + 1}"
+        while label in body:
+            label = f"{label} ({index + 1})"
+        body[label] = part["detail"]
+    return body
+
+
 def normalize_evidence(value: Any) -> list[str]:
     if value is None:
         return []
@@ -289,6 +368,7 @@ def normalize_trace(
     model_usage: Any = None,
     num_turns: Any = None,
     subtype: Any = None,
+    host: Any = None,
 ) -> dict[str, Any] | None:
     """Assemble the optional `trace` object, or None when nothing was measured.
 
@@ -346,6 +426,18 @@ def normalize_trace(
             raise BusError(f"num_turns is {num_turns}, expected 0..{MAX_TURNS}")
         trace["num_turns"] = num_turns
 
+    if host is not None:
+        # One of the hosts the launcher knows how to start, or nothing. A free
+        # string here would let a reader believe the harness had launched
+        # something it has never measured.
+        text_host = str(host).strip().lower()
+        if text_host not in LAUNCH_HOSTS:
+            raise BusError(
+                f"host {host!r} is not a launchable host; expected one of "
+                f"{', '.join(sorted(LAUNCH_HOSTS))}"
+            )
+        trace["host"] = text_host
+
     if subtype is not None:
         text_subtype = str(subtype).strip().lower()
         if len(text_subtype) > MAX_SUBTYPE_CHARS or not SUBTYPE_PATTERN.match(text_subtype):
@@ -384,6 +476,7 @@ def build_envelope(
     model_usage: Any = None,
     num_turns: Any = None,
     subtype: Any = None,
+    host: Any = None,
 ) -> dict[str, Any]:
     """Validate the parts of an envelope and assemble it. Raises `BusError`."""
     if not UUID_PATTERN.match(str(session_id or "")):
@@ -460,6 +553,7 @@ def build_envelope(
             model_usage,
             num_turns,
             subtype,
+            host,
         ),
     }
     return envelope
@@ -522,6 +616,7 @@ def validate_envelope(data: Any, label: str) -> list[str]:
             model_usage=(data.get("trace") or {}).get("model_usage"),
             num_turns=(data.get("trace") or {}).get("num_turns"),
             subtype=(data.get("trace") or {}).get("subtype"),
+            host=(data.get("trace") or {}).get("host"),
         )
     except BusError as exc:
         errors.append(f"{label}: {exc}")
@@ -647,6 +742,7 @@ def cmd_post(args: argparse.Namespace) -> int:
             duration_ms=args.duration_ms,
             tokens_in=args.tokens_in,
             tokens_out=args.tokens_out,
+            host=getattr(args, "host", None),
         )
         target = write_envelope(root, envelope)
     except BusError as exc:
@@ -760,6 +856,11 @@ def main() -> None:
     )
     post.add_argument("--tokens-in", type=int, help="Input tokens the run consumed.")
     post.add_argument("--tokens-out", type=int, help="Output tokens the run produced.")
+    post.add_argument(
+        "--host",
+        choices=sorted(LAUNCH_HOSTS),
+        help="Which host ran the session. Supplied by the launcher.",
+    )
     post.set_defaults(func=cmd_post)
 
     read = sub.add_parser("read", help="Read envelopes, oldest first.")

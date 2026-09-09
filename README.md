@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 2.3.0](https://img.shields.io/badge/Version-2.3.0-7C3AED?style=flat-square)
+![Version 2.4.0](https://img.shields.io/badge/Version-2.4.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -512,6 +512,18 @@ its agent roles were measured to bind nothing - a role declaring `read-only` wro
 file, a role declaring `workspace-write` was still refused - so the harness renders none
 and reports the guarantee as absent.
 
+Since 2.4.0 the launcher speaks all three. `harness_session.py launch --host` maps a
+capability tier into `codex exec --json --sandbox <mode>` or
+`opencode run --format json --agent <name>`, narrowing the Codex sandbox to whatever the
+repository's own floor already declares and never widening it. On OpenCode it refuses
+first and launches second, because that host fails open: `opencode run --agent` answers a
+name it cannot resolve by warning on stderr, falling back to the *default* agent, and
+exiting 0 - and the probe that hit that path wrote a file under an agent declaring
+`write: deny`. The same measurement found that an agent's permission block does not reach
+what it delegates to, so the rendered OpenCode agents now deny the `task` tool as well.
+A Codex run can also return a bus envelope, through `--output-schema`; an OpenCode run
+cannot, and the launcher says so rather than assembling one from prose.
+
 What still does not port is reported as absent. Codex documents Claude Code's four hook
 events name for name and fired none of them in six measured forms; OpenCode has no
 blocking stop event and no session-start injection; neither host honors the flag that
@@ -585,9 +597,9 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 430 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 465 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
-**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds thirteen cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, a hostile `.claude/settings.json` found in the scanned repository is a finding rather than a starting point, an installed hook edited to return `allow` and a Stop-hook command that drifted from the profile are both findings the audit reports and never repairs, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline, a contract claiming a hook fires on Codex is reported as inaccurate rather than believed, an OpenCode permission line that reads like a rule but enforces nothing is reported as unenforced rather than trusted, and a Codex sandbox floor hand-widened to `danger-full-access` is reported as the authority change it is. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
+**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds fourteen cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, a hostile `.claude/settings.json` found in the scanned repository is a finding rather than a starting point, an installed hook edited to return `allow` and a Stop-hook command that drifted from the profile are both findings the audit reports and never repairs, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline, a contract claiming a hook fires on Codex is reported as inaccurate rather than believed, an OpenCode permission line that reads like a rule but enforces nothing is reported as unenforced rather than trusted, a Codex sandbox floor hand-widened to `danger-full-access` is reported as the authority change it is, and an OpenCode agent that denies every write tool but keeps `task` is reported as still able to write through a delegate. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 
 Two honest caveats. `claude plugin eval` is in early access and enabled per organization, so on most accounts — including this project's CI — it will not run; the cases are still parsed and schema-checked on every push so they cannot rot unnoticed. And **they have not yet been executed against a live model**, so treat them as a stated contract rather than a passing result.
 
