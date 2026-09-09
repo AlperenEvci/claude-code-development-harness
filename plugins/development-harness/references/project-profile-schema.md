@@ -161,10 +161,15 @@ Create one normalized JSON object from project evidence plus the user's confirme
   layer. Declaring `codex` adds byte-identical copies of every generated
   skill under `.agents/skills/`, which is the only skill path Codex
   reads, and makes the 32 KiB Codex cap on the `AGENTS.md` hierarchy a
-  validator check. Declaring `opencode` adds no files today: OpenCode
-  reads `AGENTS.md` and `.claude/skills/` as they are. What each host
-  does and does not enforce is measured in `.ai/reports/0012` and `0013`
-  of the plugin repository, and `check_installed.py` reports it per host.
+  validator check. Declaring `opencode` adds the three things that host
+  enforces: `.opencode/plugins/harness-guard.js` when the hooks policy is
+  `guarded`, a whole-tool permission floor in `opencode.json` derived
+  from `autonomy` and `network_access`, and a read-only agent under
+  `.opencode/agents/` for every generated `reader` or `verifier`. It
+  reads `AGENTS.md` and `.claude/skills/` as they are, so neither is
+  copied. What each host does and does not enforce is measured in
+  `.ai/reports/0012`, `0013`, and `0014` of the plugin repository, and
+  `check_installed.py` reports it per host.
 - `implementation_delegate`:
   - `codex-plugin` — use OpenAI's official Claude Code Codex plugin when installed and initialized,
   - `codex-cli` — direct local `codex exec`; required for Fleet in version 0.2,

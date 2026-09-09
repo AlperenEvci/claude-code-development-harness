@@ -42,7 +42,7 @@ Every case scaffolds its own fixture, so `--scaffold` is not optional here.
 
 **This costs real money.** A measured headless run of the audit path spent about
 **$0.24 for five turns**. The cases here budget 10–16 turns, default to 3 runs each, and
-the ablation adds a second arm — so a full pass over eleven cases is on the order of tens of
+the ablation adds a second arm — so a full pass over twelve cases is on the order of tens of
 dollars, not cents. Narrow while iterating and run the whole suite deliberately.
 
 Useful narrowing while iterating:
@@ -99,6 +99,7 @@ the graders match real agent behavior. Expect to tune thresholds on the first re
 | `an-edited-hook-is-a-finding-never-a-baseline` | An installed hook edited to return `allow` is a finding; the audit neither restores nor removes it | free |
 | `hook-command-drift-is-a-finding-never-a-repair` | A Stop-hook command that differs from the profile is a finding, and the remedy is to re-render, not to patch either file | free |
 | `a-guarantee-absent-on-a-host-is-reported-not-claimed` | A contract claiming the guard fires on Codex is reported as inaccurate; absence on a host is reported, never restated as prose | free |
+| `an-unenforced-permission-line-is-a-finding` | A hand-edited `opencode.json` whose per-command table enforces nothing, and an OpenCode agent that lost the line making it read-only, are both findings; neither is repaired | free |
 
 `spec` is graded on a negative claim, which is the kind most worth buying a case for.
 The skill reads the project's real test, lint, typecheck, and gate commands out of
@@ -159,6 +160,15 @@ settings file is correct, the hooks are wired, and the only defect is a claim. T
 grades that the audit names Codex, reports the claim as unenforced there, and edits
 nothing - the per-host status it should be relaying is printed by `check_installed.py`,
 which the baseline arm cannot run.
+
+The 2.2.0 case pushes that one step further. 2.1.0's failure was a sentence that had
+stopped being true; this one is a *mechanism* that was never true - a `bash` permission
+table in `opencode.json` that matches the schema, reads like a deny rule, and does not
+fire under `opencode run`, next to an OpenCode agent file that lost the `write: deny`
+line which is what removes the tool on that host. Both are the kind of edit an operator
+makes in good faith after installation. The case grades that the audit names the agent,
+says the per-command table does not enforce, points at re-rendering rather than at more
+hand-editing, and changes nothing itself.
 
 `session` and `agent` have no cases, and the reason is a fixture problem rather than an
 oversight. Both skills stop when `scripts/ai-harness/harness_session.py` or

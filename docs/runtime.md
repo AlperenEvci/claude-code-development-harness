@@ -105,19 +105,39 @@ does not pretend otherwise. Every guarantee is reported per host by
 | always-loaded contract | present | present | present |
 | on-demand skills | present | present with `.agents/skills/` | present |
 | manual-only skills | present | absent | absent |
-| pre-tool-use guard | present when guarded | absent | absent today |
+| pre-tool-use guard | present when guarded | absent | present when guarded |
 | session-start brief | present when guarded | absent | absent |
 | stop check | present when guarded | absent | absent |
 | compaction boundary | present when guarded | absent | unmeasured |
-| read-only agent catalog | present at Standard and Fleet | absent | absent |
+| read-only agent catalog | present at Standard and Fleet | absent | present |
 
 Every absence in that table was measured, not assumed. Codex documents Claude Code's
 hook surface name for name and fired none of it in six forms under `codex exec`;
-OpenCode has a real deny hook but no blocking stop event and no session-start
-injection; neither honors `disable-model-invocation`, so a manual-only skill is
-model-reachable on both. The runs are in `.ai/reports/0012-host-portability-smoke-test.md`
-and `0013-skill-frontmatter-across-hosts.md` of the plugin repository. The rows that
-say absent today are the next releases' work, not a permanent verdict.
+OpenCode has no blocking stop event and no session-start injection; neither honors
+`disable-model-invocation`, so a manual-only skill is model-reachable on both. The runs
+are in `.ai/reports/0012-host-portability-smoke-test.md` and
+`0013-skill-frontmatter-across-hosts.md` of the plugin repository.
+
+The two OpenCode rows that say present are 2.2.0's work, and each is a mechanism rather
+than a sentence, measured in `0014-opencode-enforcement-surface.md`:
+
+- `.opencode/plugins/harness-guard.js` denies by throwing inside
+  `tool.execute.before`. The same secret list and destructive-git list as
+  `hook_guard.py`, the same `HARNESS_HOOKS_DISABLE=1` escape hatch, and the deny
+  reaches the model verbatim - including when the call came from a subagent.
+- `.opencode/agents/*.md` carry a permission block, and OpenCode enforces it by
+  removing the tool: an agent declaring `edit: deny`, `write: deny`, `bash: deny`
+  reports its available tools as `glob, grep, read, skill, task, todowrite,
+  webfetch, websearch`.
+- `opencode.json` states the permission floor the profile's autonomy and network
+  policy imply, in whole-tool form only. A per-command table under `bash` is
+  schema-valid and enforces nothing under `opencode run`, so the harness never
+  writes one and flags one that appears by hand.
+
+Set `HARNESS_HOOKS_DISABLE=1` and the guard stands down on both hosts, which is the
+one thing an operator needs when a guard is wrong. The permission floor and the agent
+files do not read that variable: they are configuration, and changing them is an edit
+the operator makes deliberately.
 
 ## The commands that wrap all of this
 

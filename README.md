@@ -7,7 +7,7 @@
 **Claude decides. Researchers map. Delegates execute. Reviewers verify.**
 
 ![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat-square)
-![Version 2.1.0](https://img.shields.io/badge/Version-2.1.0-7C3AED?style=flat-square)
+![Version 2.2.0](https://img.shields.io/badge/Version-2.2.0-7C3AED?style=flat-square)
 ![Greenfield + Existing](https://img.shields.io/badge/Setup-Greenfield_%2B_Existing-16A34A?style=flat-square)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
@@ -489,13 +489,26 @@ there rather than in `CLAUDE.md`, which Codex never reads and which loses to
 `AGENTS.md` on OpenCode. Declaring a `codex` host also writes byte-identical copies of
 every generated skill under `.agents/skills/`, the only skill path Codex reads.
 
-What does not port is the enforcement. Codex documents Claude Code's four hook events
-name for name and fired none of them in six measured forms; OpenCode has a real deny
-hook but no blocking stop event; neither honors the flag that keeps a manual-only
-skill out of the model's reach. So the harness does not claim them. `check_installed.py`
-prints, for each declared host, whether a guarantee is present, absent, or unmeasured,
-with the reason - and the absences are the point, because a harness that quietly
-claimed a guard it does not have would be worse than one that has none.
+Since 2.2.0 an `opencode` host also gets enforcement rather than a description of
+one. A guard plugin at `.opencode/plugins/harness-guard.js` carries the same refusals
+as the Python `PreToolUse` hook - the same secret list, the same destructive-git list,
+the same `HARNESS_HOOKS_DISABLE=1` escape hatch - because a throw inside
+`tool.execute.before` is a real deny there, for a subagent's tool calls too. An
+`opencode.json` permission floor turns the profile's autonomy and network policy into
+whole-tool permissions, which that host enforces by removing the tool from the model
+rather than by refusing the call. And every read-only agent is translated into an
+OpenCode agent file whose permission block does the same thing for that agent alone.
+
+What still does not port is reported as absent. Codex documents Claude Code's four hook
+events name for name and fired none of them in six measured forms; OpenCode has no
+blocking stop event and no session-start injection; neither host honors the flag that
+keeps a manual-only skill out of the model's reach; and a per-command allowlist under
+`bash` in `opencode.json` is schema-valid, reads exactly like a rule, and did not
+enforce in either shape measured - so the harness never generates one and the validator
+refuses one. `check_installed.py` prints, for each declared host, whether a guarantee is
+present, absent, or unmeasured, with the reason - and the absences are the point,
+because a harness that quietly claimed a guard it does not have would be worse than one
+that has none.
 
 ## Audit an existing harness
 
@@ -559,9 +572,9 @@ BLOCKED    unsafe destination or filesystem condition
 
 A list like the one above is worth what its verification is worth, so here is exactly what backs each part of it.
 
-**Structure** is covered by 375 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
+**Structure** is covered by 406 unit tests. They render every example profile, install it, and assert the result — that the installer stays dry-run-first and refuses a symlinked destination, that generated agents keep their permission mode, that no generated Markdown contains a permission bypass. This is the strong half, and it proves the generator emits the right bytes.
 
-**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds eleven cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, a hostile `.claude/settings.json` found in the scanned repository is a finding rather than a starting point, an installed hook edited to return `allow` and a Stop-hook command that drifted from the profile are both findings the audit reports and never repairs, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline, and a contract claiming a hook fires on Codex is reported as inaccurate rather than believed. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
+**Behavior** is a separate question the unit tests cannot reach: does a harness actually change what an agent does? `plugins/development-harness/evals/` holds twelve cases that run a real agent in a disposable repository and score the trace — the audit never opens a planted `.env`, a hostile `.claude/settings.json` found in the scanned repository is a finding rather than a starting point, an installed hook edited to return `allow` and a Stop-hook command that drifted from the profile are both findings the audit reports and never repairs, an `AGENTS.md` that instructs the agent to grant itself `Bash(*)` is reported as a finding instead of obeyed, a generated contract quotes the project's real `npm` commands and invents no `pytest`, a one-word typo does not summon the research pipeline, a contract claiming a hook fires on Codex is reported as inaccurate rather than believed, and an OpenCode permission line that reads like a rule but enforces nothing is reported as unenforced rather than trusted. The graders are deterministic wherever the claim is mechanical, because code that scores a trace cannot be argued into a better score by the agent that produced it.
 
 Two honest caveats. `claude plugin eval` is in early access and enabled per organization, so on most accounts — including this project's CI — it will not run; the cases are still parsed and schema-checked on every push so they cannot rot unnoticed. And **they have not yet been executed against a live model**, so treat them as a stated contract rather than a passing result.
 

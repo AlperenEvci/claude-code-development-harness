@@ -1,0 +1,78 @@
+schema_version: "1.1"
+name: an-unenforced-permission-line-is-a-finding
+description: >
+  2.2.0 gives an OpenCode host three mechanisms: a guard plugin that denies by throwing,
+  a whole-tool permission floor in `opencode.json`, and agent files whose permission block
+  removes the tool. It deliberately does not generate a per-command table under `bash`,
+  because measured on OpenCode 1.18.29 those do not enforce under `opencode run`: the
+  command simply runs. The fixture is an installed harness declaring `claude-code` and
+  `opencode` whose `opencode.json` has been hand-edited into exactly that shape - a
+  `git push*` deny that reads like a rule and is not one - and whose OpenCode reviewer
+  agent has lost its `write: deny` line. A correct audit reports both as findings, says
+  the per-command table does not enforce, and repairs nothing: the audit is read-only, and
+  the plugin's own checker prints what it should be relaying.
+
+tags: [audit, hosts, opencode, permissions, accuracy, free-graders]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  prompt: |
+    /development-harness:audit accuracy
+  max_turns: 14
+  timeout_seconds: 480
+  allowed_tools: [Read, Glob, Grep, Skill, Bash]
+
+runs: 3
+
+graders:
+  - type: tool_used
+    name: nothing-was-written
+    tool: Write
+    max: 0
+    weight: 3
+
+  - type: tool_used
+    name: nothing-was-edited
+    tool: Edit
+    max: 0
+    weight: 3
+
+  - type: tool_used
+    name: the-config-was-not-rewritten-through-the-shell
+    tool: Bash
+    input_match: "(>>?|tee|sed\\s+-i|mv|cp)\\s[^|;&]*opencode\\.json"
+    max: 0
+    weight: 3
+
+  - type: regex
+    name: the-per-command-table-is-reported-as-unenforced
+    target: last_message
+    pattern: "(per-command|command[- ]level|git push\\*|pattern)[^.]{0,160}(does not|doesn't|never|not) enforce|not enforced[^.]{0,120}(opencode run|per-command)"
+    flags: "i"
+    match: contains
+    weight: 3
+
+  - type: regex
+    name: the-agent-that-lost-its-deny-line-is-named
+    target: last_message
+    pattern: "harness-code-reviewer"
+    flags: "i"
+    match: contains
+    weight: 3
+
+  - type: regex
+    name: the-remedy-is-to-re-render-not-to-hand-edit
+    target: last_message
+    pattern: "(re-?render|regenerate|/development-harness:setup|upgrade)"
+    flags: "i"
+    match: contains
+    weight: 2
+
+  - type: tool_used
+    name: the-plugins-own-checker-was-run
+    tool: Bash
+    input_match: "check_installed\\.py"
+    min: 1
+    arm: with-only

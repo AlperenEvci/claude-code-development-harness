@@ -1,5 +1,58 @@
 # Changelog
 
+## 2.2.0 - What OpenCode can enforce, enforced
+
+Measured first, in `.ai/reports/0014-opencode-enforcement-surface.md`, which is
+the second module of `.ai/decisions/0005-host-portability.md`. 2.1.0 reported
+what an OpenCode host does not have. This release gives it what it can actually
+have, and keeps reporting the rest as absent.
+
+### Added
+
+- **A guard plugin for an `opencode` host.** `.opencode/plugins/harness-guard.js`
+  is the port of `hook_guard.py`: the same secret filenames, suffixes, and
+  credential directories, the same destructive-git list, the same commit and push
+  rules read from the installed profile, the same `HARNESS_HOOKS_DISABLE=1`
+  escape hatch. It denies by throwing inside `tool.execute.before`, which was
+  measured to be a real deny for `read`, `write`, `edit`, and `bash`, to reach the
+  model as text, and to fire for a subagent's tool calls as well. It is copied
+  byte-identically like the Python runtime, and rendered only when the hooks
+  policy is `guarded`, because it is that policy's counterpart on this host.
+- **A permission floor in `opencode.json`.** The profile's `autonomy` and
+  `network_access` become whole-tool permissions, which OpenCode enforces by
+  removing the tool from the model's toolset rather than by refusing the call.
+  `deny` removes it, `ask` auto-rejects with a message in a non-interactive run
+  and prompts in the TUI, and `edit` governs the `write` tool as well.
+- **Read-only agents for an `opencode` host.** Every generated agent whose
+  capability is `reader` or `verifier` is translated into `.opencode/agents/`
+  with a permission block that removes `edit` and `write`, and removes `bash` too
+  for a reader. An `implementer` is deliberately not translated: its boundary is a
+  worktree and an `--add-dir` scope that only the Claude Code launcher enforces.
+- **Checks for all three.** The validator compares the plugin byte-for-byte
+  against the plugin's own copy, parse-checks it with `node` when node is present
+  and says so when it is not, refuses a floor that contradicts the profile,
+  refuses an OpenCode agent with no read-only Claude agent behind it, and refuses
+  a per-command table under `bash`. `check_installed.py` reports the guard and the
+  read-only agent catalog as present on OpenCode when they are installed, and
+  errors when an installed agent loses the line that makes it read-only or the
+  guard loses its escape hatch.
+
+### Changed
+
+- **The OpenCode row of the guarantee table.** `pre-tool-use guard` and
+  `read-only agent catalog` are now `present` for an OpenCode host that installed
+  them, rather than `absent (not yet rendered for this host)`. The stop check and
+  the session-start brief stay absent, and the compaction boundary stays
+  unmeasured: nothing measured in this round changes those.
+
+### Deliberately not shipped
+
+- **A per-command allowlist under `bash`.** It is schema-valid and reads exactly
+  like a deny rule. Measured in two shapes on OpenCode 1.18.29, neither fired
+  under `opencode run`: the command ran. A generated one would be prose wearing a
+  mechanism's clothes, so the renderer never emits one and both the validator and
+  the installed-harness checker flag one that appears by hand.
+
 ## 2.1.0 - Three hosts, one contract
 
 Measured first, in `.ai/reports/0012-host-portability-smoke-test.md` and

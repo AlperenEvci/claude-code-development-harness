@@ -340,11 +340,12 @@ supervisor or desktop shell, settings.json merging, and any hook that returns `a
 ## After 2.0 - host portability (Claude Code, Codex, OpenCode)
 
 **Status:** measured on 2026-09-07 (`.ai/reports/0012-host-portability-smoke-test.md`),
-extended on 2026-09-09 by `.ai/reports/0013-skill-frontmatter-across-hosts.md`; design
-accepted in `.ai/decisions/0005-host-portability.md` on 2026-09-09 and in delivery.
-Module plan: 2.1.0 `hosts` field and portable contract;
-2.2.0 OpenCode guard and permission floor; 2.3.0 Codex agents and forbidden flags;
-2.4.0 launcher host table. The measured answers to (a)-(f) are in the report.
+extended on 2026-09-09 by `0013-skill-frontmatter-across-hosts.md` and
+`0014-opencode-enforcement-surface.md`; design accepted in
+`.ai/decisions/0005-host-portability.md` on 2026-09-09 and in delivery. Module plan:
+2.1.0 `hosts` field and portable contract (shipped); 2.2.0 OpenCode guard and
+permission floor (shipped); 2.3.0 Codex agents and forbidden flags; 2.4.0 launcher
+host table. The measured answers to (a)-(f) are in the reports.
 
 **Goal:** one rendered harness that Claude Code, Codex, and OpenCode each pick up
 correctly, rather than one harness that works fully in Claude Code and partially
@@ -434,7 +435,34 @@ implying it can.
 - `check_installed.py` reports each guarantee per declared host as present, absent, or
   unmeasured.
 
-### Module 9 - OpenCode guard and permission floor (2.2.0)
+### Module 9 - OpenCode guard and permission floor (2.2.0) - DONE, pending CI
+
+Shipped on branch `module-9-opencode-guard`. Measured first, in
+`.ai/reports/0014-opencode-enforcement-surface.md`: a throw inside a plugin's
+`tool.execute.before` is a real deny for `read`, `write`, `edit`, and `bash`, reaches
+the model verbatim, and fires for a subagent's calls too; the plugin sees the
+operator's environment, so `HARNESS_HOOKS_DISABLE=1` is the same escape hatch; a
+whole-tool permission in `opencode.json` is enforced by removing the tool from the
+model's toolset, and an agent file's permission block does the same for one agent; a
+per-command table under `bash` enforces nothing under `opencode run` in either shape
+tried; and a plugin that throws while loading leaves the CLI with no session at all.
+
+- `.opencode/plugins/harness-guard.js`: the JavaScript port of `hook_guard.py`, copied
+  byte-identically, rendered only for an `opencode` host with `hooks_policy: guarded`,
+  deny-only, failing open on any internal defect and doing nothing at module scope.
+- `opencode.json`: a whole-tool permission floor derived from `autonomy` and
+  `network_access`. No per-command table is ever generated, and one that appears by
+  hand is a validator error and a checker warning.
+- `.opencode/agents/*.md`: every `reader` and `verifier` agent, translated with a
+  permission block that removes the tools it may not use. An `implementer` is not
+  translated - its boundary is a worktree only the Claude Code launcher enforces.
+- `check_installed.py` now reports the guard and the read-only agent catalog as present
+  on OpenCode when they are installed, and errors when an installed agent loses the
+  line that makes it read-only or the guard loses its escape hatch.
+
+The guard was exercised against a real `opencode run` before it was wired into the
+renderer: a `.env` read, `git commit` under a `no-commit` policy, and `git push` were
+each refused with the reason quoted back by the model, and a control command ran.
 
 ### Module 10 - Codex agents and forbidden flags (2.3.0)
 

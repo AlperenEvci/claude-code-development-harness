@@ -24,14 +24,25 @@ floor under the rule.
 | `examples-only` | nothing executable; the default at Lite, and everywhere before 2.0 |
 | `guarded` | `.claude/settings.json` plus the hook scripts below; the default at Standard and Fleet since 2.0.0 |
 
-These hooks are Claude Code's, and only Claude Code's. A profile that declares a
-`codex` or `opencode` host still renders exactly this and nothing more: measured on
-2026-09-07, Codex documents the same four events under the same names and fired none
-of them in six forms under `codex exec`, and OpenCode has a deny hook in JavaScript
-but no blocking stop event (`.ai/reports/0012-host-portability-smoke-test.md`). So on
-a second host the deny rules below are prose again, and `check_installed.py` says so
-per host rather than letting the settings file imply otherwise. The OpenCode guard is
-2.2.0's work; Codex hooks ship if and only if a run shows one firing.
+These hooks are Claude Code's. A profile that declares a `codex` host renders exactly
+this and nothing more: measured on 2026-09-07, Codex documents the same four events
+under the same names and fired none of them in six forms under `codex exec`
+(`.ai/reports/0012-host-portability-smoke-test.md`), so there the deny rules below are
+prose again and `check_installed.py` says so rather than letting the settings file
+imply otherwise. Codex hooks ship if and only if a run shows one firing.
+
+Since 2.2.0 a profile that declares an `opencode` host **and** `hooks_policy: guarded`
+also gets `.opencode/plugins/harness-guard.js`, the port of `hook_guard.py` to the one
+mechanism that host enforces. It carries the same secret list, the same
+destructive-git list, the same commit and push rules read from the installed profile,
+and the same `HARNESS_HOOKS_DISABLE=1` escape hatch, and it denies by throwing inside
+`tool.execute.before` - measured to be a real deny for `read`, `write`, `edit`, and
+`bash`, to reach the model as text, and to fire for a subagent's calls too
+(`.ai/reports/0014-opencode-enforcement-surface.md`). It is copied byte-identically
+and parse-checked by the validator, because a plugin whose module body throws leaves
+`opencode run` with no session at all. The other three events have no counterpart
+there: OpenCode has no blocking stop event and no session-start injection, and its
+compaction event is documented and unmeasured.
 
 `guarded` requires Standard or Fleet. The hooks are installed under
 `scripts/ai-harness/`, and Lite installs that directory for nothing else;

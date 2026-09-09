@@ -54,6 +54,42 @@ DEFAULT_HOSTS = ("claude-code",)
 #: path and `.claude/skills/`. So the mirror is rendered for a Codex host
 #: and no other, and it is byte-identical rather than re-rendered.
 CODEX_SKILL_ROOT = ".agents/skills"
+#: What an `opencode` host reads. Measured on OpenCode 1.18.29
+#: (`.ai/reports/0014-opencode-enforcement-surface.md`): a plugin under
+#: `.opencode/plugins/` is auto-discovered, a throw in its `tool.execute.before`
+#: is a real deny for every tool tried and for a subagent's calls too, and a
+#: whole-tool permission in `opencode.json` is enforced by removing the tool
+#: from the model's toolset rather than by refusing the call.
+OPENCODE_PLUGIN_ROOT = ".opencode/plugins"
+OPENCODE_PLUGIN_NAME = "harness-guard.js"
+OPENCODE_AGENT_ROOT = ".opencode/agents"
+OPENCODE_CONFIG_PATH = "opencode.json"
+
+#: The capabilities that translate to an OpenCode agent. An `implementer` does
+#: not: its boundary is a worktree and an `--add-dir` scope that `harness_session.py`
+#: passes to `claude`, and there is nothing on OpenCode that enforces the same
+#: thing. Rendering one anyway would turn a process-enforced scope into a
+#: sentence, so the checker reports it as absent instead.
+OPENCODE_READ_ONLY_CAPABILITIES = ("reader", "verifier")
+
+#: The permission floor, by autonomy. Only whole-tool values: a per-command
+#: allowlist under `bash` was measured and does not enforce under `opencode run`,
+#: so generating one would be prose wearing a mechanism's clothes. `edit`
+#: governs the `write` tool as well, measured. `ask` auto-rejects with a message
+#: in a non-interactive run and prompts in the TUI, so it never silently allows.
+OPENCODE_AUTONOMY_PERMISSIONS = {
+    "read-only": {"edit": "deny", "bash": "deny"},
+    "approval-required": {"edit": "ask", "bash": "ask"},
+    "repository-write-with-approval": {"edit": "allow", "bash": "ask"},
+    "isolated-auto": {"edit": "allow", "bash": "allow"},
+}
+
+#: The same, for the two network tools, by the profile's network policy.
+OPENCODE_NETWORK_PERMISSIONS = {
+    "deny-by-default": {"webfetch": "deny", "websearch": "deny"},
+    "ask-before-network": {"webfetch": "ask", "websearch": "ask"},
+    "approved-for-scoped-tasks": {"webfetch": "allow", "websearch": "allow"},
+}
 #: Where `harness_session.py launch` puts a session. `inproc` is the default and
 #: is what every profile written before this field existed means. `orca` adds the
 #: Orca ADE as a launch surface: the same tier-enforced command, placed in a
@@ -132,7 +168,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "2.1.0"
+GENERATOR_VERSION = "2.2.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -2208,6 +2244,169 @@ def write_hook_scripts(payload: Path, profile: dict[str, Any]) -> list[Path]:
 
 
 
+def uses_opencode(profile: dict[str, Any]) -> bool:
+    return "opencode" in hosts_of(profile)
+
+
+def opencode_permission_floor(profile: dict[str, Any]) -> dict[str, str]:
+    """The whole-tool permissions this profile's declared policy implies.
+
+    Derived from the two fields that already state the policy in prose, so the
+    floor cannot disagree with the contract it ships beside.
+    """
+    floor: dict[str, str] = {}
+    floor.update(OPENCODE_AUTONOMY_PERMISSIONS.get(str(profile.get("autonomy", "")), {}))
+    floor.update(
+        OPENCODE_NETWORK_PERMISSIONS.get(str(profile.get("network_access", "")), {})
+    )
+    return floor
+
+
+def write_opencode_config(payload: Path, profile: dict[str, Any]) -> Path | None:
+    """Render `opencode.json`: the permission floor, and nothing else.
+
+    Deliberately minimal. Anything this file says that OpenCode does not enforce
+    would be a claim the harness cannot keep, and the release's rule is that a
+    guarantee a host cannot fire is reported as absent rather than restated.
+    """
+    if not uses_opencode(profile):
+        return None
+    floor = opencode_permission_floor(profile)
+    if not floor:
+        return None
+    target = payload / OPENCODE_CONFIG_PATH
+    data = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": floor,
+    }
+    write_generated(target, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return target
+
+
+def write_opencode_guard(payload: Path, profile: dict[str, Any]) -> Path | None:
+    """Copy the OpenCode guard plugin, on the terms the hook scripts get.
+
+    Byte-identical for the same reason, and for one more that is specific to
+    this host: a plugin whose module body throws leaves `opencode run` with no
+    session at all. A per-project variant of this file would be an untested way
+    to take someone's CLI offline, so there is exactly one copy and the
+    validator compares it byte for byte.
+    """
+    if not uses_opencode(profile) or not hooks_are_active(profile):
+        return None
+    source = Path(__file__).resolve().parents[1] / "assets" / "opencode" / OPENCODE_PLUGIN_NAME
+    if not source.is_file():
+        fail(f"OpenCode guard plugin missing from the plugin: {OPENCODE_PLUGIN_NAME}")
+    target = payload / OPENCODE_PLUGIN_ROOT / OPENCODE_PLUGIN_NAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Bytes, like the Codex skill mirror: a text round-trip on Windows would
+    # rewrite the line endings and break the identity check.
+    target.write_bytes(source.read_bytes())
+    return target
+
+
+def parse_agent_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Split a rendered agent file into its scalar frontmatter and its body.
+
+    Only the scalar keys this translation needs. A list value (`tools:`) is
+    skipped rather than parsed: the OpenCode file states authority in its own
+    vocabulary, so nothing downstream needs Claude Code's.
+    """
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---\n", 3)
+    if end == -1:
+        return {}, text
+    head = text[4:end]
+    body = text[end + 5 :]
+    fields: dict[str, str] = {}
+    for line in head.splitlines():
+        if not line or line.startswith((" ", "-", "\t")):
+            continue
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"') and len(value) > 1:
+            value = json.loads(value)
+        fields[key.strip()] = value
+    return fields, body
+
+
+def strip_claude_launch_section(body: str) -> str:
+    """Drop the `## Session launch` block: those flags are Claude Code's.
+
+    The rest of the body is the agent's mission and boundaries, which are the
+    same work whichever host opens the repository.
+    """
+    lines = body.splitlines()
+    kept: list[str] = []
+    skipping = False
+    for line in lines:
+        if line.startswith("## Session launch"):
+            skipping = True
+            continue
+        if skipping:
+            if line.startswith("## "):
+                skipping = False
+            else:
+                continue
+        kept.append(line)
+    return "\n".join(kept).strip() + "\n"
+
+
+def write_opencode_agents(payload: Path, profile: dict[str, Any]) -> list[Path]:
+    """Translate every read-only Claude agent into an OpenCode agent file.
+
+    Read back from the payload rather than re-derived from the profile, so the
+    two catalogs cannot drift: an agent that exists for Claude Code exists here
+    with the same description and the same mission, or it does not exist at all.
+
+    The permission block is the enforcement. Measured on 1.18.29: an agent
+    declaring `edit: deny` and `bash: deny` reported its available tools as
+    `glob, grep, read, skill, task, todowrite, webfetch, websearch` - the tools
+    are removed, not refused, which is this host's counterpart of
+    `permissionMode: plan`.
+    """
+    if not uses_opencode(profile):
+        return []
+    source_root = payload / ".claude" / "agents"
+    if not source_root.is_dir():
+        return []
+
+    written: list[Path] = []
+    for source in sorted(source_root.glob("*.md")):
+        fields, body = parse_agent_frontmatter(source.read_text(encoding="utf-8"))
+        capability = fields.get("capability", "")
+        if capability not in OPENCODE_READ_ONLY_CAPABILITIES:
+            continue
+        name = fields.get("name") or source.stem
+        description = fields.get("description", "").strip()
+        if not description:
+            continue
+        tier = CAPABILITY_TIERS[capability]
+        # A verifier runs the gates, so it keeps `bash`; a reader has no reason
+        # to run a command and OpenCode can take the tool away entirely.
+        bash = "allow" if "Bash" in tier["tools"] else "deny"
+        lines = [
+            "---",
+            f"description: {yaml_string(description)}",
+            "mode: subagent",
+            "permission:",
+            "  edit: deny",
+            "  write: deny",
+            f"  bash: {bash}",
+            "---",
+            "",
+            strip_claude_launch_section(body),
+        ]
+        target = payload / OPENCODE_AGENT_ROOT / f"{name}.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_generated(target, "\n".join(lines))
+        written.append(target)
+    return written
+
+
 def mirror_skills_for_codex(payload: Path, profile: dict[str, Any]) -> list[Path]:
     """Copy every generated skill to the path a Codex host reads.
 
@@ -2844,6 +3043,9 @@ def main() -> None:
     write_session_tools(payload, profile)
     write_hook_scripts(payload, profile)
     wire_command_hooks(payload, profile)
+    write_opencode_guard(payload, profile)
+    write_opencode_config(payload, profile)
+    write_opencode_agents(payload, profile)
     write_progress_ledger(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))
