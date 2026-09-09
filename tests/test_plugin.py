@@ -7054,6 +7054,417 @@ class HostPortabilityTests(unittest.TestCase):
         )
 
 
+
+class LauncherHostTests(unittest.TestCase):
+    """`launch --host`: one launcher, three vocabularies, and no silent widening.
+
+    Every refusal here is a measured host behaviour rather than a house rule.
+    `.ai/reports/0016-launcher-host-surface.md` has the probes: neither other
+    host has a background mode, `opencode run --agent` falls back to the default
+    agent and still exits 0, an OpenCode agent's permission block does not reach
+    what it delegates to, and Codex's `--output-schema` rejects the bus schema
+    outright.
+    """
+
+    def launch(self, *args: str, check: bool = False):
+        return run(
+            PYTHON, str(SCRIPTS / "harness_session.py"), "launch", *args, check=check
+        )
+
+    def repo(self, temp: Path, *, floor: str | None = None) -> Path:
+        root = temp / "repo"
+        (root / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+        (root / ".opencode" / "agents").mkdir(parents=True, exist_ok=True)
+        if floor is not None:
+            (root / ".codex").mkdir(parents=True, exist_ok=True)
+            (root / ".codex" / "config.toml").write_bytes(
+                f'sandbox_mode = "{floor}"\n'.encode("utf-8")
+            )
+        return root
+
+    def agent_pair(
+        self,
+        root: Path,
+        name: str = "harness-reader",
+        *,
+        capability: str = "reader",
+        mode: str = "all",
+        task: str = "false",
+    ) -> None:
+        (root / ".claude" / "agents" / f"{name}.md").write_bytes(
+            f"---\nname: {name}\ncapability: {capability}\n---\n\nBody.\n".encode(
+                "utf-8"
+            )
+        )
+        (root / ".opencode" / "agents" / f"{name}.md").write_bytes(
+            (
+                f"---\ndescription: probe\nmode: {mode}\npermission:\n"
+                f"  edit: deny\n  write: deny\n  bash: deny\ntools:\n"
+                f"  task: {task}\n---\n\nBody.\n"
+            ).encode("utf-8")
+        )
+
+    # --- the table itself -------------------------------------------------
+
+    def test_a_reading_tier_launches_codex_in_the_sandbox_that_cannot_write(
+        self,
+    ) -> None:
+        proc = self.launch(
+            "--host", "codex", "--capability", "reader",
+            "--task", "Map the retry path", check=True,
+        )
+        self.assertEqual(
+            proc.stdout.strip(),
+            "codex exec --json --sandbox read-only 'Map the retry path'",
+        )
+
+    def test_a_writing_tier_launches_codex_in_the_sandbox_that_can(self) -> None:
+        proc = self.launch(
+            "--host", "codex", "--capability", "implementer",
+            "--task", "Do the thing", check=True,
+        )
+        self.assertIn("--sandbox workspace-write", proc.stdout)
+
+    def test_the_repositorys_own_floor_narrows_a_tier_and_never_widens_one(
+        self,
+    ) -> None:
+        """The floor is a ceiling for the launcher, both ways round."""
+        with tempfile.TemporaryDirectory() as temp:
+            narrow = self.repo(Path(temp), floor="read-only")
+            proc = self.launch(
+                "--host", "codex", "--capability", "implementer",
+                "--task", "Do the thing", "--root", str(narrow), check=True,
+            )
+            self.assertIn("--sandbox read-only", proc.stdout)
+
+        with tempfile.TemporaryDirectory() as temp:
+            wide = self.repo(Path(temp), floor="danger-full-access")
+            proc = self.launch(
+                "--host", "codex", "--capability", "reader",
+                "--task", "Map it", "--root", str(wide), check=True,
+            )
+            # The repository handing out more authority does not promote a tier.
+            self.assertIn("--sandbox read-only", proc.stdout)
+            self.assertNotIn("danger-full-access", proc.stdout)
+
+    def test_a_floor_this_version_does_not_recognise_is_not_forwarded(self) -> None:
+        """A word the harness cannot rank is not a sandbox mode it may pass on.
+
+        `--sandbox` takes three values. Forwarding an unrecognised one would
+        fail at the binary at best, and at worst be a mode a later Codex adds
+        that this version cannot compare against a tier.
+        """
+        self.assertEqual(
+            CAPABILITIES.codex_launch_sandbox("reader", "danger-full-access-ish"),
+            "read-only",
+        )
+        self.assertEqual(
+            CAPABILITIES.codex_launch_sandbox("implementer", ""),
+            "workspace-write",
+        )
+
+    def test_the_tier_to_sandbox_table_never_reaches_the_bypass_mode(self) -> None:
+        for capability, expected in CAPABILITIES.CODEX_TIER_SANDBOX.items():
+            self.assertIn(capability, CAPABILITIES.CAPABILITY_TIERS)
+            self.assertNotEqual(expected, "danger-full-access")
+
+    def test_an_opencode_launch_names_the_agent_that_carries_the_tier(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(Path(temp))
+            self.agent_pair(root)
+            proc = self.launch(
+                "--host", "opencode", "--capability", "reader",
+                "--agent", "harness-reader", "--task", "Map it",
+                "--root", str(root), check=True,
+            )
+            self.assertEqual(
+                proc.stdout.strip(),
+                "opencode run --format json --agent harness-reader 'Map it'",
+            )
+
+    def test_claude_code_is_still_the_default_and_prints_what_it_printed_before(
+        self,
+    ) -> None:
+        proc = self.launch(
+            "--capability", "reader", "--task", "Map it",
+            "--session-id", SAMPLE_SESSION_ID, check=True,
+        )
+        self.assertTrue(proc.stdout.startswith("claude "))
+        self.assertIn("--permission-mode plan", proc.stdout)
+
+    # --- the refusals -----------------------------------------------------
+
+    def test_no_other_host_may_be_launched_in_the_background(self) -> None:
+        for host in ("codex", "opencode"):
+            proc = self.launch(
+                "--host", host, "--capability", "reader",
+                "--task", "Map it", "--background",
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("--background cannot be used", proc.stderr)
+            self.assertIn("silently be a foreground run", proc.stderr)
+
+    def test_the_claude_only_flags_are_refused_by_name(self) -> None:
+        for flag, value in (
+            ("--restricted", None),
+            ("--worktree", "lane"),
+            ("--scope", "src"),
+            ("--session-id", SAMPLE_SESSION_ID),
+        ):
+            args = ["--host", "codex", "--capability", "reader", "--task", "Map it", flag]
+            if value is not None:
+                args.append(value)
+            proc = self.launch(*args)
+            self.assertEqual(proc.returncode, 2, flag)
+            self.assertIn(f"{flag} cannot be used with --host codex", proc.stderr)
+
+    def test_the_orca_surface_is_refused_for_a_host_it_was_never_measured_against(
+        self,
+    ) -> None:
+        proc = self.launch(
+            "--host", "codex", "--capability", "reader",
+            "--task", "Map it", "--surface", "orca",
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--surface orca cannot be used", proc.stderr)
+
+    def test_opencode_cannot_report_an_envelope_it_has_no_channel_for(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(Path(temp))
+            self.agent_pair(root)
+            proc = self.launch(
+                "--host", "opencode", "--capability", "reader",
+                "--agent", "harness-reader", "--task", "Map it",
+                "--root", str(root), "--exec", "--report",
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("no structured return channel", proc.stderr)
+
+    def test_an_opencode_launch_without_an_agent_is_refused(self) -> None:
+        proc = self.launch(
+            "--host", "opencode", "--capability", "reader", "--task", "Map it"
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("needs --agent", proc.stderr)
+
+    # --- the OpenCode preflight ------------------------------------------
+
+    def test_a_missing_agent_file_is_refused_rather_than_left_to_fall_back(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(Path(temp))
+            proc = self.launch(
+                "--host", "opencode", "--capability", "reader",
+                "--agent", "harness-reader", "--task", "Map it", "--root", str(root),
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("falls back to the default agent", proc.stderr)
+
+    def test_a_subagent_only_agent_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(Path(temp))
+            self.agent_pair(root, mode="subagent")
+            proc = self.launch(
+                "--host", "opencode", "--capability", "reader",
+                "--agent", "harness-reader", "--task", "Map it", "--root", str(root),
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("is not `mode: all`", proc.stderr)
+
+    def test_an_agent_that_can_delegate_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(Path(temp))
+            self.agent_pair(root, task="true")
+            proc = self.launch(
+                "--host", "opencode", "--capability", "reader",
+                "--agent", "harness-reader", "--task", "Map it", "--root", str(root),
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("does not deny the `task` tool", proc.stderr)
+
+    def test_an_agent_of_another_tier_cannot_be_launched_as_this_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(Path(temp))
+            self.agent_pair(root, capability="verifier")
+            proc = self.launch(
+                "--host", "opencode", "--capability", "reader",
+                "--agent", "harness-reader", "--task", "Map it", "--root", str(root),
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("declares capability 'verifier'", proc.stderr)
+
+    def test_an_agent_with_no_claude_twin_states_no_tier_at_all(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.repo(Path(temp))
+            self.agent_pair(root)
+            (root / ".claude" / "agents" / "harness-reader.md").unlink()
+            proc = self.launch(
+                "--host", "opencode", "--capability", "reader",
+                "--agent", "harness-reader", "--task", "Map it", "--root", str(root),
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("nothing states which tier", proc.stderr)
+
+    # --- reading a host's own stream -------------------------------------
+
+    def test_the_codex_stream_is_read_for_the_facts_an_envelope_needs(self) -> None:
+        stream = "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": SAMPLE_SESSION_ID}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"id": "item_0", "type": "agent_message", "text": "hi"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 12, "output_tokens": 3},
+                    }
+                ),
+            ]
+        )
+        result = SESSION.codex_result(stream)
+        self.assertEqual(result["thread_id"], SAMPLE_SESSION_ID)
+        self.assertEqual(result["message"], "hi")
+        self.assertEqual((result["tokens_in"], result["tokens_out"]), (12, 3))
+        self.assertIsNone(result["error"])
+
+    def test_a_stream_that_counted_nothing_reports_nothing_rather_than_zero(
+        self,
+    ) -> None:
+        stream = json.dumps({"type": "thread.started", "thread_id": SAMPLE_SESSION_ID})
+        result = SESSION.codex_result(stream)
+        self.assertIsNone(result["tokens_in"])
+        self.assertIsNone(result["tokens_out"])
+
+    def test_a_failed_turn_is_read_as_an_error(self) -> None:
+        stream = json.dumps({"type": "turn.failed", "error": {"message": "boom"}})
+        self.assertEqual(SESSION.codex_result(stream)["error"], "boom")
+
+    def test_a_line_that_is_not_json_does_not_stop_the_read(self) -> None:
+        stream = "not json\n" + json.dumps(
+            {"type": "thread.started", "thread_id": SAMPLE_SESSION_ID}
+        )
+        self.assertEqual(SESSION.codex_result(stream)["thread_id"], SAMPLE_SESSION_ID)
+
+    # --- the schema Codex will actually take ------------------------------
+
+    def test_the_codex_schema_is_strict_all_the_way_down(self) -> None:
+        """Measured: the bus schema was rejected for exactly this.
+
+        `In context=('properties', 'body'), 'additionalProperties' is required
+        to be supplied and to be false`.
+        """
+        schema = BUS.codex_output_schema()
+
+        def strict(node: dict) -> None:
+            self.assertIs(node.get("additionalProperties"), False)
+            self.assertEqual(
+                sorted(node["required"]), sorted(node["properties"]),
+            )
+            for child in node["properties"].values():
+                if child.get("type") == "object":
+                    strict(child)
+                if child.get("type") == "array" and isinstance(child.get("items"), dict):
+                    if child["items"].get("type") == "object":
+                        strict(child["items"])
+
+        strict(schema)
+
+    def test_the_two_schemas_offer_the_same_fields(self) -> None:
+        """A second schema is a second contract unless it says the same thing."""
+        self.assertEqual(
+            sorted(BUS.codex_output_schema()["properties"]),
+            sorted(BUS.envelope_schema()["properties"]),
+        )
+
+    def test_an_optional_field_is_nullable_rather_than_absent(self) -> None:
+        schema = BUS.codex_output_schema()["properties"]
+        self.assertIn("null", schema["next"]["type"])
+        self.assertIn("null", schema["evidence"]["type"])
+
+    def test_labelled_parts_fold_back_into_the_body_the_bus_stores(self) -> None:
+        self.assertEqual(
+            BUS.codex_envelope_body(
+                [
+                    {"label": "Finding", "detail": "one"},
+                    {"label": "Risk", "detail": "two"},
+                ]
+            ),
+            {"Finding": "one", "Risk": "two"},
+        )
+
+    def test_a_repeated_label_keeps_both_parts(self) -> None:
+        folded = BUS.codex_envelope_body(
+            [{"label": "Note", "detail": "one"}, {"label": "Note", "detail": "two"}]
+        )
+        self.assertEqual(len(folded), 2)
+        self.assertIn("two", folded.values())
+
+    def test_a_body_that_is_already_an_object_is_left_alone(self) -> None:
+        self.assertEqual(BUS.codex_envelope_body({"a": 1}), {"a": 1})
+
+    # --- the envelope -----------------------------------------------------
+
+    def test_an_envelope_records_the_host_that_produced_it(self) -> None:
+        envelope = BUS.build_envelope(
+            session_id=SAMPLE_SESSION_ID,
+            sender="harness-reader",
+            kind="finding",
+            summary="A thing",
+            body={"a": 1},
+            host="codex",
+        )
+        self.assertEqual(envelope["trace"]["host"], "codex")
+
+    def test_an_envelope_cannot_claim_a_host_the_launcher_cannot_start(self) -> None:
+        with self.assertRaises(BUS.BusError) as caught:
+            BUS.build_envelope(
+                session_id=SAMPLE_SESSION_ID,
+                sender="harness-reader",
+                kind="finding",
+                summary="A thing",
+                body={"a": 1},
+                host="some-other-agent",
+            )
+        self.assertIn("not a launchable host", str(caught.exception))
+
+    def test_a_host_survives_the_round_trip_through_the_validator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            envelope = BUS.build_envelope(
+                session_id=SAMPLE_SESSION_ID,
+                sender="harness-reader",
+                kind="finding",
+                summary="A thing",
+                body={"a": 1},
+                host="opencode",
+            )
+            target = BUS.write_envelope(root, envelope)
+            data = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(data["trace"]["host"], "opencode")
+            self.assertEqual(BUS.validate_envelope(data, str(target)), [])
+
+    # --- the concurrency rule --------------------------------------------
+
+    def test_only_opencode_is_recorded_as_serialising_per_directory(self) -> None:
+        """Measured both ways: two `codex exec` runs in one directory are fine."""
+        self.assertTrue(CAPABILITIES.LAUNCH_HOSTS["opencode"]["serialises_per_directory"])
+        self.assertFalse(CAPABILITIES.LAUNCH_HOSTS["codex"]["serialises_per_directory"])
+        self.assertFalse(CAPABILITIES.LAUNCH_HOSTS["claude-code"]["serialises_per_directory"])
+
+    def test_only_claude_code_is_recorded_as_having_a_background_mode(self) -> None:
+        self.assertTrue(CAPABILITIES.LAUNCH_HOSTS["claude-code"]["background"])
+        for host in ("codex", "opencode"):
+            self.assertFalse(CAPABILITIES.LAUNCH_HOSTS[host]["background"])
+
+    def test_the_host_table_covers_every_host_a_profile_may_declare(self) -> None:
+        self.assertEqual(sorted(CAPABILITIES.LAUNCH_HOSTS), sorted(VALIDATOR.ALLOWED_HOSTS))
+
+
 class CodexEnforcementTests(unittest.TestCase):
     """2.3.0: the one thing a repository can enforce on Codex, enforced.
 
@@ -7601,7 +8012,13 @@ try {
             for text in (reader_text, reviewer_text):
                 self.assertIn("edit: deny", text)
                 self.assertIn("write: deny", text)
-                self.assertIn("mode: subagent", text)
+                # Measured in `.ai/reports/0016`: `opencode run --agent` warns
+                # and falls back to the default agent for a subagent-only name,
+                # and still exits 0, so a subagent-only file cannot carry a tier.
+                self.assertIn("mode: all", text)
+                # And measured in the same report: an agent denied edit, write
+                # and bash called `task`, and its delegate wrote the file.
+                self.assertIn("task: false", text)
             # The reader has no reason to run a command, and this host can take
             # the tool away rather than refuse the call.
             self.assertIn("bash: deny", reader_text)
@@ -7680,6 +8097,45 @@ try {
             proc = self.validate(output)
             self.assertEqual(proc.returncode, 1)
             self.assertIn("has no counterpart on that host", proc.stderr)
+
+    def test_an_agent_that_can_delegate_is_refused(self) -> None:
+        """Measured: the permission block does not reach what an agent delegates to.
+
+        An agent declaring `edit: deny`, `write: deny` and `bash: deny` called
+        `task`, and its delegate created the file
+        (`.ai/reports/0016-launcher-host-surface.md`).
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "opencode"])
+            target = (
+                output / "payload" / ".opencode" / "agents"
+                / "harness-codebase-researcher.md"
+            )
+            target.write_bytes(
+                target.read_text(encoding="utf-8")
+                .replace("task: false", "task: true")
+                .encode("utf-8")
+            )
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("does not deny the `task` tool", proc.stderr)
+
+    def test_an_agent_that_cannot_be_launched_is_refused(self) -> None:
+        """Measured: `opencode run --agent` falls back for a subagent-only name."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.render(Path(temp), hosts=["claude-code", "opencode"])
+            target = (
+                output / "payload" / ".opencode" / "agents"
+                / "harness-codebase-researcher.md"
+            )
+            target.write_bytes(
+                target.read_text(encoding="utf-8")
+                .replace("mode: all", "mode: subagent")
+                .encode("utf-8")
+            )
+            proc = self.validate(output)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("is not `mode: all`", proc.stderr)
 
     def test_a_guard_without_a_declared_host_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

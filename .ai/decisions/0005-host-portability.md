@@ -96,6 +96,28 @@ host's own vocabulary: `codex exec --json -o -s read-only|workspace-write`,
 `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`, and
 `--auto`. The envelope records `host`; cost stays empty where the host reports none.
 
+**Amended 2026-09-09, on measurement (`.ai/reports/0016-launcher-host-surface.md`).**
+Every flag above exists and shipped. Two assumptions behind them did not survive:
+
+- `--agent <tier-agent>` does not bind a tier on its own. `opencode run --agent`
+  answers a name it cannot resolve - absent, or present but `mode: subagent` - with a
+  warning on stderr, a fallback to the *default* agent, and exit 0. A probe that hit
+  that path wrote a file under an agent declaring `write: deny`. The launcher therefore
+  preflights the agent file rather than passing the name and trusting the exit code, and
+  the rendered agents became `mode: all`.
+- An agent's permission block does not reach what it delegates to. One denying `edit`,
+  `write` and `bash` called `task`, and its delegate wrote the file. The rendered agents
+  now also deny `task`; this was a defect in what 2.2.0 shipped, not a new requirement.
+
+`cost stays empty where the host reports none` held, with one wrinkle worth writing
+down: OpenCode *has* a cost field and it read `0` on a subscription, so a reported zero
+is not evidence a run was free and is not copied into an envelope.
+
+One rule that was asserted here without measurement is now measured, and is narrower
+than it sounded: OpenCode serialises per *directory*, not per machine. Two
+`opencode run` processes in one directory collide with `database is locked`; the same
+pair in two directories both succeed. Two `codex exec` runs in one directory are fine.
+
 ### 8. Delivery
 
 Minor releases on `main`, one per module, measured before designed, CI-confirmed

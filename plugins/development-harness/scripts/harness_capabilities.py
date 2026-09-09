@@ -289,6 +289,12 @@ def capability_grant_errors(
 #: project config asking for `approval_policy = "on-request"` still reports
 #: `approval: never` under `codex exec`, so a policy meaning "ask first" rounds
 #: down to the mode that cannot write rather than up to the one that can.
+#: Where a repository states the sandbox its own `codex exec` sessions run
+#: under. One definition, imported by the renderer, the validator, the
+#: installed-harness checker and the launcher, because a path spelled four
+#: ways is a path three of them can get wrong.
+CODEX_CONFIG_PATH = ".codex/config.toml"
+
 CODEX_AUTONOMY_SANDBOX: dict[str, str] = {
     "read-only": "read-only",
     "approval-required": "read-only",
@@ -365,3 +371,59 @@ def read_codex_config(text: str) -> dict[str, Any]:
         elif section == "sandbox_workspace_write" and key == "network_access":
             result["network_access"] = value == "true"
     return result
+
+
+#: The hosts a session can be launched on, and what each one is called on the
+#: command line. `claude-code` is the only host with a background mode: measured
+#: in `.ai/reports/0016-launcher-host-surface.md`, neither `codex exec` nor
+#: `opencode run` has a `--bg`, so a background launch there would silently be a
+#: foreground one.
+LAUNCH_HOSTS: dict[str, dict[str, Any]] = {
+    "claude-code": {
+        "binary": "claude",
+        "background": True,
+        # One `claude` session per directory is not a constraint this host has.
+        "serialises_per_directory": False,
+    },
+    "codex": {
+        "binary": "codex",
+        "background": False,
+        # Measured: two `codex exec` runs started together in one directory both
+        # completed, with distinct thread ids.
+        "serialises_per_directory": False,
+    },
+    "opencode": {
+        "binary": "opencode",
+        "background": False,
+        # Measured: the second of two `opencode run` processes in one directory
+        # dies with `database is locked` and exit 1. The same pair in two
+        # directories both succeed, so the lock is the project's.
+        "serialises_per_directory": True,
+    },
+}
+
+#: The Codex sandbox a capability tier implies, independent of the repository's
+#: own floor. The launcher takes the narrower of the two, so a tier can never be
+#: the thing that widens a session.
+CODEX_TIER_SANDBOX: dict[str, str] = {
+    "reader": "read-only",
+    "verifier": "read-only",
+    "implementer": "workspace-write",
+}
+
+
+def codex_launch_sandbox(capability: str, floor: str | None = None) -> str:
+    """The sandbox mode a tier launches under in a repository with `floor`.
+
+    The narrower of the two, always. A repository that declares
+    `workspace-write` does not thereby promote a reader, and a reader tier does
+    not get to widen a repository that declares `read-only`. `floor` is the
+    installed `.codex/config.toml` value when there is one; absent, the tier
+    stands alone.
+    """
+    tier_mode = CODEX_TIER_SANDBOX[capability]
+    if not floor or floor not in CODEX_SANDBOX_RANK:
+        return tier_mode
+    if CODEX_SANDBOX_RANK[floor] < CODEX_SANDBOX_RANK[tier_mode]:
+        return floor
+    return tier_mode

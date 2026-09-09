@@ -23,6 +23,7 @@ from harness_capabilities import (  # noqa: E402  (sibling module, resolved abov
     AUTOCOMPACT_MAX_TOKENS,
     AUTOCOMPACT_MIN_TOKENS,
     CAPABILITY_TIERS,
+    CODEX_CONFIG_PATH,
     DEFAULT_CAPABILITY,
     MODEL_INHERIT,
     capability_grant_errors,
@@ -62,7 +63,6 @@ CODEX_SKILL_ROOT = ".agents/skills"
 #: default rather than a ceiling - `codex exec -s workspace-write` overrides it -
 #: and it is also the file a cloned repository could use to *widen* a sandbox, so
 #: `check_installed.py` reads it back rather than trusting what was rendered.
-CODEX_CONFIG_PATH = ".codex/config.toml"
 
 #: What an `opencode` host reads. Measured on OpenCode 1.18.29
 #: (`.ai/reports/0014-opencode-enforcement-surface.md`): a plugin under
@@ -179,7 +179,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "2.3.0"
+GENERATOR_VERSION = "2.4.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -2253,8 +2253,6 @@ def write_hook_scripts(payload: Path, profile: dict[str, Any]) -> list[Path]:
     return written
 
 
-
-
 def uses_codex(profile: dict[str, Any]) -> bool:
     return "codex" in hosts_of(profile)
 
@@ -2420,6 +2418,19 @@ def write_opencode_agents(payload: Path, profile: dict[str, Any]) -> list[Path]:
     `glob, grep, read, skill, task, todowrite, webfetch, websearch` - the tools
     are removed, not refused, which is this host's counterpart of
     `permissionMode: plan`.
+
+    Two fields carry a measurement of their own, from
+    `.ai/reports/0016-launcher-host-surface.md`:
+
+    `mode: all` rather than `subagent`, because `opencode run --agent <name>`
+    refuses a subagent-only agent by *warning on stderr and continuing under the
+    default agent*, exit 0. A tier the launcher cannot name is a tier the
+    launcher cannot bind.
+
+    `task: false`, because the permission block is per-agent and not
+    per-session. An agent denied `edit`, `write` and `bash` was measured calling
+    `task`, and its delegate wrote the file. On this host a read-only agent that
+    keeps delegation is not read-only.
     """
     if not uses_opencode(profile):
         return []
@@ -2444,11 +2455,13 @@ def write_opencode_agents(payload: Path, profile: dict[str, Any]) -> list[Path]:
         lines = [
             "---",
             f"description: {yaml_string(description)}",
-            "mode: subagent",
+            "mode: all",
             "permission:",
             "  edit: deny",
             "  write: deny",
             f"  bash: {bash}",
+            "tools:",
+            "  task: false",
             "---",
             "",
             strip_claude_launch_section(body),
@@ -2535,7 +2548,6 @@ def write_progress_ledger(payload: Path, profile: dict[str, Any]) -> Path | None
     target.parent.mkdir(parents=True, exist_ok=True)
     write_generated(target, json.dumps(ledger, indent=2, ensure_ascii=False) + "\n")
     return target
-
 
 
 def session_start_section(profile: dict[str, Any]) -> str:
@@ -2670,7 +2682,6 @@ def session_start_pointer(profile: dict[str, Any]) -> str:
         f"Writing a handoff, resuming one, and the rest of the ledger: the "
         f"`{SESSION_SKILL}` skill.",
     ])
-
 
 
 def write_workflows(payload: Path, profile: dict[str, Any]) -> list[Path]:

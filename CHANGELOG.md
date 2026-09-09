@@ -1,5 +1,67 @@
 # Changelog
 
+## 2.4.0 - One launcher, three vocabularies
+
+Measured first, in `.ai/reports/0016-launcher-host-surface.md`, which closes
+`.ai/decisions/0005-host-portability.md`. The flags that decision named all exist; two
+of the behaviours it assumed do not, and one of them was a defect already shipped in
+2.2.0.
+
+### Added
+
+- **`harness_session.py launch --host {claude-code,codex,opencode}`.** The tier is
+  translated into the host's own vocabulary from the shared table:
+  `codex exec --json --sandbox <mode>`, and
+  `opencode run --format json --agent <name>`. `claude-code` stays the default and its
+  printed command is unchanged.
+- **The repository's own sandbox floor narrows a Codex launch, and never widens one.**
+  `codex_launch_sandbox` takes the narrower of the tier's mode and whatever
+  `.codex/config.toml` declares, so a repository that hands out `danger-full-access`
+  does not thereby promote a reader, and a reader does not get to reopen a repository
+  that declares `read-only`.
+- **An OpenCode preflight, because that host fails open.** Measured:
+  `opencode run --agent <name>` prints a warning to stderr, falls back to the *default*
+  agent and exits 0 when the name does not resolve - and the probe that did so wrote a
+  file under a tier that had declared `write: deny`. The launcher now refuses before
+  spending a model call unless the agent file exists, is launchable, cannot delegate,
+  and has a Claude twin declaring the tier being claimed.
+- **The envelope records its host.** `trace.host` is one of the launchable hosts or
+  absent; it is set by the launcher, like the rest of the trace, and validated against
+  the host table rather than accepted as a string.
+- **An envelope from a Codex run.** `--exec --report --host codex` passes the bus
+  schema through `--output-schema` and builds the envelope from what comes back: the
+  session is the host's own `thread_id`, the token counts are its own `usage`, and
+  there is no cost field because Codex reports none.
+- **`codex_output_schema()`**, the bus schema restated in the dialect that flag takes.
+  It routes into strict structured outputs, which rejected the bus schema by name -
+  `In context=('properties', 'body'), 'additionalProperties' is required to be supplied
+  and to be false`. Strict mode cannot express an open object at all, so `body` travels
+  as labelled parts and `codex_envelope_body` folds them back into the object the bus
+  stores.
+- **The Claude-only flags are refused by name on another host** - `--background`,
+  `--restricted`, `--worktree`, `--scope`, `--session-id`, and `--surface orca` - each
+  with the measured reason. Neither other binary has a background mode, so
+  `--background` there would silently be a foreground run.
+- **The concurrency rule, measured rather than asserted.** Two `opencode run`
+  processes in one directory collide: the second dies with `database is locked` and
+  exit 1. The same pair in two directories both succeed, and two `codex exec` runs in
+  one directory are fine. The launcher says so when it sees that failure, and the host
+  table records which hosts serialise.
+
+### Fixed
+
+- **The OpenCode agent files could not carry a tier, and could write through a
+  delegate.** They were rendered `mode: subagent`, which `opencode run --agent` refuses
+  by falling back to the default agent; and their permission block does not reach what
+  they delegate to - an agent denied `edit`, `write` and `bash` called `task`, and its
+  delegate wrote the file. They are now `mode: all` with `tools: { task: false }`, and
+  the validator refuses either one missing.
+
+### Changed
+
+- **`CODEX_CONFIG_PATH` is defined once**, in the shared capability table, instead of
+  three times in three scripts.
+
 ## 2.3.0 - The one thing Codex lets a repository enforce
 
 Measured first, in `.ai/reports/0015-codex-enforcement-surface.md`, which is the

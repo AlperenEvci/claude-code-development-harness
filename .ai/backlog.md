@@ -502,9 +502,39 @@ called done: the read-only floor denied a write at the operating system with the
 absent afterwards, and the workspace-write floor allowed the write inside the workspace
 while the network request failed.
 
-### Module 11 - launcher host table (2.4.0)
+### Module 11 - launcher host table (2.4.0) - DONE, pending CI
 
-### Module 11 - launcher host table (2.4.0)
+Shipped on branch `module-11-launcher-hosts`. Measured first in
+`.ai/reports/0016-launcher-host-surface.md`: thirteen probes against Codex CLI 0.153.4
+and OpenCode 1.18.29. Every flag decision 0005 section 7 named exists; two of the
+behaviours it assumed do not, and one of those was a defect already shipped in 2.2.0.
+
+- `launch --host {claude-code,codex,opencode}`, default unchanged. The tier becomes
+  `codex exec --json --sandbox <mode>` or
+  `opencode run --format json --agent <name>`, from the shared table.
+- The Codex sandbox is the narrower of the tier's mode and the repository's own
+  `.codex/config.toml`. Neither side can widen the other.
+- An OpenCode preflight, because that host fails open: `opencode run --agent` warns on
+  stderr, falls back to the *default* agent and exits 0 for a name it cannot resolve,
+  and the probe that hit that path wrote a file under `write: deny`.
+- **A 2.2.0 defect fixed.** The rendered OpenCode agents were `mode: subagent`, which
+  cannot be a `run --agent` target, and kept `task` - and an agent's permission block
+  does not reach what it delegates to: one denied `edit`, `write` and `bash` called
+  `task`, and its delegate wrote the file. Now `mode: all` with `tools: { task: false }`,
+  refused by the validator if either is missing.
+- `trace.host` on the envelope, validated against the host table. A Codex run can
+  produce an envelope through `--output-schema`; OpenCode cannot, and `--report` there
+  is refused rather than assembled from prose.
+- `codex_output_schema()`: the bus schema restated for strict structured outputs, which
+  rejected the bus schema by name. `body` travels as labelled parts and is folded back.
+- The concurrency rule is measured: two `opencode run` in one directory collide with
+  `database is locked`; the same pair in two directories do not; two `codex exec` in one
+  directory are fine.
+- `CODEX_CONFIG_PATH` now has one definition instead of three.
+
+Verified end to end against a real `codex exec`: a `--host codex --exec --report` run
+wrote a valid bus envelope carrying the host's own thread id, its own token counts,
+`host: codex`, and no cost field.
 
 ## Harness v1.0 — four-phase upgrade
 
