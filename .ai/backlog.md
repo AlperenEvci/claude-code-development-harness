@@ -435,7 +435,7 @@ implying it can.
 - `check_installed.py` reports each guarantee per declared host as present, absent, or
   unmeasured.
 
-### Module 9 - OpenCode guard and permission floor (2.2.0) - DONE, pending CI
+### Module 9 - OpenCode guard and permission floor (2.2.0) - DONE, CI-confirmed
 
 Shipped on branch `module-9-opencode-guard`. Measured first, in
 `.ai/reports/0014-opencode-enforcement-surface.md`: a throw inside a plugin's
