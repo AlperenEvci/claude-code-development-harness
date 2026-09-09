@@ -1,7 +1,9 @@
 # Decision 0005: Host portability - one harness, three hosts
 
 Date: 2026-09-07
-Status: accepted (2026-09-09)
+Status: accepted (2026-09-09), delivered (2026-09-09) in 2.1.0-2.4.0
+Amended twice on measurement: section 6 (Codex agent files, dropped) and
+section 7 (the OpenCode launch target, corrected).
 
 ## Context
 
