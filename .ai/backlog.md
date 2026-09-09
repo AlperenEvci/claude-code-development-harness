@@ -408,7 +408,7 @@ No table of capabilities written from documentation.
 **Delivery.** Decision 0005 is accepted; the four modules below are the unit of work,
 one feature branch and one minor release each, CI-confirmed between them.
 
-### Module 8 - hosts, the portable contract, and Codex skills (2.1.0) - DONE, CI pending
+### Module 8 - hosts, the portable contract, and Codex skills (2.1.0) - DONE, CI-confirmed
 
 Shipped on branch `module-8-hosts`. Measured first, in
 `.ai/reports/0013-skill-frontmatter-across-hosts.md`: both other hosts list and load a
