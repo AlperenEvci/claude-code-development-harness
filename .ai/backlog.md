@@ -502,9 +502,10 @@ called done: the read-only floor denied a write at the operating system with the
 absent afterwards, and the workspace-write floor allowed the write inside the workspace
 while the network request failed.
 
-### Module 11 - launcher host table (2.4.0) - DONE, pending CI
+### Module 11 - launcher host table (2.4.0) - DONE, CI-confirmed
 
-Shipped on branch `module-11-launcher-hosts`. Measured first in
+Shipped as PR #12, merged to main; both CI legs green on ubuntu-latest and
+windows-latest. This closes decision 0005. Measured first in
 `.ai/reports/0016-launcher-host-surface.md`: thirteen probes against Codex CLI 0.153.4
 and OpenCode 1.18.29. Every flag decision 0005 section 7 named exists; two of the
 behaviours it assumed do not, and one of those was a defect already shipped in 2.2.0.
