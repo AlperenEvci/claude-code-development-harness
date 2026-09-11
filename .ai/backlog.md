@@ -339,14 +339,8 @@ supervisor or desktop shell, settings.json merging, and any hook that returns `a
 
 ## After 2.0 - host portability (Claude Code, Codex, OpenCode)
 
-**Status:** measured on 2026-09-07 (`.ai/reports/0012-host-portability-smoke-test.md`),
-extended on 2026-09-09 by `0013-skill-frontmatter-across-hosts.md` and
-`0014-opencode-enforcement-surface.md`; design accepted in
-`.ai/decisions/0005-host-portability.md` on 2026-09-09 and in delivery. Module plan:
-2.1.0 `hosts` field and portable contract (shipped); 2.2.0 OpenCode guard and
-permission floor (shipped); 2.3.0 Codex sandbox floor and forbidden flags (shipped,
-and the agent-file half was dropped on measurement); 2.4.0 launcher host table. The
-measured answers to (a)-(f) are in the reports.
+**Status:** accepted as direction, not scheduled. Nothing here starts before 2.0.0
+ships. Recorded now so the 2.0 modules do not quietly make it harder.
 
 **Goal:** one rendered harness that Claude Code, Codex, and OpenCode each pick up
 correctly, rather than one harness that works fully in Claude Code and partially
@@ -407,135 +401,7 @@ No table of capabilities written from documentation.
   launcher? The launcher is the only script with a hard CLI binding, so it is the
   whole cost.
 
-**Delivery.** Decision 0005 is accepted; the four modules below are the unit of work,
-one feature branch and one minor release each, CI-confirmed between them.
-
-### Module 8 - hosts, the portable contract, and Codex skills (2.1.0) - DONE, CI-confirmed
-
-Shipped on branch `module-8-hosts`. Measured first, in
-`.ai/reports/0013-skill-frontmatter-across-hosts.md`: both other hosts list and load a
-skill carrying Claude Code's frontmatter, neither enforces `disable-model-invocation`,
-and OpenCode reads `.agents/skills/` as well as `.claude/skills/` and dedupes by name,
-so byte-identical copies do not double either catalog. Suite 375 tests, 15 of 15
-mutations caught - one survived the first pass, the validator's absent-mirror branch,
-and the test that pins it was written before the release shipped.
-
-What did not change, deliberately: no host gets its own template layer, no host gets a
-second package, and no guarantee moved from a mechanism into prose. The absences on
-Codex and OpenCode are reported per host by `check_installed.py`, which is the whole
-point of the release - the harness now says what it cannot do somewhere rather than
-implying it can.
-
-- Profile gains `hosts` (array, default `["claude-code"]`, values `claude-code`,
-  `codex`, `opencode`), optional and defaulted so every existing profile renders
-  what 2.0.0 rendered.
-- The host-neutral half of `CLAUDE.md` moves into `AGENTS.md`, which every host reads;
-  `CLAUDE.md` keeps `@AGENTS.md` and what is Claude Code's alone.
-- A `codex` host gets byte-identical copies of every generated skill under
-  `.agents/skills/`, manifest-hashed and validated the way the runtime copies are.
-- `check_installed.py` reports each guarantee per declared host as present, absent, or
-  unmeasured.
-
-### Module 9 - OpenCode guard and permission floor (2.2.0) - DONE, CI-confirmed
-
-Shipped on branch `module-9-opencode-guard`. Measured first, in
-`.ai/reports/0014-opencode-enforcement-surface.md`: a throw inside a plugin's
-`tool.execute.before` is a real deny for `read`, `write`, `edit`, and `bash`, reaches
-the model verbatim, and fires for a subagent's calls too; the plugin sees the
-operator's environment, so `HARNESS_HOOKS_DISABLE=1` is the same escape hatch; a
-whole-tool permission in `opencode.json` is enforced by removing the tool from the
-model's toolset, and an agent file's permission block does the same for one agent; a
-per-command table under `bash` enforces nothing under `opencode run` in either shape
-tried; and a plugin that throws while loading leaves the CLI with no session at all.
-
-- `.opencode/plugins/harness-guard.js`: the JavaScript port of `hook_guard.py`, copied
-  byte-identically, rendered only for an `opencode` host with `hooks_policy: guarded`,
-  deny-only, failing open on any internal defect and doing nothing at module scope.
-- `opencode.json`: a whole-tool permission floor derived from `autonomy` and
-  `network_access`. No per-command table is ever generated, and one that appears by
-  hand is a validator error and a checker warning.
-- `.opencode/agents/*.md`: every `reader` and `verifier` agent, translated with a
-  permission block that removes the tools it may not use. An `implementer` is not
-  translated - its boundary is a worktree only the Claude Code launcher enforces.
-- `check_installed.py` now reports the guard and the read-only agent catalog as present
-  on OpenCode when they are installed, and errors when an installed agent loses the
-  line that makes it read-only or the guard loses its escape hatch.
-
-The guard was exercised against a real `opencode run` before it was wired into the
-renderer: a `.env` read, `git commit` under a `no-commit` policy, and `git push` were
-each refused with the reason quoted back by the model, and a control command ran.
-
-### Module 10 - Codex sandbox floor and forbidden flags (2.3.0) - DONE, CI-confirmed
-
-Shipped as PR #11, merged to main; both CI legs green on ubuntu-latest and
-windows-latest. The module was designed on paper as
-`.codex/agents/*.toml` read-only agents; the measurement in
-`.ai/reports/0015-codex-enforcement-surface.md` contradicted that and the release is
-what survived. On Codex CLI 0.153.4: that path is not read at all, and the roles
-Codex does have live in `[agents.<name>]` in configuration, where a declared name is
-validated by `spawn_agent` but the role's `instructions` never reach the agent and its
-`sandbox_mode` binds nothing in either direction - a role declaring `read-only` wrote a
-file under a `workspace-write` parent, and one declaring `workspace-write` was still
-refused under a `read-only` parent. What is real is the session sandbox, and a project
-`.codex/config.toml` sets it with no command-line flag and no trust prompt.
-
-- `.codex/config.toml`: `sandbox_mode` from `autonomy`, and
-  `[sandbox_workspace_write] network_access` from `network_access` where that mode
-  applies. A `read-only` floor made a shell write fail with an operating-system access
-  error; the network switch was measured as a pair, "cannot reach the remote server"
-  with `false` and `200` with `true`. Documented as a default rather than a ceiling:
-  `codex exec -s workspace-write` overrides it.
-- The widening direction is checked, not assumed. A project config declaring
-  `danger-full-access` removed the sandbox with no prompt, so `check_installed.py`
-  reads the installed file back and reports a floor wider than the profile as an error,
-  and the validator refuses a rendered one that disagrees with the profile.
-- No agent file and no role table for Codex, and the guarantee table now says why
-  rather than "not yet rendered".
-- `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`, and
-  OpenCode's `--auto` join `FORBIDDEN_LAUNCH_FLAGS` and both guards. `--auto` is
-  matched with a boundary so `--autocompact` still passes.
-- Codex hooks stay absent: a project `.codex/hooks.json` on `PreToolUse` and
-  `SessionStart` was never invoked, reproducing report 0012 on the same binary.
-
-The rendered floors were exercised against a real `codex exec` before the module was
-called done: the read-only floor denied a write at the operating system with the file
-absent afterwards, and the workspace-write floor allowed the write inside the workspace
-while the network request failed.
-
-### Module 11 - launcher host table (2.4.0) - DONE, CI-confirmed
-
-Shipped as PR #12, merged to main; both CI legs green on ubuntu-latest and
-windows-latest. This closes decision 0005. Measured first in
-`.ai/reports/0016-launcher-host-surface.md`: thirteen probes against Codex CLI 0.153.4
-and OpenCode 1.18.29. Every flag decision 0005 section 7 named exists; two of the
-behaviours it assumed do not, and one of those was a defect already shipped in 2.2.0.
-
-- `launch --host {claude-code,codex,opencode}`, default unchanged. The tier becomes
-  `codex exec --json --sandbox <mode>` or
-  `opencode run --format json --agent <name>`, from the shared table.
-- The Codex sandbox is the narrower of the tier's mode and the repository's own
-  `.codex/config.toml`. Neither side can widen the other.
-- An OpenCode preflight, because that host fails open: `opencode run --agent` warns on
-  stderr, falls back to the *default* agent and exits 0 for a name it cannot resolve,
-  and the probe that hit that path wrote a file under `write: deny`.
-- **A 2.2.0 defect fixed.** The rendered OpenCode agents were `mode: subagent`, which
-  cannot be a `run --agent` target, and kept `task` - and an agent's permission block
-  does not reach what it delegates to: one denied `edit`, `write` and `bash` called
-  `task`, and its delegate wrote the file. Now `mode: all` with `tools: { task: false }`,
-  refused by the validator if either is missing.
-- `trace.host` on the envelope, validated against the host table. A Codex run can
-  produce an envelope through `--output-schema`; OpenCode cannot, and `--report` there
-  is refused rather than assembled from prose.
-- `codex_output_schema()`: the bus schema restated for strict structured outputs, which
-  rejected the bus schema by name. `body` travels as labelled parts and is folded back.
-- The concurrency rule is measured: two `opencode run` in one directory collide with
-  `database is locked`; the same pair in two directories do not; two `codex exec` in one
-  directory are fine.
-- `CODEX_CONFIG_PATH` now has one definition instead of three.
-
-Verified end to end against a real `codex exec`: a `--host codex --exec --report` run
-wrote a valid bus envelope carrying the host's own thread id, its own token counts,
-`host: codex`, and no cost field.
+**Blocked on:** 2.0.0 shipped and CI-confirmed. Revisit the moment module 7 closes.
 
 ## Harness v1.0 — four-phase upgrade
 

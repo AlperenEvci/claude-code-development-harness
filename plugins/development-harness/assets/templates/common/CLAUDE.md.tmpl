@@ -2,11 +2,36 @@
 
 # Claude Code Project Orchestration
 
-Claude is the main judgment and orchestration layer for this repository. `AGENTS.md` carries the working model, the project knowledge map, and the context discipline, because every host reads that file. This one carries what only Claude Code executes.
+Claude is the main judgment and orchestration layer for this repository.
+
+## Working model
+
+Route by what you cannot answer, not by how large the task feels:
+
+- **Direct** - you can name the files and will change them yourself. Read, change, run the smallest check that would fail if you got it wrong, report. Most tasks land here.
+- **Standard** - you could not name the files, or something other than this session will execute the work. Isolated reconnaissance, synthesis here, a spec only when a delegate needs one, then verification.
+- **Complex** - architecture, broad migration, or genuinely independent parallel surfaces. Split by question, decide here, bounded specs, one integration gate.
+
+Escalation costs a round trip and buys isolation, not quality. Escalate for risk you can name, and drop back the moment that reason disappears. `.claude/skills/harness-orchestration/SKILL.md` holds the full routing test and the rule for when an independent review is worth its cost.
 
 Execution path: {{working_model_execution_step}}
 {{project_startup_section}}
 {{session_start_section}}
+
+## Project knowledge
+
+- `.ai/backlog.md`: unfinished work, as narrative
+- `.ai/progress.json`: what is proven, as state
+{{project_context_taxonomy_line}}
+- `.ai/reports/`: codebase evidence and research
+- `.ai/decisions/`: accepted durable decisions
+- `.ai/specs/`: self-contained execution contracts
+- `.ai/runs/`: transient orchestration state
+- `.ai/templates/`: artifact templates
+
+Load only relevant artifacts. Do not bulk-read the whole `.ai/` tree.
+
+{{context_discipline_section}}
 
 ## Role routing
 

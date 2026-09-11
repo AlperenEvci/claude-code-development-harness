@@ -23,11 +23,9 @@ from harness_capabilities import (  # noqa: E402  (sibling module, resolved abov
     AUTOCOMPACT_MAX_TOKENS,
     AUTOCOMPACT_MIN_TOKENS,
     CAPABILITY_TIERS,
-    CODEX_CONFIG_PATH,
     DEFAULT_CAPABILITY,
     MODEL_INHERIT,
     capability_grant_errors,
-    codex_sandbox_floor,
     launch_command,
 )
 from harness_graph import (  # noqa: E402  (sibling module, resolved above)
@@ -41,66 +39,6 @@ ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
 ALLOWED_MODES = {"create", "adopt", "upgrade"}
 ALLOWED_DELEGATES = {"codex-plugin", "codex-cli", "claude-only"}
 ALLOWED_ORCHESTRATORS = {"claude-code"}
-
-#: Who may open a session in the generated repository, in rendering order.
-#: This is not `implementation_delegate`, which answers who executes an
-#: accepted contract; decision 0005 keeps the two apart because conflating
-#: them is how the Fleet/`codex-cli` coupling happened. Measured behaviour
-#: per host is in `.ai/reports/0012` and `0013` of the plugin repository.
-ALLOWED_HOSTS = ("claude-code", "codex", "opencode")
-
-#: A profile that names no host renders exactly what 2.0.0 rendered.
-DEFAULT_HOSTS = ("claude-code",)
-
-#: Codex reads `.agents/skills/` and nothing else; OpenCode reads both that
-#: path and `.claude/skills/`. So the mirror is rendered for a Codex host
-#: and no other, and it is byte-identical rather than re-rendered.
-CODEX_SKILL_ROOT = ".agents/skills"
-#: The one thing a Codex host lets a repository enforce, measured on Codex CLI
-#: 0.153.4 (`.ai/reports/0015-codex-enforcement-surface.md`): a project-level
-#: `.codex/config.toml` sets the session sandbox with no command-line flag and no
-#: trust prompt, and the sandbox is enforced by the operating system. It is a
-#: default rather than a ceiling - `codex exec -s workspace-write` overrides it -
-#: and it is also the file a cloned repository could use to *widen* a sandbox, so
-#: `check_installed.py` reads it back rather than trusting what was rendered.
-
-#: What an `opencode` host reads. Measured on OpenCode 1.18.29
-#: (`.ai/reports/0014-opencode-enforcement-surface.md`): a plugin under
-#: `.opencode/plugins/` is auto-discovered, a throw in its `tool.execute.before`
-#: is a real deny for every tool tried and for a subagent's calls too, and a
-#: whole-tool permission in `opencode.json` is enforced by removing the tool
-#: from the model's toolset rather than by refusing the call.
-OPENCODE_PLUGIN_ROOT = ".opencode/plugins"
-OPENCODE_PLUGIN_NAME = "harness-guard.js"
-OPENCODE_AGENT_ROOT = ".opencode/agents"
-OPENCODE_CONFIG_PATH = "opencode.json"
-
-#: The capabilities that translate to an OpenCode agent. An `implementer` does
-#: not: its boundary is a worktree and an `--add-dir` scope that `harness_session.py`
-#: passes to `claude`, and there is nothing on OpenCode that enforces the same
-#: thing. Rendering one anyway would turn a process-enforced scope into a
-#: sentence, so the checker reports it as absent instead.
-OPENCODE_READ_ONLY_CAPABILITIES = ("reader", "verifier")
-
-#: The permission floor, by autonomy. Only whole-tool values: a per-command
-#: allowlist under `bash` was measured and does not enforce under `opencode run`,
-#: so generating one would be prose wearing a mechanism's clothes. `edit`
-#: governs the `write` tool as well, measured. `ask` auto-rejects with a message
-#: in a non-interactive run and prompts in the TUI, so it never silently allows.
-OPENCODE_AUTONOMY_PERMISSIONS = {
-    "read-only": {"edit": "deny", "bash": "deny"},
-    "approval-required": {"edit": "ask", "bash": "ask"},
-    "repository-write-with-approval": {"edit": "allow", "bash": "ask"},
-    "isolated-auto": {"edit": "allow", "bash": "allow"},
-}
-
-#: The same, for the two network tools, by the profile's network policy.
-OPENCODE_NETWORK_PERMISSIONS = {
-    "deny-by-default": {"webfetch": "deny", "websearch": "deny"},
-    "ask-before-network": {"webfetch": "ask", "websearch": "ask"},
-    "approved-for-scoped-tasks": {"webfetch": "allow", "websearch": "allow"},
-}
-
 #: Where `harness_session.py launch` puts a session. `inproc` is the default and
 #: is what every profile written before this field existed means. `orca` adds the
 #: Orca ADE as a launch surface: the same tier-enforced command, placed in a
@@ -179,7 +117,7 @@ DEFAULT_CONTEXT_ALWAYS = [
 MIN_BAND_TOKENS = 1000
 MAX_BAND_TOKENS = 2_000_000
 
-GENERATOR_VERSION = "2.4.0"
+GENERATOR_VERSION = "2.0.0"
 
 GENERATION_MARKER = ".development-harness-generated.json"
 
@@ -507,46 +445,6 @@ def normalize_context_policy(data: dict[str, Any]) -> None:
     }
 
 
-def normalize_hosts(value: Any) -> list[str]:
-    """Resolve the `hosts` field to a canonical, deduplicated list.
-
-    Absent means `["claude-code"]`: every profile written before 2.1.0 keeps
-    rendering what it rendered. `claude-code` is required rather than optional
-    because the package always contains the Claude Code layer - `CLAUDE.md`,
-    the agent catalog, the settings file - and a profile that dropped it would
-    describe a package that does not exist.
-    """
-    if value is None:
-        return list(DEFAULT_HOSTS)
-    if not isinstance(value, list):
-        fail("hosts must be an array of host names")
-    names: list[str] = []
-    for item in value:
-        name = str(item).strip().lower()
-        if not name:
-            continue
-        if name not in ALLOWED_HOSTS:
-            fail(f"hosts must contain only {sorted(ALLOWED_HOSTS)}; got {name!r}")
-        if name not in names:
-            names.append(name)
-    if not names:
-        fail("hosts must name at least one host")
-    if "claude-code" not in names:
-        fail(
-            "hosts must include claude-code: the package always renders the "
-            "Claude Code layer, and a profile that omits it would describe a "
-            "package the renderer does not produce"
-        )
-    return [name for name in ALLOWED_HOSTS if name in names]
-
-
-def hosts_of(profile: dict[str, Any]) -> list[str]:
-    value = profile.get("hosts")
-    if isinstance(value, list) and value:
-        return [str(item).strip().lower() for item in value]
-    return list(DEFAULT_HOSTS)
-
-
 def load_profile(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -577,8 +475,6 @@ def load_profile(path: Path) -> dict[str, Any]:
             "Greenfield create mode cannot start at Fleet tier. Establish a working "
             "baseline and reliable gates, then upgrade deliberately."
         )
-
-    data["hosts"] = normalize_hosts(data.get("hosts"))
 
     orchestrator = str(data.get("main_orchestrator", "")).lower()
     if orchestrator not in ALLOWED_ORCHESTRATORS:
@@ -1423,24 +1319,6 @@ def agent_sessions_pointer(profile: dict[str, Any]) -> str:
     ])
 
 
-def orchestration_skill_pointer(profile: dict[str, Any]) -> str:
-    """Name the routing skill and every path a declared host reads it from.
-
-    `AGENTS.md` is read by all three hosts, so a bare `.claude/skills/...`
-    reference in it would be a dead path on Codex, which reads `.agents/skills/`
-    and nothing else (`.ai/reports/0012`).
-    """
-    paths = [".claude/skills/harness-orchestration/SKILL.md"]
-    if "codex" in hosts_of(profile):
-        paths.append(".agents/skills/harness-orchestration/SKILL.md")
-    return (
-        "The `harness-orchestration` skill holds the full routing test and the "
-        "rule for when an independent review is worth its cost: "
-        + " and ".join(f"`{path}`" for path in paths)
-        + "."
-    )
-
-
 def context_discipline_section(profile: dict[str, Any]) -> str:
     """Claude-specific routing: what leaves the main session."""
     policy = context_policy_of(profile)
@@ -1509,7 +1387,6 @@ def computed_context(profile: dict[str, Any]) -> dict[str, str]:
         "context_budget_section": context_budget_section(profile),
         "session_start_section": session_start_pointer(profile),
         "context_discipline_section": context_discipline_section(profile),
-        "orchestration_skill_pointer": orchestration_skill_pointer(profile),
         "agent_sessions_section": agent_sessions_pointer(profile),
         "context_working_band": context_working_band(profile),
         "workflows_markdown": workflows_markdown(profile),
@@ -2253,253 +2130,6 @@ def write_hook_scripts(payload: Path, profile: dict[str, Any]) -> list[Path]:
     return written
 
 
-def uses_codex(profile: dict[str, Any]) -> bool:
-    return "codex" in hosts_of(profile)
-
-
-def write_codex_config(payload: Path, profile: dict[str, Any]) -> Path | None:
-    """Render `.codex/config.toml`: the sandbox floor, and nothing else.
-
-    What is deliberately absent is as considered as what is here. No
-    `approval_policy`, because it is not observable under `codex exec`. No
-    `[agents.<name>]` role table: a role's `sandbox_mode` was measured to bind
-    nothing in either direction, and its `instructions` never reached the agent
-    it named, so rendering the read-only half of the catalog here would read
-    exactly like the guarantee Claude Code gives and would give none of it.
-    """
-    if not uses_codex(profile):
-        return None
-    floor = codex_sandbox_floor(profile)
-    if not floor:
-        return None
-    lines = [
-        "# Generated by the Development Harness. Edit the project profile and",
-        "# re-render rather than editing this file.",
-        "#",
-        "# This is the sandbox a `codex` session starts in when the operator does",
-        "# not pass `-s` themselves. It is enforced by the operating system, and",
-        "# it is a default rather than a ceiling: `codex exec -s workspace-write`",
-        "# overrides it. Raising it here widens every session in this repository.",
-        "",
-        f'sandbox_mode = "{floor["sandbox_mode"]}"',
-    ]
-    if "network_access" in floor:
-        lines += [
-            "",
-            "[sandbox_workspace_write]",
-            f"network_access = {'true' if floor['network_access'] else 'false'}",
-        ]
-    target = payload / CODEX_CONFIG_PATH
-    target.parent.mkdir(parents=True, exist_ok=True)
-    write_generated(target, "\n".join(lines) + "\n")
-    return target
-
-
-def uses_opencode(profile: dict[str, Any]) -> bool:
-    return "opencode" in hosts_of(profile)
-
-
-def opencode_permission_floor(profile: dict[str, Any]) -> dict[str, str]:
-    """The whole-tool permissions this profile's declared policy implies.
-
-    Derived from the two fields that already state the policy in prose, so the
-    floor cannot disagree with the contract it ships beside.
-    """
-    floor: dict[str, str] = {}
-    floor.update(OPENCODE_AUTONOMY_PERMISSIONS.get(str(profile.get("autonomy", "")), {}))
-    floor.update(
-        OPENCODE_NETWORK_PERMISSIONS.get(str(profile.get("network_access", "")), {})
-    )
-    return floor
-
-
-def write_opencode_config(payload: Path, profile: dict[str, Any]) -> Path | None:
-    """Render `opencode.json`: the permission floor, and nothing else.
-
-    Deliberately minimal. Anything this file says that OpenCode does not enforce
-    would be a claim the harness cannot keep, and the release's rule is that a
-    guarantee a host cannot fire is reported as absent rather than restated.
-    """
-    if not uses_opencode(profile):
-        return None
-    floor = opencode_permission_floor(profile)
-    if not floor:
-        return None
-    target = payload / OPENCODE_CONFIG_PATH
-    data = {
-        "$schema": "https://opencode.ai/config.json",
-        "permission": floor,
-    }
-    write_generated(target, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    return target
-
-
-def write_opencode_guard(payload: Path, profile: dict[str, Any]) -> Path | None:
-    """Copy the OpenCode guard plugin, on the terms the hook scripts get.
-
-    Byte-identical for the same reason, and for one more that is specific to
-    this host: a plugin whose module body throws leaves `opencode run` with no
-    session at all. A per-project variant of this file would be an untested way
-    to take someone's CLI offline, so there is exactly one copy and the
-    validator compares it byte for byte.
-    """
-    if not uses_opencode(profile) or not hooks_are_active(profile):
-        return None
-    source = Path(__file__).resolve().parents[1] / "assets" / "opencode" / OPENCODE_PLUGIN_NAME
-    if not source.is_file():
-        fail(f"OpenCode guard plugin missing from the plugin: {OPENCODE_PLUGIN_NAME}")
-    target = payload / OPENCODE_PLUGIN_ROOT / OPENCODE_PLUGIN_NAME
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # Bytes, like the Codex skill mirror: a text round-trip on Windows would
-    # rewrite the line endings and break the identity check.
-    target.write_bytes(source.read_bytes())
-    return target
-
-
-def parse_agent_frontmatter(text: str) -> tuple[dict[str, str], str]:
-    """Split a rendered agent file into its scalar frontmatter and its body.
-
-    Only the scalar keys this translation needs. A list value (`tools:`) is
-    skipped rather than parsed: the OpenCode file states authority in its own
-    vocabulary, so nothing downstream needs Claude Code's.
-    """
-    if not text.startswith("---\n"):
-        return {}, text
-    end = text.find("\n---\n", 3)
-    if end == -1:
-        return {}, text
-    head = text[4:end]
-    body = text[end + 5 :]
-    fields: dict[str, str] = {}
-    for line in head.splitlines():
-        if not line or line.startswith((" ", "-", "\t")):
-            continue
-        key, sep, value = line.partition(":")
-        if not sep:
-            continue
-        value = value.strip()
-        if value.startswith('"') and value.endswith('"') and len(value) > 1:
-            value = json.loads(value)
-        fields[key.strip()] = value
-    return fields, body
-
-
-def strip_claude_launch_section(body: str) -> str:
-    """Drop the `## Session launch` block: those flags are Claude Code's.
-
-    The rest of the body is the agent's mission and boundaries, which are the
-    same work whichever host opens the repository.
-    """
-    lines = body.splitlines()
-    kept: list[str] = []
-    skipping = False
-    for line in lines:
-        if line.startswith("## Session launch"):
-            skipping = True
-            continue
-        if skipping:
-            if line.startswith("## "):
-                skipping = False
-            else:
-                continue
-        kept.append(line)
-    return "\n".join(kept).strip() + "\n"
-
-
-def write_opencode_agents(payload: Path, profile: dict[str, Any]) -> list[Path]:
-    """Translate every read-only Claude agent into an OpenCode agent file.
-
-    Read back from the payload rather than re-derived from the profile, so the
-    two catalogs cannot drift: an agent that exists for Claude Code exists here
-    with the same description and the same mission, or it does not exist at all.
-
-    The permission block is the enforcement. Measured on 1.18.29: an agent
-    declaring `edit: deny` and `bash: deny` reported its available tools as
-    `glob, grep, read, skill, task, todowrite, webfetch, websearch` - the tools
-    are removed, not refused, which is this host's counterpart of
-    `permissionMode: plan`.
-
-    Two fields carry a measurement of their own, from
-    `.ai/reports/0016-launcher-host-surface.md`:
-
-    `mode: all` rather than `subagent`, because `opencode run --agent <name>`
-    refuses a subagent-only agent by *warning on stderr and continuing under the
-    default agent*, exit 0. A tier the launcher cannot name is a tier the
-    launcher cannot bind.
-
-    `task: false`, because the permission block is per-agent and not
-    per-session. An agent denied `edit`, `write` and `bash` was measured calling
-    `task`, and its delegate wrote the file. On this host a read-only agent that
-    keeps delegation is not read-only.
-    """
-    if not uses_opencode(profile):
-        return []
-    source_root = payload / ".claude" / "agents"
-    if not source_root.is_dir():
-        return []
-
-    written: list[Path] = []
-    for source in sorted(source_root.glob("*.md")):
-        fields, body = parse_agent_frontmatter(source.read_text(encoding="utf-8"))
-        capability = fields.get("capability", "")
-        if capability not in OPENCODE_READ_ONLY_CAPABILITIES:
-            continue
-        name = fields.get("name") or source.stem
-        description = fields.get("description", "").strip()
-        if not description:
-            continue
-        tier = CAPABILITY_TIERS[capability]
-        # A verifier runs the gates, so it keeps `bash`; a reader has no reason
-        # to run a command and OpenCode can take the tool away entirely.
-        bash = "allow" if "Bash" in tier["tools"] else "deny"
-        lines = [
-            "---",
-            f"description: {yaml_string(description)}",
-            "mode: all",
-            "permission:",
-            "  edit: deny",
-            "  write: deny",
-            f"  bash: {bash}",
-            "tools:",
-            "  task: false",
-            "---",
-            "",
-            strip_claude_launch_section(body),
-        ]
-        target = payload / OPENCODE_AGENT_ROOT / f"{name}.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        write_generated(target, "\n".join(lines))
-        written.append(target)
-    return written
-
-
-def mirror_skills_for_codex(payload: Path, profile: dict[str, Any]) -> list[Path]:
-    """Copy every generated skill to the path a Codex host reads.
-
-    Byte-identical, like the runtime scripts in `scripts/ai-harness`, and for
-    the same reason: a second rendering is a second variant nothing tests.
-    Measured on 2026-09-09 (`.ai/reports/0013`): both other hosts parse Claude
-    Code's frontmatter unchanged, and OpenCode - which reads both paths -
-    dedupes by skill name, so a repository declaring `claude-code` and `codex`
-    does not show a doubled catalog.
-    """
-    if "codex" not in hosts_of(profile):
-        return []
-    source_root = payload / ".claude" / "skills"
-    if not source_root.is_dir():
-        return []
-    target_root = payload / ".agents" / "skills"
-    written: list[Path] = []
-    for source in sorted(source_root.rglob("*")):
-        if not source.is_file():
-            continue
-        target = target_root / source.relative_to(source_root)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Bytes, not text: the source was written with LF by `write_generated`,
-        # and a text round-trip on Windows would break the identity check.
-        target.write_bytes(source.read_bytes())
-        written.append(target)
-    return written
 
 
 def write_progress_ledger(payload: Path, profile: dict[str, Any]) -> Path | None:
@@ -2548,6 +2178,7 @@ def write_progress_ledger(payload: Path, profile: dict[str, Any]) -> Path | None
     target.parent.mkdir(parents=True, exist_ok=True)
     write_generated(target, json.dumps(ledger, indent=2, ensure_ascii=False) + "\n")
     return target
+
 
 
 def session_start_section(profile: dict[str, Any]) -> str:
@@ -2682,6 +2313,7 @@ def session_start_pointer(profile: dict[str, Any]) -> str:
         f"Writing a handoff, resuming one, and the rest of the ledger: the "
         f"`{SESSION_SKILL}` skill.",
     ])
+
 
 
 def write_workflows(payload: Path, profile: dict[str, Any]) -> list[Path]:
@@ -3107,16 +2739,9 @@ def main() -> None:
     write_session_tools(payload, profile)
     write_hook_scripts(payload, profile)
     wire_command_hooks(payload, profile)
-    write_opencode_guard(payload, profile)
-    write_opencode_config(payload, profile)
-    write_opencode_agents(payload, profile)
-    write_codex_config(payload, profile)
     write_progress_ledger(payload, profile)
     write_keep_files(payload)
     write_run_ignore(payload, bool(profile.get("commit_ai_runs", False)))
-    # Last of the payload writers: it mirrors whatever the skill writers above
-    # produced, so anything added later must be written before this line.
-    mirror_skills_for_codex(payload, profile)
 
     profile_json = json.dumps(profile, indent=2, ensure_ascii=False) + "\n"
     write_generated(output / "project-profile.json", profile_json)

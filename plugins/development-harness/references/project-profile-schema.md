@@ -151,32 +151,6 @@ Create one normalized JSON object from project evidence plus the user's confirme
   - Create mode supports Lite or Standard only.
   - Fleet requires an established repository and cannot be selected during Create mode.
 - `main_orchestrator`: `claude-code`.
-- `hosts`: optional array, `claude-code` (default), `codex`, `opencode`.
-  Who may open a session in the repository. This is not
-  `implementation_delegate`, which answers who executes an accepted
-  contract; a Claude Code session delegating to Codex is one host, and a
-  repository somebody opens in Codex is two. Absent means
-  `["claude-code"]` and renders exactly what 2.0.0 rendered. The list
-  must include `claude-code`, because the package always contains that
-  layer. Declaring `codex` adds byte-identical copies of every generated
-  skill under `.agents/skills/`, which is the only skill path Codex
-  reads, and makes the 32 KiB Codex cap on the `AGENTS.md` hierarchy a
-  validator check. Since 2.3.0 it also writes `.codex/config.toml`, the
-  sandbox floor that host enforces: `sandbox_mode` from `autonomy`, and
-  `[sandbox_workspace_write] network_access` from `network_access` where
-  that mode applies. It is a default rather than a ceiling - a `-s` flag
-  overrides it - and because the same file can widen a sandbox as easily
-  as narrow one, `check_installed.py` reports an installed floor wider
-  than the profile as an error. No agent file is written for Codex: a
-  role's `sandbox_mode` was measured to bind nothing. Declaring `opencode` adds the three things that host
-  enforces: `.opencode/plugins/harness-guard.js` when the hooks policy is
-  `guarded`, a whole-tool permission floor in `opencode.json` derived
-  from `autonomy` and `network_access`, and a read-only agent under
-  `.opencode/agents/` for every generated `reader` or `verifier`. It
-  reads `AGENTS.md` and `.claude/skills/` as they are, so neither is
-  copied. What each host does and does not enforce is measured in
-  `.ai/reports/0012`, `0013`, and `0014` of the plugin repository, and
-  `check_installed.py` reports it per host.
 - `implementation_delegate`:
   - `codex-plugin` — use OpenAI's official Claude Code Codex plugin when installed and initialized,
   - `codex-cli` — direct local `codex exec`; required for Fleet in version 0.2,
@@ -275,15 +249,14 @@ before a window is full, so the ceiling is a trigger for action rather than a cl
   exits 3 at or over the ceiling. See `docs/runtime.md`.
   Defaults to `checkpoint-and-handoff`.
 - `isolate_when`: work that must leave the main session for an isolated agent.
-  Rendered into `AGENTS.md`.
+  Rendered into `CLAUDE.md`.
 - `always`: standing context rules. Rendered into `AGENTS.md`.
 
-`working_band` and `on_ceiling` render into the `## Context budget` section of `AGENTS.md`, and
-since 2.1.0 `isolate_when` renders into the `## Context discipline` section of the same file:
-what leaves the main session is a decision every host makes, and `AGENTS.md` is the only file
-all three of them load. `validate_harness.py` rejects a package whose `AGENTS.md` does not carry
-both sections and state the configured band, so the rendered contract cannot drift from the
-profile.
+`working_band` and `on_ceiling` render into the `## Context budget` section of `AGENTS.md`, which
+is the shared contract. `isolate_when` renders into the `## Context discipline` section of
+`CLAUDE.md`, which is Claude-specific routing. `validate_harness.py` rejects a package whose
+`AGENTS.md` or `CLAUDE.md` does not state the configured band, so the rendered contract cannot
+drift from the profile.
 
 ## Work graphs
 

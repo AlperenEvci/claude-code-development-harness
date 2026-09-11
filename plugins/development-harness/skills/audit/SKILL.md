@@ -88,24 +88,7 @@ Read:
 8. **Precedence** — generic names are not unintentionally shadowed.
 9. **Fleet readiness** — parallel writes require direct Codex CLI, independent ownership, worktrees, bounded concurrency, and a reliable integration gate in version 0.2.
 10. **Maintenance** — stale rules, duplication, dead artifacts, and oversized memory files are identified.
-11. **Host reach** — the per-host guarantee lines `check_installed.py` prints. A
-    harness declaring `codex` gets the contract and the skills there and none of the
-    hooks, the agent catalog, or the manual-only skill flag. One declaring `opencode`
-    also gets a guard plugin, a whole-tool permission floor, and read-only agents,
-    and still gets no stop check and no session-start brief. Report what is absent
-    where, exactly as the checker says it: the harness makes fewer promises on a
-    second host, and prose that hides the difference is the failure mode this section
-    exists to catch. Absence on a host is not a defect to fix; a claim that
-    contradicts it is. Two edits are worth naming when you see them: a per-command
-    table under `bash` in `opencode.json`, which is schema-valid and enforces nothing
-    under `opencode run`, and an OpenCode agent missing `edit: deny` or `write: deny`,
-    which is the line that makes it read-only on that host. On a `codex` host the
-    equivalent pair is a `.codex/config.toml` whose `sandbox_mode` is wider than the
-    profile's autonomy implies - that file needs no flag and no trust prompt, so a
-    widened floor hands every session in the repository more authority than the
-    contract claims - and an `[agents.<name>]` role table, which reads like a read-only
-    boundary and binds nothing on that host.
-12. **Repository shape** — the `shape_signals` block from the scan. Depth, directory
+11. **Repository shape** — the `shape_signals` block from the scan. Depth, directory
     fan-out, oversized source files, and directories no test names change what a harness
     can honestly promise, and the harness cannot fix any of them. Quote the measurement
     and the threshold it crossed. `test_named_directory_ratio` is proximity, never

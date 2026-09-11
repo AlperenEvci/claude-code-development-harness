@@ -92,34 +92,6 @@ python scripts/ai-harness/harness_session.py launch \
 `--tools` and restricted mode would silently take away the `Bash` it needs to run
 the gate before reporting.
 
-## Another host is a vocabulary, not a second launcher
-
-`--host codex` and `--host opencode` translate the same tier into that host's own
-command. Both were measured before either was written
-(`.ai/reports/0016-launcher-host-surface.md`), and two of the measurements are the
-reason the code looks the way it does.
-
-The Codex sandbox is the narrower of the tier's mode and whatever `.codex/config.toml`
-already declares. A repository handing out `danger-full-access` does not promote a
-reader; a reader does not reopen a repository that declares `read-only`.
-
-OpenCode fails open, so the launcher fails closed for it. `opencode run --agent` answers
-a name it cannot resolve with a warning on stderr, a fallback to the *default* agent, and
-exit 0 - and an agent's own permission block does not reach what it delegates to. So a
-launch is refused unless the named agent file exists, is `mode: all`, denies the `task`
-tool, and has a Claude twin declaring the tier being claimed.
-
-```bash
-python scripts/ai-harness/harness_session.py launch   --host opencode --capability reader   --agent harness-codebase-researcher --task "Map the retry path"
-```
-
-Six flags are refused on another host rather than forwarded - `--background`,
-`--restricted`, `--worktree`, `--scope`, `--session-id`, `--surface orca` - each because
-the counterpart was measured absent. Neither binary has a background mode.
-
-One session per directory on OpenCode: two at once collide with `database is locked`,
-and the lock is the project's, so a second lane needs its own worktree.
-
 ## The bus
 
 `.ai/bus/<session-id>/NNNN-<kind>-<id>.json`, append-only. Nothing rewrites or

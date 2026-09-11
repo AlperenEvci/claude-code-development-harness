@@ -94,18 +94,6 @@ COMMIT_GIT = (
 # Denied under every policy: publishing is outward-facing and is the operator's.
 PUSH_GIT = ((r"\bgit\s+push\b", "git push"),)
 
-#: Flags that hand the process more authority than the session was launched
-#: with, on any of the three hosts. Two of them are Codex's, named in its own
-#: `--help` and measured in `.ai/reports/0015-codex-enforcement-surface.md`: a
-#: guard that refuses them in a shell command is the only place the harness can
-#: refuse them at all, since nothing on that host runs a hook.
-WIDENING_TOKENS = (
-    "--dangerously-skip-permissions",
-    "--permission-mode bypassPermissions",
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--dangerously-bypass-hook-trust",
-)
-
 RM_PATTERN = re.compile(r"\brm\s+(-\S+\s+)*-\S*[rR]\S*f|\brm\s+(-\S+\s+)*-\S*f\S*[rR]")
 
 
@@ -211,19 +199,12 @@ def guard_bash(command: str, policy: str) -> None:
                     f"{target.strip()}: name the paths explicitly instead"
                 )
 
-    for token in WIDENING_TOKENS:
+    for token in ("--dangerously-skip-permissions", "--permission-mode bypassPermissions"):
         if token in flat:
             deny(
                 f"refusing a command carrying {token}: a session may not widen "
                 "its own authority"
             )
-    # `--auto` needs a boundary: `--autocompact` is a flag the harness itself
-    # passes, and a substring match would refuse the launcher's own command.
-    if re.search(r"--auto(\s|$)", flat):
-        deny(
-            "refusing a command carrying --auto: on OpenCode it auto-approves "
-            "every permission that is not explicitly denied"
-        )
 
 
 def main() -> int:

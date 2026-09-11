@@ -24,7 +24,6 @@
   "full_gate_command": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
   "smallest_check_command": "pnpm test",
   "main_orchestrator": "claude-code",
-  "hosts": ["claude-code", "codex", "opencode"],
   "implementation_delegate": "codex-cli",
   "research_model": "opus",
   "review_model": "inherit",

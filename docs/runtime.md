@@ -48,12 +48,7 @@ Everything in this guide has a shorter form inside the installed repository, and
 since 1.16.0 it is in two places rather than one.
 
 `CLAUDE.md` and the `AGENTS.md` it imports are the **always-loaded contract**. Both
-load at launch, into every session, before anything is asked. On Claude Code, that
-is; since 2.1.0 the split between them is also the split between what every host
-reads and what only Claude Code executes. `AGENTS.md` carries the working model, the
-project knowledge map, the context budget and the context discipline, because Codex
-and OpenCode load it and never load `CLAUDE.md`. `CLAUDE.md` carries the role table,
-the work graphs, and the session commands, which nothing else can run. That makes them
+load at launch, into every session, before anything is asked. That makes them
 expensive and makes them reliable, and the two facts pull against each other: the
 platform's guidance is to keep an always-loaded file under 200 lines, and every tier
 this generator shipped through 1.15.0 was over it at 250-264. `validate_harness.py`
@@ -87,78 +82,6 @@ package where `harness-session` or `harness-orchestration` carries
 routes through it. That flag keeps its use on `additional_skills` you declare in the
 profile - an operator adding a procedure is describing something they mean to invoke
 themselves.
-
-### Hosts, and what a guarantee degrades into
-
-The profile's `hosts` field names who may open a session in the repository:
-`claude-code` by default, optionally `codex` and `opencode`. It is not
-`implementation_delegate`, which names who executes an accepted contract - a Claude
-Code session delegating to Codex is one host, a repository somebody opens in Codex is
-two.
-
-Declaring a host does not make the Claude Code mechanisms work there, and the harness
-does not pretend otherwise. Every guarantee is reported per host by
-`check_installed.py` as present, absent, or unmeasured, with the reason:
-
-| Guarantee | Claude Code | Codex | OpenCode |
-|---|---|---|---|
-| always-loaded contract | present | present | present |
-| on-demand skills | present | present with `.agents/skills/` | present |
-| manual-only skills | present | absent | absent |
-| pre-tool-use guard | present when guarded | absent | present when guarded |
-| session-start brief | present when guarded | absent | absent |
-| stop check | present when guarded | absent | absent |
-| compaction boundary | present when guarded | absent | unmeasured |
-| read-only agent catalog | present at Standard and Fleet | absent | present |
-| permission floor | absent (launch flags carry the tier) | present with `.codex/config.toml` | present with `opencode.json` |
-
-Every absence in that table was measured, not assumed. Codex documents Claude Code's
-hook surface name for name and fired none of it in six forms under `codex exec`;
-OpenCode has no blocking stop event and no session-start injection; neither honors
-`disable-model-invocation`, so a manual-only skill is model-reachable on both. The runs
-are in `.ai/reports/0012-host-portability-smoke-test.md` and
-`0013-skill-frontmatter-across-hosts.md` of the plugin repository.
-
-The two OpenCode rows that say present are 2.2.0's work, and each is a mechanism rather
-than a sentence, measured in `0014-opencode-enforcement-surface.md`:
-
-- `.opencode/plugins/harness-guard.js` denies by throwing inside
-  `tool.execute.before`. The same secret list and destructive-git list as
-  `hook_guard.py`, the same `HARNESS_HOOKS_DISABLE=1` escape hatch, and the deny
-  reaches the model verbatim - including when the call came from a subagent.
-- `.opencode/agents/*.md` carry a permission block, and OpenCode enforces it by
-  removing the tool: an agent declaring `edit: deny`, `write: deny`, `bash: deny`
-  reports its available tools as `glob, grep, read, skill, task, todowrite,
-  webfetch, websearch`.
-- `opencode.json` states the permission floor the profile's autonomy and network
-  policy imply, in whole-tool form only. A per-command table under `bash` is
-  schema-valid and enforces nothing under `opencode run`, so the harness never
-  writes one and flags one that appears by hand.
-
-The Codex floor is 2.3.0's work, measured in `0015-codex-enforcement-surface.md`:
-
-- `.codex/config.toml` sets `sandbox_mode` for every session started in the repository
-  without a `-s` flag, with no trust prompt, and the sandbox is enforced by the
-  operating system: under a `read-only` floor a shell write fails with an access
-  error and the file does not appear. `[sandbox_workspace_write] network_access`
-  is enforced the same way - the same request returned "cannot reach the remote
-  server" with `false` and `200` with `true`.
-- It is a default, not a ceiling. `codex exec -s workspace-write` overrides it, and
-  the same file can widen a sandbox as easily as narrow one - a project config
-  declaring `danger-full-access` removed the sandbox with no prompt at all. That is
-  why `check_installed.py` reads the installed file back rather than trusting what
-  was rendered, and reports a floor wider than the profile as an error.
-- What is deliberately absent there: no `approval_policy`, which is not observable
-  under `codex exec`, and no `[agents.<name>]` role table. A role's `sandbox_mode`
-  binds nothing in either direction and its `instructions` never reached the agent it
-  named, so the read-only catalog does not cross to this host and the guarantee stays
-  reported as absent. A role table that appears by hand is a validator error and a
-  checker warning.
-
-Set `HARNESS_HOOKS_DISABLE=1` and the guard stands down on both hosts, which is the
-one thing an operator needs when a guard is wrong. The permission floor and the agent
-files do not read that variable: they are configuration, and changing them is an edit
-the operator makes deliberately.
 
 ## The commands that wrap all of this
 
@@ -281,62 +204,6 @@ claude --bg --session-id 82d25ce1-... --permission-mode acceptEdits \
 `--scope` is repeatable; the first becomes the tier's `--add-dir` and the rest are
 appended. `--json` emits argv as a JSON array if you would rather hand it to a script
 than to a shell.
-
-### Launching on another host
-
-`--host` picks the binary and translates the tier into that host's own vocabulary.
-`claude-code` is the default and its command is unchanged.
-
-```bash
-python scripts/ai-harness/harness_session.py launch \
-  --host codex --capability reader \
-  --task "Map how billing retries are wired"
-```
-
-```text
-codex exec --json --sandbox read-only 'Map how billing retries are wired'
-```
-
-The sandbox is the narrower of the tier's own mode and whatever this repository's
-`.codex/config.toml` already declares. A repository that hands out `danger-full-access`
-does not promote a reader, and a reader does not reopen a repository that declares
-`read-only`.
-
-OpenCode has no flag that expresses a tier, so the tier is the agent file, named:
-
-```bash
-python scripts/ai-harness/harness_session.py launch \
-  --host opencode --capability reader \
-  --agent harness-codebase-researcher \
-  --task "Map how billing retries are wired"
-```
-
-The launcher checks that agent before it spends anything, because **this host fails
-open**: `opencode run --agent` warns on stderr, falls back to the *default* agent and
-still exits 0 when the name does not resolve. A probe that hit that path wrote a file
-under an agent that had declared `write: deny`. So the launch is refused unless the
-agent file exists, is `mode: all`, denies the `task` tool, and has a Claude twin
-declaring the tier you asked for.
-
-Six flags are refused on another host rather than forwarded, each because the
-counterpart was measured absent rather than different: `--background`, `--restricted`,
-`--worktree`, `--scope`, `--session-id`, and `--surface orca`. Neither `codex exec` nor
-`opencode run` has a background mode, so `--background` there would silently be a
-foreground run.
-
-| | Claude Code | Codex | OpenCode |
-|---|---|---|---|
-| binary | `claude` | `codex exec` | `opencode run` |
-| tier carried by | launch flags | `--sandbox` | the named agent file |
-| background | yes | no | no |
-| structured return | `--output-format json` | `--output-schema` | none |
-| session id | minted by the harness | `thread_id` | not a UUID |
-| tokens | yes | yes | yes |
-| cost | yes | none reported | reports `0` on a subscription |
-| two at once in one directory | yes | yes | **no** - `database is locked` |
-
-Run more than one OpenCode session at a time and give each its own worktree. The lock
-is the project's, not the machine's: the same pair in two directories both succeed.
 
 ### Dispatch follows the tier
 
@@ -526,7 +393,7 @@ python scripts/ai-harness/harness_bus.py post \
   --from migration-safety-reader --kind finding --capability verifier \
   --summary "Two migrations in the release range are irreversible" \
   --correlation 4c1d8a90-3e77-42bb-9a55-0f6de2b71c84 \
-  --duration-ms 41200 --tokens-in 18400 --tokens-out 900 --host claude-code
+  --duration-ms 41200 --tokens-in 18400 --tokens-out 900
 ```
 
 ```json
@@ -534,7 +401,6 @@ python scripts/ai-harness/harness_bus.py post \
   "correlation_id": "4c1d8a90-3e77-42bb-9a55-0f6de2b71c84",
   "duration_ms": 41200,
   "tokens": {"input": 18400, "output": 900},
-  "host": "claude-code",
   "reported_by": "launcher"
 }
 ```

@@ -54,24 +54,12 @@ first.
 
 The generated harness separates five kinds of context:
 
-- shared stable engineering contract, plus the working model, the project knowledge map, and the context discipline: `AGENTS.md`,
-- Claude-specific orchestration - the role table, the work graphs, the session commands: `CLAUDE.md`,
+- shared stable engineering contract: `AGENTS.md`,
+- Claude-specific orchestration: `CLAUDE.md`,
 - on-demand procedures and isolated workers: `.claude/skills/` and `.claude/agents/`,
 - deterministic multi-agent procedures: `.claude/workflows/`,
 - Greenfield intent and planned architecture: `.ai/project/`,
 - durable/transient evidence and handoffs: `.ai/reports/`, `.ai/decisions/`, `.ai/specs/`, `.ai/backlog.md`, and `.ai/runs/`.
-
-Which of those a session sees depends on the host, and since 2.1.0 the profile
-says which hosts to render for. `AGENTS.md` is the only file Claude Code, Codex, and
-OpenCode all load, which is why the host-neutral half of the contract lives there
-rather than in `CLAUDE.md`, a file the other two never read. A profile declaring a
-`codex` host also gets byte-identical copies of every generated skill under
-`.agents/skills/`, the only skill path Codex reads. A profile declaring an `opencode`
-host gets the one thing that host does enforce: a guard plugin under
-`.opencode/plugins/`, a whole-tool permission floor in `opencode.json`, and read-only
-agents under `.opencode/agents/` whose permission block removes the tools they may not
-use. Nothing else in the layout is per-host, and `check_installed.py` reports for each
-declared host which guarantees actually fire there rather than assuming they all do.
 
 `.ai/project/` records accepted intent before code exists. Reports later record what the repository actually proves. The harness explicitly prevents planned paths and commands from being mislabeled as verified implementation facts.
 

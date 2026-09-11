@@ -26,12 +26,8 @@ from harness_capabilities import (
     AUTOCOMPACT_MAX_TOKENS,
     AUTOCOMPACT_MIN_TOKENS,  # noqa: E402  (sibling module, resolved above)
     CAPABILITY_TIERS,
-    CODEX_CONFIG_PATH,
-    CODEX_SANDBOX_RANK,
     EDIT_ACCEPTING_MODES,
     MODEL_INHERIT,
-    codex_sandbox_floor,
-    read_codex_config,
 )
 
 #: Kept in step with render_harness.SESSION_TOOL_SCRIPTS by a test, rather than
@@ -93,7 +89,6 @@ FORBIDDEN_CODEX_DEFAULTS = (
     "--dangerously-bypass-approvals-and-sandbox",
     "--allow-dangerously-skip-permissions",
     "--dangerously-skip-permissions",
-    "--dangerously-bypass-hook-trust",
     "--skip-git-repo-check",
     "danger-full-access",
 )
@@ -284,40 +279,6 @@ def frontmatter_list(text: str, key: str) -> list[str] | None:
 # example was over it - a gate nothing can pass teaches people to ignore gates. The
 # procedure moved into the `harness-session` skill in 1.16.0 and the examples came
 # in at 173, 176, and 187, so the line is one the generator can actually hold.
-#: The host vocabulary, copied from `render_harness.py`. The validator is the
-#: last automated gate before a package is installable, so it re-derives what
-#: the renderer decided instead of trusting the profile it shipped with.
-ALLOWED_HOSTS = ("claude-code", "codex", "opencode")
-DEFAULT_HOSTS = ("claude-code",)
-
-#: Codex truncates the `AGENTS.md` hierarchy at `project_doc_max_bytes`, which
-#: is 32 KiB by default (`.ai/reports/0012`). Past that the contract is silently
-#: cut mid-file on that host, so the byte size is a check and not a note.
-CODEX_DOC_MAX_BYTES = 32 * 1024
-
-#: The OpenCode surface, mirroring `render_harness`. Measured in
-#: `.ai/reports/0014-opencode-enforcement-surface.md`: a plugin under
-#: `.opencode/plugins/` denies by throwing, a whole-tool permission in
-#: `opencode.json` is enforced by removing the tool, and an agent file's
-#: permission block does the same for that agent. Per-command tables under
-#: `bash` do not enforce, so a generated one is an error rather than a style.
-OPENCODE_PLUGIN_ROOT = ".opencode/plugins"
-OPENCODE_PLUGIN_NAME = "harness-guard.js"
-OPENCODE_AGENT_ROOT = ".opencode/agents"
-OPENCODE_CONFIG_PATH = "opencode.json"
-OPENCODE_READ_ONLY_CAPABILITIES = ("reader", "verifier")
-OPENCODE_AUTONOMY_PERMISSIONS = {
-    "read-only": {"edit": "deny", "bash": "deny"},
-    "approval-required": {"edit": "ask", "bash": "ask"},
-    "repository-write-with-approval": {"edit": "allow", "bash": "ask"},
-    "isolated-auto": {"edit": "allow", "bash": "allow"},
-}
-OPENCODE_NETWORK_PERMISSIONS = {
-    "deny-by-default": {"webfetch": "deny", "websearch": "deny"},
-    "ask-before-network": {"webfetch": "ask", "websearch": "ask"},
-    "approved-for-scoped-tasks": {"webfetch": "allow", "websearch": "allow"},
-}
-
 ALWAYS_LOADED_LINE_TARGET = 200
 
 #: Skills the harness itself relies on, which must therefore be reachable by the
@@ -1159,396 +1120,6 @@ def check_workflows(
                 errors.append(f"{name}.js is not valid JavaScript: {syntax_error}")
 
 
-def hosts_of(profile: dict[str, Any]) -> list[str]:
-    value = profile.get("hosts")
-    if isinstance(value, list) and value:
-        return [str(item).strip().lower() for item in value]
-    return list(DEFAULT_HOSTS)
-
-
-def check_hosts(profile: dict[str, Any], errors: list[str]) -> None:
-    """The declared hosts must be a known, deduplicated set including Claude Code."""
-    value = profile.get("hosts")
-    if value is None:
-        return
-    if not isinstance(value, list) or not value:
-        errors.append("hosts must be a non-empty array of host names")
-        return
-    names = [str(item).strip().lower() for item in value]
-    for name in names:
-        if name not in ALLOWED_HOSTS:
-            errors.append(f"unknown host in profile: {name!r}")
-    if len(set(names)) != len(names):
-        errors.append("hosts lists the same host twice")
-    if "claude-code" not in names:
-        errors.append("hosts must include claude-code; the package always renders it")
-
-
-def check_codex_contract_size(
-    profile: dict[str, Any], payload: Path, errors: list[str], warnings: list[str]
-) -> None:
-    """On a Codex host, `AGENTS.md` past the byte cap is a truncated contract.
-
-    Claude Code and OpenCode have no such cap, so this is reported only for the
-    host that has one, and it is measured in bytes because that is the unit
-    `project_doc_max_bytes` counts.
-    """
-    agents = payload / "AGENTS.md"
-    if "codex" not in hosts_of(profile) or not agents.is_file():
-        return
-    size = agents.stat().st_size
-    if size >= CODEX_DOC_MAX_BYTES:
-        errors.append(
-            f"AGENTS.md is {size} bytes and this profile declares a codex host; "
-            f"Codex reads at most {CODEX_DOC_MAX_BYTES} bytes of the AGENTS.md "
-            "hierarchy, so the rest of the contract would be silently dropped"
-        )
-    elif size > CODEX_DOC_MAX_BYTES * 3 // 4:
-        warnings.append(
-            f"AGENTS.md is {size} bytes, within a quarter of the Codex "
-            f"{CODEX_DOC_MAX_BYTES}-byte cap on the AGENTS.md hierarchy"
-        )
-
-
-def check_codex_skill_mirror(
-    profile: dict[str, Any], payload: Path, errors: list[str]
-) -> None:
-    """`.agents/skills/` exists exactly when a Codex host is declared, byte for byte.
-
-    Same rule as the runtime scripts: a copy that is not identical to the file
-    the suite tested is an untested variant, and here it would be one the two
-    hosts disagree about, which is worse than an absent file.
-    """
-    source_root = payload / ".claude" / "skills"
-    mirror_root = payload / ".agents" / "skills"
-    declared = "codex" in hosts_of(profile)
-
-    if not declared:
-        if mirror_root.exists():
-            errors.append(
-                "no codex host is declared but .agents/skills/ is present; it "
-                "would be a second copy of every skill that nothing keeps current"
-            )
-        return
-
-    if not mirror_root.is_dir():
-        errors.append(
-            "profile declares a codex host but .agents/skills/ is missing; "
-            "Codex reads that path and never reads .claude/skills/"
-        )
-        return
-
-    expected = {
-        path.relative_to(source_root).as_posix()
-        for path in source_root.rglob("*")
-        if path.is_file()
-    }
-    actual = {
-        path.relative_to(mirror_root).as_posix()
-        for path in mirror_root.rglob("*")
-        if path.is_file()
-    }
-    for rel in sorted(expected - actual):
-        errors.append(f"codex skill mirror is missing .agents/skills/{rel}")
-    for rel in sorted(actual - expected):
-        errors.append(
-            f".agents/skills/{rel} has no counterpart under .claude/skills/; "
-            "the mirror is a copy, not a place to add files"
-        )
-    for rel in sorted(expected & actual):
-        if sha256(source_root / rel) != sha256(mirror_root / rel):
-            errors.append(
-                f".agents/skills/{rel} differs from .claude/skills/{rel}; the "
-                "two hosts would read different instructions from one harness"
-            )
-
-
-def opencode_permission_floor(profile: dict[str, Any]) -> dict[str, str]:
-    """The floor the renderer derives, recomputed here rather than trusted.
-
-    Same shape as the renderer's function and deliberately a second
-    implementation of the same table: a validator that imported the renderer
-    would agree with it by construction, including when both are wrong.
-    """
-    floor: dict[str, str] = {}
-    floor.update(OPENCODE_AUTONOMY_PERMISSIONS.get(str(profile.get("autonomy", "")), {}))
-    floor.update(
-        OPENCODE_NETWORK_PERMISSIONS.get(str(profile.get("network_access", "")), {})
-    )
-    return floor
-
-
-def parse_check_javascript(path: Path, warnings: list[str]) -> str | None:
-    """Return a parse error for a JavaScript module, or None.
-
-    Measured on OpenCode 1.18.29: a plugin whose module body throws leaves
-    `opencode run` with no session at all, while one that fails to parse is
-    skipped silently. Both are bad, and only the second is detectable from
-    here - so it is detected. Node is used when it is on PATH and its absence
-    is reported as a warning rather than guessed at: a hand-rolled JavaScript
-    parser in this file would be a second thing to be wrong.
-    """
-    node = shutil.which("node")
-    if node is None:
-        warnings.append(
-            f"{path.name} was not parse-checked: node is not on PATH. A malformed "
-            "OpenCode plugin is skipped silently by the host"
-        )
-        return None
-    with tempfile.TemporaryDirectory() as tmp:
-        # `.mjs` so `node --check` parses it as a module; the file itself is
-        # `.js`, which is what OpenCode reads.
-        probe = Path(tmp) / "harness-guard-check.mjs"
-        probe.write_bytes(path.read_bytes())
-        try:
-            result = subprocess.run(
-                [node, "--check", str(probe)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            warnings.append(f"{path.name} could not be parse-checked: {exc}")
-            return None
-    if result.returncode == 0:
-        return None
-    detail = (result.stderr or result.stdout or "").strip().splitlines()
-    return detail[0] if detail else f"node --check exited {result.returncode}"
-
-
-def check_opencode_guard(
-    profile: dict[str, Any],
-    payload: Path,
-    errors: list[str],
-    warnings: list[str],
-) -> None:
-    """The guard plugin exists exactly when it can fire, and is the tested copy."""
-    declared = "opencode" in hosts_of(profile)
-    guarded = str(profile.get("hooks_policy", "")) == "guarded"
-    target = payload / OPENCODE_PLUGIN_ROOT / OPENCODE_PLUGIN_NAME
-    expected = declared and guarded
-
-    if not expected:
-        if target.exists():
-            reason = (
-                "no opencode host is declared"
-                if not declared
-                else f"the hooks policy is {profile.get('hooks_policy')}"
-            )
-            errors.append(
-                f"{OPENCODE_PLUGIN_ROOT}/{OPENCODE_PLUGIN_NAME} is present but "
-                f"{reason}; a guard nothing declared is authority nobody reviewed"
-            )
-        return
-
-    if not target.is_file():
-        errors.append(
-            f"profile declares an opencode host with guarded hooks but "
-            f"{OPENCODE_PLUGIN_ROOT}/{OPENCODE_PLUGIN_NAME} is missing; the "
-            "PreToolUse guard has no counterpart on that host"
-        )
-        return
-
-    source = (
-        Path(__file__).resolve().parents[1] / "assets" / "opencode" / OPENCODE_PLUGIN_NAME
-    )
-    if source.is_file() and source.read_bytes() != target.read_bytes():
-        errors.append(
-            f"{OPENCODE_PLUGIN_ROOT}/{OPENCODE_PLUGIN_NAME} differs from the "
-            "plugin's copy; a hand-edited guard is an untested variant that can "
-            "deny a call that should have been allowed"
-        )
-
-    problem = parse_check_javascript(target, warnings)
-    if problem:
-        errors.append(
-            f"{OPENCODE_PLUGIN_ROOT}/{OPENCODE_PLUGIN_NAME} does not parse: {problem}"
-        )
-
-
-def check_codex_config(
-    profile: dict[str, Any], payload: Path, errors: list[str]
-) -> None:
-    """`.codex/config.toml` states the sandbox the profile implies, and only that.
-
-    Three refusals, in the order they matter. A floor that does not match the
-    profile is a contract that disagrees with itself. A floor wider than the
-    profile is the widening surface report 0015 measured - a repository that
-    hands the next `codex exec` a bigger sandbox than its own policy claims. And
-    an `[agents.<name>]` role table is refused outright: its `sandbox_mode` was
-    measured to bind nothing, so a rendered one would read like the guarantee the
-    Claude Code catalog gives and give none of it.
-    """
-    declared = "codex" in hosts_of(profile)
-    target = payload / CODEX_CONFIG_PATH
-    floor = codex_sandbox_floor(profile)
-
-    if not declared:
-        if target.exists():
-            errors.append(
-                f"no codex host is declared but {CODEX_CONFIG_PATH} is present"
-            )
-        return
-
-    if not floor:
-        return
-
-    if not target.is_file():
-        errors.append(
-            f"profile declares a codex host but {CODEX_CONFIG_PATH} is missing; "
-            "the sandbox floor would be prose"
-        )
-        return
-
-    actual = read_codex_config(target.read_text(encoding="utf-8"))
-
-    expected_mode = floor["sandbox_mode"]
-    actual_mode = actual["sandbox_mode"]
-    if actual_mode != expected_mode:
-        wider = CODEX_SANDBOX_RANK.get(actual_mode, 99) > CODEX_SANDBOX_RANK.get(
-            expected_mode, 0
-        )
-        errors.append(
-            f"{CODEX_CONFIG_PATH} sets sandbox_mode to {actual_mode!r}; the "
-            f"profile's autonomy implies {expected_mode!r}"
-            + (
-                " - and that widens every codex session in the repository"
-                if wider
-                else ""
-            )
-        )
-
-    if "network_access" in floor and actual["network_access"] != floor["network_access"]:
-        errors.append(
-            f"{CODEX_CONFIG_PATH} sets network_access to "
-            f"{actual['network_access']!r}; the profile's network policy implies "
-            f"{floor['network_access']!r}"
-        )
-
-    for role in actual["roles"]:
-        errors.append(
-            f"{CODEX_CONFIG_PATH} declares an agent role [agents.{role}]; measured "
-            "on 0.153.4 a role's sandbox_mode binds nothing in either direction, "
-            "so the harness never generates one"
-        )
-
-
-def check_opencode_config(
-    profile: dict[str, Any], payload: Path, errors: list[str]
-) -> None:
-    """`opencode.json` states the floor the profile implies, and only that."""
-    declared = "opencode" in hosts_of(profile)
-    target = payload / OPENCODE_CONFIG_PATH
-    floor = opencode_permission_floor(profile)
-
-    if not declared:
-        if target.exists():
-            errors.append(
-                f"no opencode host is declared but {OPENCODE_CONFIG_PATH} is present"
-            )
-        return
-
-    if not floor:
-        return
-
-    if not target.is_file():
-        errors.append(
-            f"profile declares an opencode host but {OPENCODE_CONFIG_PATH} is "
-            "missing; the permission floor would be prose"
-        )
-        return
-
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        errors.append(f"{OPENCODE_CONFIG_PATH} is not readable JSON: {exc}")
-        return
-
-    actual = data.get("permission")
-    if not isinstance(actual, dict):
-        errors.append(f"{OPENCODE_CONFIG_PATH} has no permission block")
-        return
-
-    for tool, value in sorted(floor.items()):
-        if actual.get(tool) != value:
-            errors.append(
-                f"{OPENCODE_CONFIG_PATH} sets permission.{tool} to "
-                f"{actual.get(tool)!r}; the profile's policy implies {value!r}"
-            )
-    for tool, value in sorted(actual.items()):
-        if isinstance(value, dict):
-            errors.append(
-                f"{OPENCODE_CONFIG_PATH} sets permission.{tool} to a per-command "
-                "table; measured on 1.18.29, those do not enforce under "
-                "`opencode run`, so the harness never generates one"
-            )
-
-
-def check_opencode_agents(
-    profile: dict[str, Any], payload: Path, errors: list[str]
-) -> None:
-    """Every read-only Claude agent has an OpenCode twin that cannot write."""
-    declared = "opencode" in hosts_of(profile)
-    agent_root = payload / OPENCODE_AGENT_ROOT
-
-    if not declared:
-        if agent_root.exists():
-            errors.append(
-                f"no opencode host is declared but {OPENCODE_AGENT_ROOT}/ is present"
-            )
-        return
-
-    source_root = payload / ".claude" / "agents"
-    expected: set[str] = set()
-    for source in sorted(source_root.glob("*.md")) if source_root.is_dir() else []:
-        text = source.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if line.startswith("capability:"):
-                if line.split(":", 1)[1].strip() in OPENCODE_READ_ONLY_CAPABILITIES:
-                    expected.add(source.stem)
-                break
-
-    actual = {path.stem for path in agent_root.glob("*.md")} if agent_root.is_dir() else set()
-    for name in sorted(expected - actual):
-        errors.append(
-            f"{OPENCODE_AGENT_ROOT}/{name}.md is missing; the read-only agent "
-            "catalog would exist on one host and not the other"
-        )
-    for name in sorted(actual - expected):
-        errors.append(
-            f"{OPENCODE_AGENT_ROOT}/{name}.md has no read-only Claude agent behind "
-            "it; an OpenCode agent the harness did not derive is unreviewed authority"
-        )
-
-    for name in sorted(expected & actual):
-        text = (agent_root / f"{name}.md").read_text(encoding="utf-8")
-        for required in ("edit: deny", "write: deny"):
-            if required not in text:
-                errors.append(
-                    f"{OPENCODE_AGENT_ROOT}/{name}.md does not declare "
-                    f"`{required}`; on OpenCode that permission line is what "
-                    "removes the tool, so without it the agent is not read-only"
-                )
-        if "task: false" not in text:
-            # Measured in `.ai/reports/0016`: an agent denied edit, write and
-            # bash called `task` and its delegate wrote the file. The permission
-            # block does not reach what the agent delegates to.
-            errors.append(
-                f"{OPENCODE_AGENT_ROOT}/{name}.md does not deny the `task` tool; "
-                "an OpenCode agent's permission block does not bind what it "
-                "delegates to, so a read-only agent that can delegate is not "
-                "read-only"
-            )
-        if "mode: all" not in text:
-            # `opencode run --agent <name>` warns and falls back to the default
-            # agent when the named agent is subagent-only, and returns 0.
-            errors.append(
-                f"{OPENCODE_AGENT_ROOT}/{name}.md is not `mode: all`; "
-                "`opencode run --agent` falls back to the default agent for a "
-                "subagent-only name and still exits 0, so the tier would not bind"
-            )
-
-
 def check_always_loaded_size(payload: Path, errors: list[str]) -> None:
     """Measure the contract that loads on every session and fail it if it is big.
 
@@ -1752,11 +1323,15 @@ def check_context_policy(
                 f"AGENTS.md does not state the configured working band {expected_band!r}"
             )
 
-        # 2.1.0 moved the discipline out of `CLAUDE.md`, which only Claude Code
-        # reads, into the one file every host loads. Both sections are checked
-        # on the same text for that reason.
+    claude = payload / "CLAUDE.md"
+    if claude.is_file():
+        text = claude.read_text(encoding="utf-8")
         if "## Context discipline" not in text:
-            errors.append("AGENTS.md is missing the Context discipline section")
+            errors.append("CLAUDE.md is missing the Context discipline section")
+        elif expected_band not in text:
+            errors.append(
+                f"CLAUDE.md does not state the configured working band {expected_band!r}"
+            )
 
 
 ORCA_SECTION = "### Watching a session in Orca"
@@ -2092,13 +1667,6 @@ def main() -> None:
         if helper.is_file() and not (helper.stat().st_mode & 0o111):
             warnings.append("fleet worktree helper is not executable")
 
-    check_hosts(profile, errors)
-    check_codex_contract_size(profile, payload, errors, warnings)
-    check_codex_skill_mirror(profile, payload, errors)
-    check_opencode_guard(profile, payload, errors, warnings)
-    check_codex_config(profile, payload, errors)
-    check_opencode_config(profile, payload, errors)
-    check_opencode_agents(profile, payload, errors)
     check_context_policy(profile, payload, errors, warnings)
     check_important_paths_rule(profile, payload, errors, warnings)
     check_model_invocable_skills(profile, payload, errors, warnings)
